@@ -1,0 +1,131 @@
+{
+  "id": "IMPL-4",
+  "title": "Fix runtime config update order (write file first, then update runtime config, then reload)",
+  "status": "pending",
+  "context_package_path": ".workflow/active/WFS-settings-persistence-fix/.process/context-package.json",
+  "meta": {
+    "type": "bugfix",
+    "agent": "@code-developer",
+    "execution_group": "parallel-error-handling",
+    "tdd_workflow": true,
+    "max_iterations": 3,
+    "test_framework": "pytest",
+    "coverage_target": "85%"
+  },
+  "context": {
+    "requirements": [
+      "Reorder operations in POST /api/settings endpoint: write .env file first",
+      "Update runtime config only after successful file write",
+      "Call Config.reload() after successful write and runtime update",
+      "Verify runtime config matches .env file content after save",
+      "Ensure atomic operation: all-or-nothing"
+    ],
+    "focus_paths": [
+      "novel_agent/web/app.py:289-343",
+      "novel_agent/config.py",
+      "novel_agent/tests/test_settings_save_order.py"
+    ],
+    "acceptance": [
+      "4 test cases pass: verify by pytest novel_agent/tests/test_settings_save_order.py -v",
+      "File write happens before runtime update: verify by rg order in app.py save_settings",
+      "Config.reload() called after write: verify by rg 'Config.reload\\(\\)' novel_agent/web/app.py",
+      "Runtime config matches .env after save: verify by test"
+    ],
+    "depends_on": ["IMPL-1", "IMPL-2"],
+    "shared_context": {
+      "tech_stack": ["Python", "FastAPI", "python-dotenv", "pytest"],
+      "pattern": "Write file → Verify success → Update runtime → Reload config",
+      "conventions": ["Fail fast on write errors", "Don't update runtime if write fails", "Always reload after successful write"]
+    }
+  },
+  "flow_control": {
+    "pre_analysis": [
+      {
+        "step": "load_context_package",
+        "action": "Load context package for current order analysis",
+        "commands": ["Read({{context_package_path}})"],
+        "output_to": "context_package"
+      },
+      {
+        "step": "analyze_current_save_order",
+        "action": "Analyze save_settings endpoint operation order",
+        "commands": [
+          "bash(rg 'def save_settings' novel_agent/web/app.py -A 60 | head -70)",
+          "bash(rg 'config.llm.api_key|env_file.write_text' novel_agent/web/app.py -B 2 -A 2 -n)"
+        ],
+        "output_to": "save_order_analysis"
+      }
+    ],
+    "implementation_approach": [
+      {
+        "step": 1,
+        "title": "Red Phase - Write failing tests for correct save order",
+        "description": "Write 4 test cases that verify file write happens before runtime update",
+        "tdd_phase": "red",
+        "modification_points": [
+          "Create 1 test file: novel_agent/tests/test_settings_save_order.py with 4 test cases",
+          "Test 1: test_save_settings_writes_file_first",
+          "Test 2: test_save_settings_runtime_update_after_write",
+          "Test 3: test_save_settings_reload_after_update",
+          "Test 4: test_save_settings_atomic_operation"
+        ],
+        "logic_flow": [
+          "Create novel_agent/tests/test_settings_save_order.py file",
+          "Write 4 test cases mocking write/update/reload calls and verifying order",
+          "Run pytest to verify tests fail (wrong order)"
+        ],
+        "depends_on": [],
+        "output": "4 failing test cases for save order"
+      },
+      {
+        "step": 2,
+        "title": "Green Phase - Reorder save_settings operations to correct sequence",
+        "description": "Reorder operations in save_settings: write → verify → update → reload",
+        "tdd_phase": "green",
+        "modification_points": [
+          "Move 1 code block: lines 328-331 (runtime update) to after line 325 (file write)",
+          "Add 1 function call: Config.reload() after runtime update",
+          "Wrap entire operation in try-except for atomicity",
+          "Add rollback logic if reload fails"
+        ],
+        "logic_flow": [
+          "Open novel_agent/web/app.py save_settings endpoint (lines 289-343)",
+          "Cut lines 328-331 (config.llm updates)",
+          "Paste after line 325 (env_file.write_text) inside try block",
+          "Add Config.reload() call after runtime config update",
+          "Ensure file write error prevents runtime update and reload",
+          "Run pytest to verify all 4 tests pass"
+        ],
+        "depends_on": [1],
+        "output": "Corrected save_settings operation order"
+      },
+      {
+        "step": 3,
+        "title": "Refactor Phase - Extract save operation into helper method",
+        "description": "Refactor save_settings to extract save-and-reload logic into helper",
+        "tdd_phase": "refactor",
+        "modification_points": [
+          "Extract 1 helper method: _save_and_reload_config(settings_dict, env_path)",
+          "Add 1 validation: verify .env file content matches runtime config after reload",
+          "Improve 1 rollback mechanism: restore previous config if reload fails",
+          "Add 1 logging statement: log successful save with values written"
+        ],
+        "logic_flow": [
+          "Extract save-and-reload logic into helper method",
+          "Implement rollback: if reload fails, restore previous .env and runtime config",
+          "Add validation: read .env file after save, compare with runtime config values",
+          "Add logging.info with saved values (sanitized for secrets)",
+          "Update save_settings to call helper and handle return value",
+          "Run pytest --cov to verify coverage",
+          "Run pytest novel_agent/tests/ -v to ensure no regressions"
+        ],
+        "depends_on": [2],
+        "output": "Refactored save-and-reload helper"
+      }
+    ],
+    "target_files": [
+      "novel_agent/web/app.py:save_settings:289-343",
+      "novel_agent/tests/test_settings_save_order.py"
+    ]
+  }
+}

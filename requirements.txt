@@ -1,0 +1,25 @@
+# Core
+openai>=1.0.0
+fastapi>=0.110.0
+uvicorn>=0.20.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+anyio>=4.0.0
+
+# Web
+jinja2>=3.0.0
+aiofiles>=23.0.0
+python-multipart>=0.0.6
+
+# RAG & Knowledge Base
+numpy>=1.24.0
+chromadb>=0.4.0
+
+# System monitoring
+psutil>=5.9.0
+
+# HTTP client for API calls (SiliconFlow, etc.)
+httpx>=0.25.0
+
+# Optional: For better local embeddings, install:
+# pip install sentence-transformers

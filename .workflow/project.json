@@ -1,0 +1,135 @@
+{
+  "project_name": "AGENT",
+  "initialized_at": "2026-01-13T14:50:57Z",
+  "overview": {
+    "description": "Novel Agent - An AI-powered multi-agent collaborative novel writing system with knowledge base, real-time WebSocket communication, and comprehensive project management capabilities.",
+    "technology_stack": {
+      "languages": [
+        {
+          "name": "Python",
+          "file_count": 74,
+          "primary": true
+        }
+      ],
+      "frameworks": [
+        "FastAPI",
+        "Pydantic",
+        "Jinja2",
+        "ChromaDB",
+        "OpenAI SDK"
+      ],
+      "build_tools": [
+        "PyInstaller",
+        "pytest"
+      ],
+      "test_frameworks": [
+        "pytest"
+      ]
+    },
+    "architecture": {
+      "style": "Coordinator-Worker Pattern with Layered Architecture",
+      "layers": [
+        "Presentation Layer (FastAPI web interface with WebSocket support)",
+        "Business Logic Layer (Multi-agent coordination and novel generation workflows)",
+        "Data Access Layer (JSON file storage with knowledge base and project management)"
+      ],
+      "patterns": [
+        "Coordinator-Worker Pattern",
+        "Repository Pattern",
+        "Factory Pattern",
+        "Observer Pattern (WebSocket event streaming)",
+        "Strategy Pattern (Agent specializations)"
+      ]
+    },
+    "key_components": [
+      {
+        "name": "Web Application Server",
+        "path": "novel_agent/web/app.py",
+        "description": "FastAPI application with RESTful API endpoints, WebSocket support for real-time updates, static file serving, and Jinja2 templating. Manages API settings, project CRUD operations, and agent coordination.",
+        "importance": "high"
+      },
+      {
+        "name": "Multi-Agent System",
+        "path": "novel_agent/agents/",
+        "description": "Eight specialized agents (Worldbuilder, Outliner, ChapterWriter, Polisher, Evaluator, ContinuousWriter, Communicator, MessageBus) implementing the Coordinator-Worker pattern for collaborative novel generation.",
+        "importance": "high"
+      },
+      {
+        "name": "Configuration Management",
+        "path": "novel_agent/agent_config.py",
+        "description": "Pydantic-based configuration system with LLM defaults, API endpoints, writing configs, and server settings. Manages agent behaviors and API integration.",
+        "importance": "high"
+      },
+      {
+        "name": "Data Persistence Layer",
+        "path": "novel_agent/data/",
+        "description": "JSON-based storage system for agent configurations, global API settings, projects metadata, and trend statistics. Currently affected by settings persistence bug.",
+        "importance": "high"
+      },
+      {
+        "name": "Knowledge Base System",
+        "path": "novel_agent/knowledge_base/",
+        "description": "Three-layer architecture (data/logic/application) with hybrid vector+keyword search, semantic chunking, and chapter management using ChromaDB.",
+        "importance": "medium"
+      },
+      {
+        "name": "Context Management",
+        "path": "novel_agent/context/",
+        "description": "Manages character profiles, world-building settings, and narrative context throughout the writing process.",
+        "importance": "medium"
+      },
+      {
+        "name": "Utility Modules",
+        "path": "novel_agent/utils/",
+        "description": "Supporting utilities including caching, dashboard metrics, export functionality, logging, MCP management, retry logic, token statistics, and validators.",
+        "importance": "medium"
+      },
+      {
+        "name": "Project Manager",
+        "path": "novel_agent/project_manager.py",
+        "description": "Handles project lifecycle operations including creation, loading, saving, and deletion of novel writing projects.",
+        "importance": "medium"
+      }
+    ]
+  },
+  "features": [],
+  "development_index": {
+    "feature": [],
+    "enhancement": [],
+    "bugfix": [
+      {
+        "id": "BUG-001",
+        "title": "Settings Persistence Bug - AGENT API Configuration Not Saving",
+        "description": "Global API configuration settings (api_base, api_key, model) are not persisting after page refresh. Settings are saved to .env file but frontend doesn't reload or validate persistence.",
+        "file": "novel_agent/web/app.py",
+        "status": "pending",
+        "priority": "high",
+        "related_components": [
+          "novel_agent/web/app.py (lines 277-324: save_settings endpoint)",
+          "novel_agent/data/global_api_config.json",
+          "novel_agent/config.py (LLMConfig class)"
+        ]
+      }
+    ],
+    "refactor": [],
+    "docs": []
+  },
+  "statistics": {
+    "total_features": 0,
+    "total_sessions": 0,
+    "last_updated": "2026-01-13T14:50:57Z"
+  },
+  "_metadata": {
+    "initialized_by": "cli-explore-agent",
+    "analysis_timestamp": "2026-01-13T14:50:57Z",
+    "analysis_mode": "deep-scan",
+    "analysis_findings": {
+      "python_files_count": 74,
+      "key_modules_identified": 8,
+      "architecture_pattern": "Coordinator-Worker with Layered Architecture",
+      "settings_bug_location": "novel_agent/web/app.py:289-324 (save_settings endpoint)",
+      "settings_storage_mechanism": ".env file with runtime config object",
+      "potential_bug_cause": "Frontend not reloading configuration after save, or config object not synchronized with .env file changes"
+    }
+  }
+}

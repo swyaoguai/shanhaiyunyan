@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(/workflow:session:start)",
+      "Skill(/workflow:session:start:*)",
+      "Skill(/workflow:init)",
+      "Skill(/workflow:init:*)",
+      "Skill(/workflow:tools:context-gather)",
+      "Skill(/workflow:tools:context-gather:*)",
+      "Skill(/workflow:tools:test-context-gather)",
+      "Skill(/workflow:tools:test-context-gather:*)",
+      "Skill(/workflow:tools:conflict-resolution)",
+      "Skill(/workflow:tools:conflict-resolution:*)",
+      "Skill(/workflow:tools:task-generate-tdd)",
+      "Skill(/workflow:tools:task-generate-tdd:*)",
+      "Skill(/workflow:execute)",
+      "Skill(/workflow:execute:*)"
+    ]
+  }
+}

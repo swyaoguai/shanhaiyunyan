@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文思Agent - 智能小说创作</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <link rel="apple-touch-icon" href="/static/logo.png">
+    <link rel="stylesheet" href="/static/style.css?v=3.6">
+    <!-- 引入 Remix Icon (使用国内CDN) -->
+    <link href="https://cdn.bootcdn.net/ajax/libs/remixicon/3.5.0/remixicon.css" rel="stylesheet">
+    <!-- 引入 Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Inter:wght@400;500;600&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <!-- 背景层 -->
+    <div id="app-bg"></div>
+    <div id="app-overlay"></div>
+
+    <div class="workbench">
+        <!-- 1. 资源栏 (极左) -->
+        <aside class="resource-bar">
+            <div class="logo">
+                <img src="/static/logo.png" alt="文思Agent" style="width: 32px; height: 32px; border-radius: 6px;">
+            </div>
+
+            <div class="res-group">
+                <div class="res-item active" data-module="dashboard" title="仪表盘">
+                    <i class="ri-dashboard-line"></i>
+                </div>
+                <div class="res-item" data-module="infinite-write" title="无限续写">
+                    <i class="ri-infinity-line"></i>
+                </div>
+                <div class="res-item" data-module="write" title="协作创作">
+                    <i class="ri-quill-pen-line"></i>
+                </div>
+                <div class="res-item" data-module="world" title="资料库">
+                    <i class="ri-book-mark-line"></i>
+                </div>
+            </div>
+
+            <div class="res-group bottom">
+                <!-- 侧边栏收缩按钮 -->
+                <div class="res-item" id="sidebar-toggle-btn" title="收缩/展开侧边栏">
+                    <i class="ri-side-bar-line"></i>
+                </div>
+                <div class="res-item" data-module="settings" title="设置">
+                    <i class="ri-settings-4-line"></i>
+                </div>
+                <div class="res-item" data-module="about" title="关于">
+                    <i class="ri-information-line"></i>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 2. 导航栏 (侧边) -->
+        <nav class="nav-panel" id="nav-panel">
+            <!-- 项目选择器 -->
+            <div class="project-selector">
+                <div class="project-current" id="project-current">
+                    <i class="ri-book-2-line"></i>
+                    <span id="current-project-name">加载中...</span>
+                    <i class="ri-arrow-down-s-line"></i>
+                </div>
+                <div class="project-dropdown hidden" id="project-dropdown">
+                    <div id="project-list">
+                        <!-- 动态生成 -->
+                    </div>
+                    <div class="project-add" id="project-add">
+                        <i class="ri-add-line"></i> 新建小说项目
+                    </div>
+                </div>
+            </div>
+
+            <div class="nav-header">
+                <h3 id="nav-title">仪表盘</h3>
+                <div class="nav-actions">
+                    <i class="ri-add-line" id="nav-action-add"></i>
+                </div>
+            </div>
+
+            <div class="nav-content scrollbar-hide">
+                <!-- 动态内容 -->
+                <div id="nav-list-container"></div>
+            </div>
+        </nav>
+
+        <!-- 3. 主工作区 -->
+        <main class="workspace" id="workspace">
+            <div class="workspace-header">
+                <div class="breadcrumbs" id="breadcrumbs">
+                    <span>我的项目</span>
+                    <i class="ri-arrow-right-s-line"></i>
+                    <span class="current">概览</span>
+                </div>
+                <div class="workspace-actions">
+                    <button type="button" class="icon-btn" id="toggle-focus" title="专注模式"><i
+                            class="ri-fullscreen-line"></i></button>
+                    <button type="button" class="icon-btn" id="toggle-copilot" title="AI助手"><i
+                            class="ri-sparkling-fill"></i></button>
+                </div>
+            </div>
+
+            <div class="workspace-content scrollbar-custom" id="main-view">
+                <!-- 视图内容挂载点 -->
+                <div class="empty-state">
+                    <i class="ri-quill-pen-line"></i>
+                    <h2>开始你的创作</h2>
+                </div>
+            </div>
+        </main>
+
+        <!-- 4. Copilot (右侧可拖动) -->
+        <aside class="copilot-panel collapsed" id="copilot-panel">
+            <div class="copilot-drag-handle" id="copilot-drag-handle"></div>
+            <div class="copilot-header">
+                <i class="ri-sparkling-fill" style="color: var(--accent-color);"></i>
+                <span>AI 写作助手</span>
+                <div style="flex: 1;"></div>
+                <button class="icon-btn new-chat-btn" id="new-chat-btn" title="新建会话"><i
+                        class="ri-chat-new-line"></i></button>
+                <button class="icon-btn close-copilot"><i class="ri-close-line"></i></button>
+            </div>
+            <div class="copilot-body scrollbar-custom" id="copilot-messages">
+                <div class="msg ai">你好！我是你的写作助手。试试：
+                    • 输入 <b>@</b> 引用角色、章节或设定
+                    • 直接提问或发指令</div>
+            </div>
+            <div class="copilot-input">
+                <!-- @引用提示框 - 必须在copilot-input内部才能正确定位 -->
+                <div id="mention-popup" class="mention-popup hidden">
+                    <!-- 动态生成候选列表 -->
+                </div>
+                <div class="copilot-input-resize-handle" id="copilot-resize-handle" title="拖动调整输入框高度"></div>
+                <div class="copilot-input-wrapper">
+                    <textarea id="copilot-input-text" placeholder="输入内容，@ 可引用角色/章节..." rows="2"></textarea>
+                    <button id="copilot-send-btn" title="发送"><i class="ri-send-plane-fill"></i></button>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- 模态框容器 -->
+    <div id="modal-container" class="hidden"></div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden">操作成功</div>
+
+    <!-- 按正确顺序加载模块化脚本 -->
+    <!-- 1. 工具函数（无依赖） -->
+    <script src="/static/app-utils.js?v=1.0"></script>
+    <!-- 2. 主题设置（依赖 utils） -->
+    <script src="/static/app-theme.js?v=1.0"></script>
+    <!-- 3. 核心状态和初始化（依赖 utils, theme） -->
+    <script src="/static/app-core.js?v=1.0"></script>
+    <!-- 4. 导航渲染（依赖 core） -->
+    <script src="/static/app-nav.js?v=1.0"></script>
+    <!-- 5. 资料库管理（依赖 core, nav） -->
+    <script src="/static/app-knowledge.js?v=1.0"></script>
+    <!-- 6. 章节管理（依赖 core, nav） -->
+    <script src="/static/app-chapters.js?v=1.0"></script>
+    <!-- 7. 设置模块（依赖 core, theme） -->
+    <script src="/static/app-settings.js?v=1.2"></script>
+    <!-- 8. Copilot增强（依赖 core） -->
+    <script src="/static/app-copilot.js?v=1.0"></script>
+    <!-- 9. 项目管理（依赖 core） -->
+    <script src="/static/app-project.js?v=1.0"></script>
+    <!-- 10. 连续写作功能 -->
+    <script src="/static/continuous_write.js?v=1.6"></script>
+    <!-- 10.1 无限续写章节编辑器 -->
+    <script src="/static/iw-editor.js?v=1.0"></script>
+    <!-- 11. 提示词管理 -->
+    <script src="/static/prompt_manager.js?v=2.0"></script>
+    <!-- 12. Token统计 -->
+    <script src="/static/app-token-stats.js?v=1.0"></script>
+    <!-- 13. 热点/热梗搜索 -->
+    <script src="/static/app-trends.js?v=1.3"></script>
+
+    <!-- 13. 初始化应用 -->
+    <script>
+        // 等待DOM加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function () {
+            console.log('[App] DOM加载完成，开始初始化...');
+            if (typeof init === 'function') {
+                init().then(() => {
+                    console.log('[App] 应用初始化完成');
+                }).catch(err => {
+                    console.error('[App] 初始化失败:', err);
+                });
+            } else {
+                console.error('[App] init函数未定义，请检查app-core.js是否正确加载');
+            }
+        });
+    </script>
+</body>
+
+</html>

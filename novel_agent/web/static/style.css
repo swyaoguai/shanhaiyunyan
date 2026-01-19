@@ -1,0 +1,988 @@
+/* 
+ * Novel Studio - Professional Workbench Theme
+ * Author: Agent Antigravity
+ */
+
+:root {
+    /* ----- 核心变量（由JS动态控制） ----- */
+    --primary-hue: 250;
+    /* 背景色 - 由调色滑块控制 */
+    --bg-main: hsl(var(--primary-hue), 30%, 8%);
+    --bg-dark: hsl(var(--primary-hue), 25%, 6%);
+    --bg-panel: hsla(var(--primary-hue), 30%, 10%, 0.95);
+    --bg-workspace: hsla(var(--primary-hue), 20%, 8%, 0.3);
+
+    /* 边框和文字色 - 由JS动态控制 */
+    --border-color: hsla(var(--primary-hue), 20%, 25%, 0.5);
+    --text-primary: hsl(var(--primary-hue), 15%, 90%);
+    --text-secondary: hsl(var(--primary-hue), 10%, 60%);
+    --text-accent: hsl(var(--primary-hue), 80%, 70%);
+
+    /* 强调色 - 由调色滑块控制 */
+    --accent-color: hsl(var(--primary-hue), 70%, 60%);
+    --accent-hover: hsl(var(--primary-hue), 70%, 50%);
+
+    /* 尺寸 */
+    --res-bar-w: 60px;
+    --nav-panel-w: 240px;
+    --copilot-w: 320px;
+    --header-h: 50px;
+
+    /* 字体 */
+    --font-ui: 'Inter', system-ui, sans-serif;
+    --font-editor: 'Noto Serif SC', serif;
+}
+
+/* 全局重置 */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    background-color: var(--bg-main, #0f1115);
+    color: var(--text-primary);
+    overflow: hidden;
+    height: 100vh;
+    font-size: 14px;
+}
+
+/* 背景层 */
+#app-bg {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: url('https://images.unsplash.com/photo-1620641788421-7a1c342ea42e?q=80&w=1974&auto=format&fit=crop');
+    background-size: cover;
+    background-position: center;
+    z-index: -2;
+    opacity: 0.1;
+    /* 默认极低透明度，让位于深色背景 */
+    transition: opacity 0.5s ease;
+}
+
+#app-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* 背景颜色由JavaScript的hue滑块动态控制 */
+    background: hsla(var(--primary-hue), 40%, 12%, 0.85);
+    z-index: -1;
+    pointer-events: none;
+    transition: background 0.3s ease;
+}
+
+/* ----- 工作台 Grid 布局 ----- */
+.workbench {
+    display: grid;
+    grid-template-columns: var(--res-bar-w) var(--nav-panel-w) 1fr auto;
+    height: 100vh;
+    width: 100vw;
+    transition: grid-template-columns 0.3s ease;
+}
+
+/* 专注模式：隐藏左侧栏，工作区占满 */
+.workbench.focus-mode {
+    grid-template-columns: 0 0 1fr auto;
+}
+
+.workbench.focus-mode .resource-bar,
+.workbench.focus-mode .nav-panel {
+    width: 0;
+    padding: 0;
+    overflow: hidden;
+    border: none;
+}
+
+/* 侧边栏收缩模式 */
+.workbench.sidebar-collapsed {
+    grid-template-columns: var(--res-bar-w) 0px 1fr auto;
+}
+
+.workbench.sidebar-collapsed .nav-panel {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    overflow: hidden;
+    border: none !important;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    backdrop-filter: none;
+}
+
+/* 侧边栏收缩按钮图标旋转 */
+.workbench.sidebar-collapsed #sidebar-toggle-btn i {
+    transform: rotate(180deg);
+}
+
+#sidebar-toggle-btn i {
+    transition: transform 0.3s;
+}
+
+/* 1. 资源栏 (Resource Bar) */
+.resource-bar {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    z-index: 50;
+    backdrop-filter: blur(10px);
+    transition: background 0.3s ease;
+    position: relative;
+}
+
+/* 有背景图片时侧边栏透明 */
+body.has-bg-image .resource-bar {
+    background: var(--sidebar-transparent-bg, rgba(0, 0, 0, 0.3));
+    backdrop-filter: blur(20px);
+}
+
+.logo {
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 24px;
+}
+
+.logo img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: 6px;
+}
+
+.res-group {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+    align-items: center;
+}
+
+.res-group.bottom {
+    margin-top: auto;
+}
+
+.res-item {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 20px;
+    position: relative;
+    z-index: 10;
+}
+
+.res-item:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.res-item.active {
+    color: var(--accent-color);
+    background: rgba(99, 102, 241, 0.15);
+    box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.3);
+}
+
+.avatar img {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid var(--border-color);
+}
+
+/* 2. 导航面板 (Nav Panel) */
+.nav-panel {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    backdrop-filter: blur(10px);
+    position: relative;
+    transition: width 0.3s ease, padding 0.3s ease, background 0.3s ease;
+}
+
+/* 有背景图片时导航面板透明 */
+body.has-bg-image .nav-panel {
+    background: var(--sidebar-transparent-bg, rgba(0, 0, 0, 0.3));
+    backdrop-filter: blur(20px);
+}
+
+.nav-header {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.nav-header h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+}
+
+.nav-actions {
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.nav-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+/* 通用列表项 */
+.list-item {
+    padding: 8px 12px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+
+.list-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-primary);
+}
+
+.list-item.active {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    border-left: 2px solid var(--accent-color);
+}
+
+/* 3. 主工作区 (Workspace) */
+.workspace {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-workspace);
+    /* 更透 */
+    position: relative;
+    overflow: hidden;
+}
+
+.workspace-header {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    border-bottom: 1px solid transparent;
+    /* 隐形边框 */
+    transition: background 0.3s;
+}
+
+.breadcrumbs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.breadcrumbs .current {
+    color: var(--text-primary);
+}
+
+.workspace-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    z-index: 100;
+    position: relative;
+}
+
+.workspace-actions button {
+    background: rgba(128, 128, 128, 0.15);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.workspace-actions button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
+    border-color: var(--accent-color);
+}
+
+/* 主题切换按钮和工具栏按钮 - 确保始终可见 */
+#theme-toggle-btn,
+#toggle-focus,
+#toggle-copilot,
+#sidebar-toggle-btn {
+    position: relative;
+    z-index: 100;
+}
+
+/* 确保图标按钮在所有主题下可见 */
+.icon-btn {
+    background: rgba(128, 128, 128, 0.1) !important;
+    border: 1px solid rgba(128, 128, 128, 0.2) !important;
+    min-width: 32px;
+    min-height: 32px;
+}
+
+.icon-btn:hover {
+    background: rgba(128, 128, 128, 0.25) !important;
+}
+
+.workspace-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2px;
+    position: relative;
+}
+
+/* 编辑器特定样式 */
+.editor-container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px 60px;
+    min-height: 100%;
+}
+
+input.title-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 24px;
+    outline: none;
+}
+
+textarea.body-input {
+    width: 100%;
+    min-height: 60vh;
+    background: transparent;
+    border: none;
+    color: #cbd5e1;
+    font-size: 18px;
+    line-height: 1.8;
+    font-family: var(--font-editor);
+    resize: none;
+    outline: none;
+}
+
+/* 4. Copilot 面板 */
+.copilot-panel {
+    width: var(--copilot-w);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    transition: margin-right 0.3s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+/* 有背景图片时Copilot面板透明 */
+body.has-bg-image .copilot-panel {
+    background: var(--sidebar-transparent-bg, rgba(0, 0, 0, 0.3));
+    backdrop-filter: blur(20px);
+}
+
+.copilot-panel.collapsed {
+    margin-right: calc(var(--copilot-w) * -1);
+    display: none;
+    /* 暂时直接隐藏，因为grid布局处理动画比较麻烦 */
+}
+
+/* Grid 调整 */
+.workbench:has(.copilot-panel.collapsed) {
+    grid-template-columns: var(--res-bar-w) var(--nav-panel-w) 1fr 0px;
+}
+
+.copilot-header {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.copilot-header span {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* 新建会话按钮样式 */
+.new-chat-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.new-chat-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--accent-color);
+}
+
+.new-chat-btn i {
+    font-size: 16px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border-color);
+    font-weight: 600;
+}
+
+.copilot-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px;
+    min-height: 0;
+    /* 重要：允许flex子元素正确收缩 */
+    scroll-behavior: smooth;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.msg {
+    padding: 10px 14px;
+    border-radius: 12px;
+    line-height: 1.5;
+    max-width: 90%;
+}
+
+.msg.ai {
+    background: rgba(255, 255, 255, 0.05);
+    align-self: flex-start;
+    border-bottom-left-radius: 2px;
+}
+
+.msg.user {
+    background: var(--accent-color);
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 2px;
+}
+
+.copilot-input {
+    padding: 12px 16px 16px;
+    flex-shrink: 0;
+    /* 防止输入区域被压缩 */
+    border-top: 1px solid var(--border-color);
+    position: relative;
+    /* 为@引用弹窗提供定位上下文 */
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    position: relative;
+}
+
+/* 输入框顶部拖动条 */
+.copilot-input-resize-handle {
+    position: absolute;
+    top: -6px;
+    left: 16px;
+    right: 16px;
+    height: 16px;
+    cursor: ns-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.copilot-input-resize-handle:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.copilot-input-resize-handle::before {
+    content: '';
+    width: 60px;
+    height: 5px;
+    background: var(--border-color);
+    border-radius: 3px;
+    transition: all 0.2s;
+}
+
+.copilot-input-resize-handle:hover::before {
+    background: var(--accent-color);
+    width: 80px;
+    box-shadow: 0 0 8px var(--accent-color);
+}
+
+.copilot-input-resize-handle.dragging::before {
+    background: var(--accent-color);
+    width: 100px;
+    box-shadow: 0 0 12px var(--accent-color);
+}
+
+.copilot-input-wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    flex: 1;
+    min-height: 60px;
+}
+
+.copilot-input textarea {
+    flex: 1;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text-primary);
+    resize: none;
+    min-height: 60px;
+    max-height: 400px;
+    height: 80px;
+    outline: none;
+    font-size: 13px;
+    line-height: 1.5;
+    transition: border-color 0.2s, height 0.1s;
+    overflow-y: auto;
+}
+
+.copilot-input textarea:focus {
+    border-color: var(--accent-color);
+}
+
+/* 拖动时禁止文本选择 */
+body.resizing-input {
+    user-select: none;
+    cursor: ns-resize !important;
+}
+
+body.resizing-input * {
+    cursor: ns-resize !important;
+}
+
+.copilot-input button {
+    background: var(--accent-color);
+    border: none;
+    color: white;
+    cursor: pointer;
+    font-size: 18px;
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.2s, transform 0.1s;
+}
+
+.copilot-input button:hover {
+    background: var(--accent-hover);
+    transform: scale(1.05);
+}
+
+.copilot-input button:active {
+    transform: scale(0.95);
+}
+
+/* 滚动条隐藏与自定义 */
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+
+.scrollbar-custom::-webkit-scrollbar {
+    width: 6px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+/* Copilot 消息区域滚动条 - 更明显 */
+.copilot-body::-webkit-scrollbar {
+    width: 8px;
+}
+
+.copilot-body::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px;
+    margin: 4px 0;
+}
+
+.copilot-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+.copilot-body::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-color);
+    background-clip: content-box;
+}
+
+/* 辅助类 */
+.hidden {
+    display: none !important;
+}
+
+.text-muted {
+    color: var(--text-secondary);
+}
+
+/* 卡片样式 (用于设定集) */
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 16px;
+    padding: 24px;
+}
+
+.meta-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+    height: 120px;
+    display: flex;
+    flex-direction: column;
+}
+
+.meta-card:hover {
+    background: rgba(255, 255, 255, 0.06);
+    transform: translateY(-2px);
+    border-color: var(--accent-color);
+}
+
+/* Toast 通知 */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    z-index: 9999;
+    transition: opacity 0.3s;
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border-color);
+}
+
+/* 隐藏类 */
+.hidden {
+    display: none !important;
+}
+
+/* 专注模式过渡 */
+.resource-bar,
+.nav-panel {
+    transition: all 0.3s ease;
+}
+
+/* Copilot 拖动条 */
+.copilot-drag-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: ew-resize;
+    background: transparent;
+    transition: background 0.2s;
+}
+
+.copilot-drag-handle:hover {
+    background: var(--accent-color);
+}
+
+/* @ 引用弹窗 - 增强版 */
+.mention-popup {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    right: 0;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+    backdrop-filter: blur(12px);
+}
+
+.mention-popup::-webkit-scrollbar {
+    width: 6px;
+}
+
+.mention-popup::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.mention-popup::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+.mention-popup::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-color);
+}
+
+.mention-item {
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.mention-item:hover,
+.mention-item.active {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.mention-item .mention-type {
+    font-size: 10px;
+    color: var(--accent-color);
+    background: rgba(99, 102, 241, 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-right: 8px;
+}
+
+.mention-item .mention-name {
+    color: var(--text-primary);
+}
+
+/* 高亮匹配文字 */
+.mention-item mark {
+    background: var(--accent-color);
+    color: white;
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
+.mention-type {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+}
+
+.mention-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+/* Copilot 面板可调整宽度 */
+.copilot-panel {
+    position: relative;
+    overflow: hidden;
+    /* 允许内部滚动正常工作 */
+    min-width: 280px;
+    max-width: 600px;
+    transition: width 0.05s ease-out;
+}
+
+/* Copilot 左侧拖动边框 - 增强版 */
+.copilot-drag-handle {
+    position: absolute;
+    left: -3px;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    background: transparent;
+    transition: background 0.2s;
+    z-index: 100;
+}
+
+.copilot-drag-handle::before {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 40px;
+    background: var(--border-color);
+    border-radius: 2px;
+    opacity: 0;
+    transition: all 0.2s;
+}
+
+.copilot-drag-handle:hover::before {
+    opacity: 1;
+    background: var(--accent-color);
+    height: 60px;
+    box-shadow: 0 0 8px var(--accent-color);
+}
+
+.copilot-drag-handle.dragging {
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.1);
+}
+
+.copilot-drag-handle.dragging::before {
+    opacity: 1;
+    background: var(--accent-color);
+    height: 80px;
+    box-shadow: 0 0 12px var(--accent-color);
+}
+
+/* 拖动时全局样式 */
+body.resizing-copilot {
+    user-select: none;
+    cursor: ew-resize !important;
+}
+
+body.resizing-copilot * {
+    cursor: ew-resize !important;
+}
+
+/* 项目选择器 */
+.project-selector {
+    position: relative;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.project-current {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.project-current:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.project-current span {
+    flex: 1;
+    font-weight: 600;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.project-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 12px;
+    right: 12px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 100;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.project-item {
+    padding: 12px 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background 0.2s;
+}
+
+.project-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.project-item.active {
+    background: rgba(99, 102, 241, 0.2);
+    border-left: 3px solid var(--accent-color);
+}
+
+.project-item-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+.project-item-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.project-add {
+    padding: 12px 14px;
+    border-top: 1px solid var(--border-color);
+    color: var(--accent-color);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.project-add:hover {
+    background: rgba(99, 102, 241, 0.1);
+}

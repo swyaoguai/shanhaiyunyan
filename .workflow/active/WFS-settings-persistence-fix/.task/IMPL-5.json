@@ -1,0 +1,135 @@
+{
+  "id": "IMPL-5",
+  "title": "Add POST /api/settings/reload endpoint for manual config hot-reload",
+  "status": "pending",
+  "context_package_path": ".workflow/active/WFS-settings-persistence-fix/.process/context-package.json",
+  "meta": {
+    "type": "feature",
+    "agent": "@code-developer",
+    "execution_group": null,
+    "tdd_workflow": true,
+    "max_iterations": 3,
+    "test_framework": "pytest",
+    "coverage_target": "85%"
+  },
+  "context": {
+    "requirements": [
+      "Add 1 endpoint: POST /api/settings/reload in novel_agent/web/app.py",
+      "Call Config.reload() to refresh .env values into runtime config",
+      "Recreate coordinator with updated config if reload successful",
+      "Return JSONResponse with success:true and updated config values",
+      "Return error response if reload fails"
+    ],
+    "focus_paths": [
+      "novel_agent/web/app.py",
+      "novel_agent/config.py",
+      "novel_agent/tests/test_reload_endpoint.py"
+    ],
+    "acceptance": [
+      "5 test cases pass: verify by pytest novel_agent/tests/test_reload_endpoint.py -v",
+      "Endpoint exists: verify by rg 'POST.*reload|@app.post.*reload' novel_agent/web/app.py",
+      "Config.reload() called: verify by rg 'Config.reload\\(\\)' novel_agent/web/app.py",
+      "Returns config values: verify response includes current LLM config values",
+      "Test coverage >=85%: verify by pytest --cov=novel_agent.web.app"
+    ],
+    "depends_on": ["IMPL-1", "IMPL-4"],
+    "shared_context": {
+      "tech_stack": ["FastAPI", "python-dotenv", "pytest"],
+      "pattern": "POST endpoint → Config.reload() → coordinator recreation → return updated config",
+      "conventions": ["Return JSONResponse with success/data schema", "Recreate coordinator after config change", "Log reload operations"]
+    }
+  },
+  "flow_control": {
+    "pre_analysis": [
+      {
+        "step": "load_context_package",
+        "action": "Load context package for coordinator recreation pattern",
+        "commands": ["Read({{context_package_path}})"],
+        "output_to": "context_package"
+      },
+      {
+        "step": "analyze_coordinator_recreation_pattern",
+        "action": "Find existing coordinator recreation code in save_settings",
+        "commands": [
+          "bash(rg 'coordinator.*recreate|recreate_coordinator' novel_agent/web/app.py -B 3 -A 3)",
+          "bash(rg 'class.*Coordinator|from.*coordinator' novel_agent/web/app.py -n)"
+        ],
+        "output_to": "coordinator_pattern_analysis"
+      }
+    ],
+    "implementation_approach": [
+      {
+        "step": 1,
+        "title": "Red Phase - Write failing tests for reload endpoint",
+        "description": "Write 5 test cases that verify reload endpoint behavior",
+        "tdd_phase": "red",
+        "modification_points": [
+          "Create 1 test file: novel_agent/tests/test_reload_endpoint.py with 5 test cases",
+          "Test 1: test_reload_endpoint_exists - verify POST returns 200",
+          "Test 2: test_reload_calls_Config_reload - verify Config.reload() called once",
+          "Test 3: test_reload_returns_updated_config - verify response contains new config values",
+          "Test 4: test_reload_recreates_coordinator - verify coordinator recreated after reload",
+          "Test 5: test_reload_returns_error_on_failure - verify error response when Config.reload() fails"
+        ],
+        "logic_flow": [
+          "Create novel_agent/tests/test_reload_endpoint.py file",
+          "Write 5 test cases mocking Config.reload and coordinator recreation",
+          "Run pytest to verify tests fail (endpoint doesn't exist)"
+        ],
+        "depends_on": [],
+        "output": "5 failing test cases for reload endpoint"
+      },
+      {
+        "step": 2,
+        "title": "Green Phase - Implement POST /api/settings/reload endpoint",
+        "description": "Add reload endpoint that calls Config.reload() and recreates coordinator",
+        "tdd_phase": "green",
+        "modification_points": [
+          "Add 1 endpoint in novel_agent/web/app.py: POST /api/settings/reload after save_settings",
+          "Call Config.reload() and check return value (True/False)",
+          "Recreate coordinator if reload successful using existing pattern",
+          "Return JSONResponse({'success': True, 'data': updated_config})",
+          "Return JSONResponse({'success': False, 'error': message}) if reload fails"
+        ],
+        "logic_flow": [
+          "Open novel_agent/web/app.py after save_settings endpoint (after line 343)",
+          "Add @app.post('/api/settings/reload') decorator",
+          "Define async def reload_settings(): function",
+          "Call reload_success = Config.reload() inside try block",
+          "If reload_success is True: recreate coordinator, return success response with data",
+          "If reload_success is False: return error response",
+          "Run pytest to verify all 5 tests pass"
+        ],
+        "depends_on": [1],
+        "output": "Implemented POST /api/settings/reload endpoint"
+      },
+      {
+        "step": 3,
+        "title": "Refactor Phase - Extract reload logic and add validation",
+        "description": "Refactor to extract reload logic and add config validation",
+        "tdd_phase": "refactor",
+        "modification_points": [
+          "Extract 1 helper method: _reload_config_and_recreate_coordinator()",
+          "Add 1 validation: verify required config fields present after reload",
+          "Add 1 logging statement: log reload operation with timestamp",
+          "Improve 1 error message: include which config fields failed to load"
+        ],
+        "logic_flow": [
+          "Extract reload-and-recreate logic into helper method",
+          "Add validation: check config.llm.api_key, config.llm.base_url are not None/empty",
+          "Add logging.info with timestamp and reloaded config values (sanitized)",
+          "Improve error message: list which fields are missing or invalid",
+          "Update reload endpoint to use helper and handle validation result",
+          "Run pytest --cov to verify coverage",
+          "Run pytest novel_agent/tests/ -v to ensure no regressions"
+        ],
+        "depends_on": [2],
+        "output": "Refactored reload endpoint with validation"
+      }
+    ],
+    "target_files": [
+      "novel_agent/web/app.py:POST /api/settings/reload:345-380",
+      "novel_agent/tests/test_reload_endpoint.py"
+    ]
+  }
+}
