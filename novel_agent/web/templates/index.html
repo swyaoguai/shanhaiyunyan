@@ -7,15 +7,10 @@
     <title>文思Agent - 智能小说创作</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="apple-touch-icon" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=3.6">
-    <!-- 引入 Remix Icon (使用国内CDN) -->
-    <link href="https://cdn.bootcdn.net/ajax/libs/remixicon/3.5.0/remixicon.css" rel="stylesheet">
-    <!-- 引入 Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Inter:wght@400;500;600&display=swap"
-        rel="stylesheet">
+    <!-- 本地化字体和图标 - 避免外部CDN依赖 -->
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=1.0">
+    <link rel="stylesheet" href="/static/icons/remixicon.css?v=3.5.1">
+    <link rel="stylesheet" href="/static/style.css?v=3.14">
 </head>
 
 <body>
@@ -42,6 +37,9 @@
                 </div>
                 <div class="res-item" data-module="world" title="资料库">
                     <i class="ri-book-mark-line"></i>
+                </div>
+                <div class="res-item" data-module="aux-memory" title="长期记忆中心">
+                    <i class="ri-brain-line"></i>
                 </div>
             </div>
 
@@ -102,8 +100,6 @@
                 <div class="workspace-actions">
                     <button type="button" class="icon-btn" id="toggle-focus" title="专注模式"><i
                             class="ri-fullscreen-line"></i></button>
-                    <button type="button" class="icon-btn" id="toggle-copilot" title="AI助手"><i
-                            class="ri-sparkling-fill"></i></button>
                 </div>
             </div>
 
@@ -121,14 +117,22 @@
             <div class="copilot-drag-handle" id="copilot-drag-handle"></div>
             <div class="copilot-header">
                 <i class="ri-sparkling-fill" style="color: var(--accent-color);"></i>
-                <span>AI 写作助手</span>
+                <div class="copilot-title-group">
+                    <span>文思创作助手</span>
+                    <div class="copilot-session-meta">
+                        <span id="copilot-session-mode">模式：未进入创作</span>
+                        <span id="copilot-session-agent">子Agent：待机</span>
+                    </div>
+                </div>
                 <div style="flex: 1;"></div>
+                <button class="icon-btn session-list-btn" id="copilot-session-list-btn" title="会话列表"><i
+                        class="ri-list-check-2"></i></button>
                 <button class="icon-btn new-chat-btn" id="new-chat-btn" title="新建会话"><i
                         class="ri-chat-new-line"></i></button>
-                <button class="icon-btn close-copilot"><i class="ri-close-line"></i></button>
             </div>
+            <div class="copilot-session-menu hidden" id="copilot-session-menu"></div>
             <div class="copilot-body scrollbar-custom" id="copilot-messages">
-                <div class="msg ai">你好！我是你的写作助手。试试：
+                <div class="msg ai">你好！我是文思创作助手。试试：
                     • 输入 <b>@</b> 引用角色、章节或设定
                     • 直接提问或发指令</div>
             </div>
@@ -143,7 +147,13 @@
                     <button id="copilot-send-btn" title="发送"><i class="ri-send-plane-fill"></i></button>
                 </div>
             </div>
+            <button class="icon-btn close-copilot copilot-side-toggle-open" title="收起助手">
+                <i class="ri-arrow-right-s-line"></i>
+            </button>
         </aside>
+        <button type="button" class="icon-btn edge-toggle-copilot" id="toggle-copilot" title="文思创作助手">
+            <i class="ri-arrow-left-s-line"></i>
+        </button>
     </div>
 
     <!-- 模态框容器 -->
@@ -153,26 +163,30 @@
     <div id="toast" class="toast hidden">操作成功</div>
 
     <!-- 按正确顺序加载模块化脚本 -->
+    <!-- 0. Markdown 渲染库 -->
+    <script src="/static/lib/marked.min.js?v=15.0.7"></script>
     <!-- 1. 工具函数（无依赖） -->
-    <script src="/static/app-utils.js?v=1.0"></script>
+    <script src="/static/app-utils.js?v=1.3"></script>
     <!-- 2. 主题设置（依赖 utils） -->
-    <script src="/static/app-theme.js?v=1.0"></script>
+    <script src="/static/app-theme.js?v=1.1"></script>
     <!-- 3. 核心状态和初始化（依赖 utils, theme） -->
-    <script src="/static/app-core.js?v=1.0"></script>
+    <script src="/static/app-core.js?v=1.15"></script>
     <!-- 4. 导航渲染（依赖 core） -->
-    <script src="/static/app-nav.js?v=1.0"></script>
+    <script src="/static/app-nav.js?v=1.1"></script>
     <!-- 5. 资料库管理（依赖 core, nav） -->
-    <script src="/static/app-knowledge.js?v=1.0"></script>
+    <script src="/static/app-knowledge.js?v=1.2"></script>
+    <!-- 5.1 辅助记忆中心（依赖 core, nav） -->
+    <script src="/static/app-aux-memory.js?v=1.2"></script>
     <!-- 6. 章节管理（依赖 core, nav） -->
     <script src="/static/app-chapters.js?v=1.0"></script>
     <!-- 7. 设置模块（依赖 core, theme） -->
-    <script src="/static/app-settings.js?v=1.2"></script>
+    <script src="/static/app-settings.js?v=1.5"></script>
     <!-- 8. Copilot增强（依赖 core） -->
-    <script src="/static/app-copilot.js?v=1.0"></script>
+    <script src="/static/app-copilot.js?v=1.1"></script>
     <!-- 9. 项目管理（依赖 core） -->
-    <script src="/static/app-project.js?v=1.0"></script>
+    <script src="/static/app-project.js?v=1.5"></script>
     <!-- 10. 连续写作功能 -->
-    <script src="/static/continuous_write.js?v=1.6"></script>
+    <script src="/static/continuous_write.js?v=1.8"></script>
     <!-- 10.1 无限续写章节编辑器 -->
     <script src="/static/iw-editor.js?v=1.0"></script>
     <!-- 11. 提示词管理 -->
@@ -180,7 +194,7 @@
     <!-- 12. Token统计 -->
     <script src="/static/app-token-stats.js?v=1.0"></script>
     <!-- 13. 热点/热梗搜索 -->
-    <script src="/static/app-trends.js?v=1.3"></script>
+    <script src="/static/app-trends.js?v=1.4"></script>
 
     <!-- 13. 初始化应用 -->
     <script>
