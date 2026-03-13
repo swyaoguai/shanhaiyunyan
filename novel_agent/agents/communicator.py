@@ -21,13 +21,10 @@ from ..constants import AGENT_TEMPERATURE, WRITING_CONFIG, TIMEOUTS
 logger = logging.getLogger(__name__)
 
 # 热点平台映射（只保留能正常工作的平台）
+# 热点平台映射（只保留抖音和头条）
 TRENDS_PLATFORMS = {
-    "toutiao": "头条热榜",
     "douyin": "抖音热点",
-    "weibo": "微博热搜",
-    "zhihu": "知乎热榜",
-    "bilibili": "B站热门",
-    "douban": "豆瓣热榜"
+    "toutiao": "头条热榜"
 }
 
 # 自动工具调用的触发模式
