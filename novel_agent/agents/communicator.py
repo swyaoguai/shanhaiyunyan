@@ -12,7 +12,7 @@
 import json
 import logging
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, AsyncGenerator
 
 from .base_agent import BaseAgent
 from .knowledge_mixin import KnowledgeBaseMixin, SharedKnowledgeContext
@@ -23,13 +23,11 @@ logger = logging.getLogger(__name__)
 # 热点平台映射（只保留能正常工作的平台）
 TRENDS_PLATFORMS = {
     "toutiao": "头条热榜",
-    "douyin": "抖音热点"
-}
-
-# MCP工具名称映射
-MCP_TOOL_NAMES = {
-    "toutiao": "get-toutiao-trending",
-    "douyin": "get-douyin-trending"
+    "douyin": "抖音热点",
+    "weibo": "微博热搜",
+    "zhihu": "知乎热榜",
+    "bilibili": "B站热门",
+    "douban": "豆瓣热榜"
 }
 
 # 自动工具调用的触发模式
@@ -228,7 +226,110 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 "collected_info": self.collected_info,
                 "error": str(e)
             }
-    
+
+    async def chat_stream(self, user_message: str) -> AsyncGenerator[str, None]:
+        """
+        流式处理用户消息，逐块返回SSE事件
+
+        预处理（工具调用、知识库）同步完成后，流式输出LLM回复。
+
+        Yields:
+            SSE格式字符串: data: {"type": "chunk/done/error", ...}\n\n
+        """
+        import json as _json
+
+        self.conversation_history.append({
+            "role": "user",
+            "content": user_message
+        })
+
+        try:
+            # === 预处理（同步） ===
+            auto_tool_result = await self._check_auto_tool_call(user_message)
+            kb_context = await self._retrieve_knowledge_context(user_message)
+
+            # 构建流式提示（不要求JSON格式）
+            analysis_prompt = self._build_stream_prompt(
+                user_message, auto_tool_result, kb_context
+            )
+
+            messages = self.conversation_history.copy()
+            messages.append({"role": "user", "content": analysis_prompt})
+
+            # === 流式LLM调用 ===
+            stream = await self.call_llm(
+                messages, temperature=AGENT_TEMPERATURE.CREATIVE_HIGH, stream=True
+            )
+
+            full_text = ""
+            async for chunk in stream:
+                full_text += chunk
+                yield f"data: {_json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
+
+            # === 后处理 ===
+            # 处理热点搜索
+            reply, trends_data = await self._process_trends_search(full_text, user_message)
+
+            # 整合工具结果
+            if auto_tool_result and auto_tool_result.get("success"):
+                tool_text = self._format_auto_tool_result(auto_tool_result)
+                if tool_text and tool_text not in reply:
+                    extra = f"\n\n{tool_text}"
+                    reply = f"{reply}{extra}"
+                    yield f"data: {_json.dumps({'type': 'chunk', 'content': extra}, ensure_ascii=False)}\n\n"
+
+            # 添加AI回复到历史
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
+            # 发送完成事件
+            done_data = {
+                "type": "done",
+                "reply": reply,
+                "is_complete": "[INFO_COMPLETE]" in reply,
+                "collected_info": self.collected_info,
+                "knowledge_used": bool(kb_context),
+                "auto_tool_called": bool(auto_tool_result)
+            }
+            if trends_data:
+                done_data["trends"] = trends_data
+            yield f"data: {_json.dumps(done_data, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            logger.error(f"Chat stream error: {e}", exc_info=True)
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+    def _build_stream_prompt(
+        self,
+        user_message: str,
+        auto_tool_result: Optional[Dict[str, Any]],
+        kb_context: List[Dict[str, Any]]
+    ) -> str:
+        """构建流式模式的分析提示（不要求JSON格式）"""
+        parts = []
+
+        parts.append(f"当前已收集的信息：\n{json.dumps(self.collected_info, ensure_ascii=False, indent=2)}")
+        parts.append(f'\n用户刚才说："{user_message}"')
+
+        if kb_context:
+            kb_text = "\n".join([f"- {r.get('content', '')[:150]}..." for r in kb_context[:3]])
+            parts.append(f"\n【知识库相关内容】\n{kb_text}")
+
+        if auto_tool_result and auto_tool_result.get("success"):
+            tool_data = auto_tool_result.get("data", [])
+            if tool_data:
+                tool_text = self._format_auto_tool_result(auto_tool_result)
+                parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
+
+        parts.append("""
+请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
+结合知识库内容和工具结果给出准确、有条理的回复。
+如果信息已经足够，在回复末尾加上 [INFO_COMPLETE]。""")
+
+        return "\n".join(parts)
+
     async def _check_auto_tool_call(self, message: str) -> Optional[Dict[str, Any]]:
         """
         检测并执行自动工具调用
@@ -534,76 +635,38 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
     
     async def search_trends(self, platform: str = "weibo", limit: int = 20) -> List[Dict[str, Any]]:
         """
-        搜索热点话题
-        
+        搜索热点话题（使用内置Skill服务）
+
         Args:
-            platform: 平台名称 (weibo, zhihu, douyin, bilibili, baidu, toutiao)
+            platform: 平台名称 (weibo, zhihu, douyin, bilibili, toutiao, etc.)
             limit: 返回数量限制
-            
+
         Returns:
             热点列表
         """
         try:
-            # 使用映射获取正确的工具名称
-            tool_name = MCP_TOOL_NAMES.get(platform, f"get-{platform}-trending")
-            logger.info(f"[Communicator] 开始调用MCP工具: trends-hub/{tool_name}")
-            result = await self.use_mcp_tool("trends-hub", tool_name, {"limit": limit})
-            logger.info(f"[Communicator] MCP调用返回: type={type(result)}")
-            
-            # 检查是否是错误响应
-            if result and hasattr(result, 'isError') and result.isError:
-                error_msg = "热点服务暂时不可用"
-                if result.content and len(result.content) > 0:
-                    if hasattr(result.content[0], 'text'):
-                        error_msg = result.content[0].text
-                logger.error(f"[Communicator] MCP返回错误: {error_msg}")
+            from skills.trends_search.scripts.trends_service import get_service
+            service = get_service()
+
+            method_name = f"get_{platform}_trending"
+            if not hasattr(service, method_name):
+                logger.warning(f"[Communicator] 平台 {platform} 不支持")
+                return []
+
+            logger.info(f"[Communicator] 调用Skill热点服务: {method_name}")
+            result = getattr(service, method_name)(limit=limit)
+
+            if not result or not result.get("success"):
+                error_msg = result.get("error", "获取热点失败") if result else "获取热点失败"
+                logger.error(f"[Communicator] 热点搜索失败: {error_msg}")
                 raise Exception(f"{TRENDS_PLATFORMS.get(platform, platform)}: {error_msg}")
-            
-            # 解析MCP返回的结果
-            if result and hasattr(result, 'content') and result.content:
-                content_len = len(result.content)
-                logger.info(f"[Communicator] 解析 result.content, 长度={content_len}")
-                
-                # 尝试方式1: 第一个item包含整个JSON数组
-                if content_len >= 1 and hasattr(result.content[0], 'text'):
-                    first_text = result.content[0].text
-                    logger.info(f"[Communicator] 第一个item内容(前100字符): {first_text[:100]}")
-                    try:
-                        data = json.loads(first_text)
-                        if isinstance(data, list):
-                            logger.info(f"[Communicator] 方式1成功，返回 {len(data)} 条热点")
-                            return data
-                        elif isinstance(data, dict) and 'data' in data:
-                            logger.info(f"[Communicator] 方式1成功(dict.data)，返回 {len(data['data'])} 条热点")
-                            return data['data']
-                        elif isinstance(data, dict):
-                            # 可能是单个热点对象
-                            logger.info(f"[Communicator] 第一个item是单个热点对象")
-                    except json.JSONDecodeError:
-                        logger.info(f"[Communicator] 第一个item不是JSON，尝试方式2")
-                
-                # 尝试方式2: 每个item是一个独立的热点(JSON或纯文本)
-                trends = []
-                for i, item in enumerate(result.content):
-                    if hasattr(item, 'text') and item.text:
-                        text = item.text.strip()
-                        if not text:
-                            continue
-                        try:
-                            # 尝试解析为JSON
-                            obj = json.loads(text)
-                            if isinstance(obj, dict):
-                                trends.append(obj)
-                        except json.JSONDecodeError:
-                            # 纯文本格式，创建简单对象
-                            trends.append({"title": text, "rank": i + 1})
-                
-                if trends:
-                    logger.info(f"[Communicator] 方式2成功，返回 {len(trends)} 条热点")
-                    return trends
-            else:
-                logger.warning(f"[Communicator] MCP返回结果为空或没有content属性")
-            
+
+            trends_data = result.get("data", [])
+            logger.info(f"[Communicator] 获取到 {len(trends_data)} 条热点")
+            return trends_data[:limit]
+
+        except ImportError:
+            logger.error("[Communicator] 热点搜索Skill未安装，请检查 skills/trends_search 目录")
             return []
         except Exception as e:
             logger.error(f"[Communicator] 热点搜索失败 ({platform}): {e}", exc_info=True)
@@ -668,7 +731,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         """
         try:
             logger.info(f"[Communicator] 开始网络搜索: query='{query}', limit={limit}")
-            result = await self.use_mcp_tool("web-search", "search", {"query": query, "limit": limit})
+            # Web搜索暂时禁用，返回空结果
+            result = {"isError": False, "content": [{"text": "[]"}]}
             logger.info(f"[Communicator] 网络搜索返回: type={type(result)}")
             
             # 检查错误
