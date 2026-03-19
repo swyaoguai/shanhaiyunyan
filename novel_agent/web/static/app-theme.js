@@ -64,9 +64,50 @@ const THEMES = {
 
 const THEME_ORDER = ['dark', 'light', 'green', 'warm', 'blue'];
 
+const THEME_PRESETS = {
+    green: { hue: 120, saturation: 35, bgLightness: 16, textLightness: 88, bgOpacity: 0.75 },
+    warm: { hue: 35, saturation: 45, bgLightness: 18, textLightness: 86, bgOpacity: 0.78 },
+    blue: { hue: 215, saturation: 40, bgLightness: 16, textLightness: 90, bgOpacity: 0.75 }
+};
+
+function applyThemePreset(themeKey, showMessage = true) {
+    const preset = THEME_PRESETS[themeKey];
+    if (!preset) {
+        return setTheme(themeKey, showMessage);
+    }
+
+    const theme = THEMES[themeKey];
+    store.settings.theme = themeKey;
+    localStorage.setItem('theme_mode', themeKey);
+
+    store.settings.accentHue = preset.hue;
+    store.settings.accentSaturation = preset.saturation;
+    store.settings.bgLightness = preset.bgLightness;
+    store.settings.textLightness = preset.textLightness;
+    store.settings.bgOpacity = preset.bgOpacity;
+
+    localStorage.setItem('theme_hue', preset.hue);
+    localStorage.setItem('theme_saturation', preset.saturation);
+    localStorage.setItem('theme_bg_lightness', preset.bgLightness);
+    localStorage.setItem('theme_text_lightness', preset.textLightness);
+    localStorage.setItem('theme_opacity', preset.bgOpacity);
+
+    applyFullThemeFromHue(preset.hue);
+    updateThemeButton();
+
+    if (showMessage && theme) {
+        showToast(`已切换到${theme.name}主题 ${theme.icon}`);
+    }
+}
+
 function setTheme(themeKey, showMessage = true) {
     const theme = THEMES[themeKey];
     if (!theme) return;
+
+    if (THEME_PRESETS[themeKey]) {
+        applyThemePreset(themeKey, showMessage);
+        return;
+    }
 
     store.settings.theme = themeKey;
     localStorage.setItem('theme_mode', themeKey);
@@ -400,9 +441,9 @@ async function loadSavedSettings() {
         }, 100);
     }
 
-    // 加载主题模式（仅用于快速切换深色/浅色）
+    // 加载主题模式
     const savedTheme = localStorage.getItem('theme_mode');
-    store.settings.theme = (savedTheme === 'light') ? 'light' : 'dark';
+    store.settings.theme = (savedTheme && THEMES[savedTheme]) ? savedTheme : 'dark';
 }
 
 // 快速切换深色/浅色模式
@@ -438,6 +479,7 @@ window.setBackgroundLightness = setBackgroundLightness;
 window.setOverlayOpacity = setOverlayOpacity;
 window.setBackgroundFromHue = setBackgroundFromHue;
 window.applyFullThemeFromHue = applyFullThemeFromHue;
+window.applyThemePreset = applyThemePreset;
 window.setSaturation = setSaturation;
 window.setTextLightness = setTextLightness;
 window.applyTextColor = applyTextColor;

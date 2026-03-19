@@ -1,4 +1,4 @@
-
+﻿
 /**
  * 文思Agent - 工具函数模块
  * 包含：API调用、Toast提示、HTML转义等通用工具
@@ -6,17 +6,114 @@
 
 // ===== API 调用 =====
 
-async function apiCall(url, method, data) {
+async function apiCall(url, method = 'GET', data) {
     const options = {
         method: method,
         headers: { 'Content-Type': 'application/json' }
     };
-    if (data) options.body = JSON.stringify(data);
-    const res = await fetch(url, options);
-    if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+    if (data !== undefined && data !== null) {
+        options.body = JSON.stringify(data);
     }
-    return await res.json();
+
+    const res = await fetch(url, options);
+    const contentType = res.headers.get('content-type') || '';
+
+    if (!res.ok) {
+        let errorDetail = '';
+        try {
+            if (contentType.includes('application/json')) {
+                const errorPayload = await res.json();
+                if (typeof errorPayload === 'string') {
+                    errorDetail = errorPayload;
+                } else if (typeof errorPayload?.detail === 'string') {
+                    errorDetail = errorPayload.detail;
+                } else if (typeof errorPayload?.detail?.message === 'string') {
+                    errorDetail = errorPayload.detail.message;
+                } else if (Array.isArray(errorPayload?.detail)) {
+                    errorDetail = errorPayload.detail
+                        .map(item => item?.msg || JSON.stringify(item))
+                        .join('; ');
+                } else if (typeof errorPayload?.error?.message === 'string') {
+                    errorDetail = errorPayload.error.message;
+                } else {
+                    const candidate = errorPayload?.message || errorPayload?.error || '';
+                    if (typeof candidate === 'string') {
+                        errorDetail = candidate;
+                    } else if (candidate && typeof candidate === 'object') {
+                        errorDetail = candidate.message || JSON.stringify(candidate);
+                    } else if (errorPayload && typeof errorPayload === 'object') {
+                        errorDetail = JSON.stringify(errorPayload);
+                    } else {
+                        errorDetail = '';
+                    }
+                }
+
+                if (res.status === 429) {
+                    const retryAfter = Number(errorPayload?.retry_after);
+                    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                        errorDetail = `${errorDetail || '请求过于频繁'}（请在 ${retryAfter} 秒后重试）`;
+                    }
+                }
+            } else {
+                errorDetail = (await res.text()).trim();
+            }
+        } catch (_) {
+            errorDetail = '';
+        }
+
+        throw new Error(errorDetail ? `HTTP ${res.status}: ${errorDetail}` : `HTTP ${res.status}`);
+    }
+
+    if (res.status === 204) {
+        return {};
+    }
+
+    if (contentType.includes('application/json')) {
+        return await res.json();
+    }
+
+    const text = await res.text();
+    return text ? { message: text } : {};
+}
+
+async function apiFormCall(url, formData, method = 'POST') {
+    if (!(formData instanceof FormData)) {
+        throw new Error('formData must be a FormData instance');
+    }
+
+    const res = await fetch(url, {
+        method: method,
+        body: formData
+    });
+    const contentType = res.headers.get('content-type') || '';
+
+    if (!res.ok) {
+        let errorDetail = '';
+        try {
+            if (contentType.includes('application/json')) {
+                const errorPayload = await res.json();
+                errorDetail = errorPayload?.detail || errorPayload?.error || errorPayload?.message || '';
+                if (typeof errorDetail !== 'string') {
+                    errorDetail = JSON.stringify(errorDetail);
+                }
+            } else {
+                errorDetail = (await res.text()).trim();
+            }
+        } catch (_) {
+            errorDetail = '';
+        }
+        throw new Error(errorDetail ? `HTTP ${res.status}: ${errorDetail}` : `HTTP ${res.status}`);
+    }
+
+    if (res.status === 204) {
+        return {};
+    }
+    if (contentType.includes('application/json')) {
+        return await res.json();
+    }
+
+    const text = await res.text();
+    return text ? { message: text } : {};
 }
 
 // ===== Toast 提示 =====
@@ -63,7 +160,7 @@ function updateBreadcrumbs(path) {
     breadcrumbs.innerHTML = path.map((p, i) =>
         i === path.length - 1
             ? `<span class="current">${p}</span>`
-            : `<span>${p}</span> <i class="ri-arrow-right-s-line"></i>`
+            : `<span>${p}</span> <span style="opacity:0.55; margin:0 6px;">&gt;</span>`
     ).join('');
 }
 
@@ -875,6 +972,7 @@ function showEditRuleDialog(rule, onSave) {
 
 // 全局暴露工具函数
 window.apiCall = apiCall;
+window.apiFormCall = apiFormCall;
 window.showToast = showToast;
 window.escapeHtml = escapeHtml;
 window.updateBreadcrumbs = updateBreadcrumbs;
@@ -899,3 +997,4 @@ window.showEditRuleDialog = showEditRuleDialog;
 window.AI_CLICHE_WORDS = AI_CLICHE_WORDS;
 
 console.log('[app-utils.js] 工具函数模块已加载');
+

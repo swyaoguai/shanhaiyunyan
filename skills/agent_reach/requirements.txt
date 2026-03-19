@@ -1,0 +1,14 @@
+# Agent-Reach 技能依赖
+
+# 核心搜索库
+ddgs>=9.11.0  # DuckDuckGo搜索（新版本）
+
+# HTTP请求
+requests>=2.31.0
+
+# HTML解析
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# 可选：视频字幕提取
+# yt-dlp>=2023.0.0  # 取消注释以启用视频字幕功能

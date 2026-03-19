@@ -15,6 +15,8 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..utils.atomic_write import atomic_write_json
+
 # 导入安全守卫模块
 from .security_guard import (
     SecurityGuard,
@@ -25,280 +27,308 @@ from .security_guard import (
     SECURITY_RESPONSE,
 )
 
+# 导入详细的Agent提示词
+from ..agents.new_agent_prompts import (
+    PROJECT_SCANNER_PROMPT,
+    CONTEXT_STRATEGY_PROMPT,
+    CONTENT_READER_PROMPT,
+    CREATIVE_WRITER_PROMPT,
+    CONTENT_EXPANSION_PROMPT,
+    FILE_NAMING_PROMPT,
+    SUMMARY_ORCHESTRATOR_PROMPT,
+    CONTEXT_COMPRESSOR_PROMPT,
+    FILE_EDITOR_PROMPT,
+)
+
+from ..agents.enhanced_prompts import (
+    ROUTER_AGENT_PROMPT,
+    COMMUNICATOR_AGENT_PROMPT,
+    CHAPTER_WRITER_PROMPT,
+    WORLDBUILDER_PROMPT,
+    OUTLINER_PROMPT,
+    POLISHER_PROMPT,
+    EVALUATOR_PROMPT,
+    CONTINUOUS_WRITER_PROMPT,
+)
+
 # ===== 默认提示词定义（内置fallback） =====
 
 DEFAULT_PROMPTS = {
-    # 世界观构建Agent
+    "communicator": {
+        "system": COMMUNICATOR_AGENT_PROMPT,
+        "collect_requirements": """请基于当前对话补齐需求字段：
+{conversation}
+
+最小必填：novel_type/theme/protagonist/plot_idea/volume_count/chapters_per_volume
+并尽量补充 plot_thread_preferences（支线连续章数、回主线节奏偏好）。""",
+        "finalize_requirements": """将已收集信息整理为JSON：
+{collected_info}
+
+要求：字段齐全、语义明确、可被Worldbuilder/Outliner直接消费。""",
+    },
     "worldbuilder": {
-        "system": """你是一位资深的小说世界观设计师，擅长构建完整、富有细节的虚构世界。
-
-你的职责：
-1. 根据用户提供的基础设定，构建完整的世界观体系
-2. 设计世界的历史、地理、政治、经济、文化、魔法/科技体系等
-3. 确保世界观内部逻辑自洽，没有矛盾
-4. 为后续创作提供坚实的背景基础
-
-输出要求：
-- 使用清晰的结构，分类说明各个方面
-- 注重细节的丰富性和可扩展性
-- 保持与用户设定的一致性""",
-        
-        "build_world": """请根据以下设定构建完整的世界观：
-
+        "system": WORLDBUILDER_PROMPT,
+        "build_world": """基于输入生成世界观JSON：
 {user_input}
 
-请从以下几个方面进行详细设计：
-1. 世界基础设定（时代背景、世界格局）
-2. 地理环境（主要地点、地貌特征）
-3. 社会结构（政治制度、阶层划分）
-4. 文化特色（风俗习惯、信仰体系）
-5. 力量体系（如有魔法/修炼/科技等）
-6. 历史背景（重大事件、历史脉络）""",
-        
-        "expand_setting": """基于现有世界观设定：
-{existing_worldbuilding}
-
-请扩展以下方面：
+必须包含：world_name/world_type/power_system/geography/history/factions/rules/culture/story_hooks/thread_seed_hooks/narrative_constraints。""",
+        "expand_setting": """在不破坏既有设定前提下扩展以下方面：
 {aspect}
 
-要求：
-- 与现有设定保持一致
-- 增加更多可用于创作的细节
-- 注意逻辑自洽"""
+现有设定：
+{existing_worldbuilding}""",
+        "repair_setting": """修复以下设定冲突并给出最小修改方案：
+{issues}
+
+现有设定：
+{existing_worldbuilding}""",
     },
-    
-    # 大纲规划Agent
     "outliner": {
-        "system": """你是一位经验丰富的小说大纲策划师，擅长设计引人入胜的故事结构。
+        "system": OUTLINER_PROMPT,
+        "create_outline": """根据世界观和需求生成大纲JSON：
+世界观：{worldbuilding}
+需求：{user_input}
 
-你的职责：
-1. 根据世界观和主题设计完整的故事大纲
-2. 规划故事的起承转合，确保情节连贯
-3. 设计有吸引力的冲突和转折
-4. 为每个章节规划核心内容
+每章必须包含：
+title/summary/key_events/must_have/forbidden_reveals/plot_thread
+其中 plot_thread 必须含：
+thread_id/switch_to/return_to_main/return_by_chapter/complete_thread/objective。""",
+        "refine_outline": """修订以下大纲但保持核心主线不变：
+现有大纲：{existing_outline}
+反馈：{feedback}
 
-输出要求：
-- 大纲结构清晰，逻辑顺畅
-- 情节设计要有起伏，避免平淡
-- 预留足够的发展空间""",
-        
-        "create_outline": """请根据以下信息创建小说大纲：
-
-世界观设定：
-{worldbuilding}
-
-故事主题/要求：
-{user_input}
-
-请设计：
-1. 故事核心主线
-2. 主要角色及其目标
-3. 重要情节节点（开篇、发展、高潮、结局）
-4. 章节规划（每章核心事件和目标）""",
-        
-        "refine_outline": """现有大纲：
-{existing_outline}
-
-请根据以下反馈进行优化：
-{feedback}
-
-保持故事的核心不变，优化指出的问题。"""
+请同时修正 plot_thread 与章节目标的一致性。""",
+        "chapter_patch": """仅修补指定章节，不重写全书：
+章节号：{chapter_number}
+原章节：{chapter_data}
+修补目标：{patch_goal}""",
     },
-    
-    # 章节写作Agent
     "chapter_writer": {
-        "system": """你是一位技艺精湛的小说作家，擅长创作引人入胜的章节内容。
+        "system": CHAPTER_WRITER_PROMPT,
+        "write_chapter": """请写作第{chapter_number}章：
+标题：{chapter_title}
+大纲：{chapter_outline}
+上下文：{context}
+前情：{previous_summary}
 
-你的写作特点：
-1. 文笔流畅，描写生动
-2. 擅长刻画人物性格和心理
-3. 情节推进自然，节奏把控得当
-4. 对话真实有趣，符合人物设定
-
-写作要求：
-- 严格遵循大纲规划
-- 与前文保持连贯性
-- 注意角色一致性
-- 避免流水账式叙述""",
-        
-        "write_chapter": """请创作以下章节：
-
-章节信息：
-- 章节号：第{chapter_number}章
-- 章节标题：{chapter_title}
-- 章节大纲：{chapter_outline}
-
-背景资料：
-{context}
-
-前情提要：
-{previous_summary}
-
-写作要求：
-- 目标字数：{word_count}字左右
-- 注意与前文的连贯性
-- 按照大纲推进情节
-- 保持人物性格一致""",
-        
-        "continue_writing": """请继续创作，接续以下内容：
-
+要求：完成must_have，避免forbidden_reveals，并遵循plot_thread状态。""",
+        "revise_chapter": """请在不改变核心事件前提下重写章节问题段落：
+原文：{content}
+反馈：{feedback}
+保持章节目标：{chapter_goal}""",
+        "continue_writing": """请续写以下内容并保持连贯：
 {existing_content}
-
-要求：
-- 自然衔接上文
-- 继续推进情节
-- 保持风格一致
-- 目标字数：{word_count}字"""
+目标字数：{word_count}
+线程状态：{plot_thread_state}""",
     },
-    
-    # 润色修改Agent
     "polisher": {
-        "system": """你是一位专业的文字编辑，擅长提升文稿质量。
-
-你的工作：
-1. 修正语病和错别字
-2. 优化文字表达
-3. 提升文采和感染力
-4. 保持作者原有风格
-
-原则：
-- 尊重原文立意
-- 不改变情节走向
-- 优化而非重写""",
-        
-        "polish_chapter": """请润色以下章节内容：
-
+        "system": POLISHER_PROMPT,
+        "polish_chapter": """润色以下正文并保持情节不变：
 {content}
+润色重点：{focus_areas}""",
+        "polish_with_feedback": """根据反馈精准修复文本：
+原文：{content}
+反馈：{feedback}""",
+        "style_convert": """将以下文本转换为目标风格（不改剧情事实）：
+文本：{content}
+目标风格：{target_style}""",
+    },
+    "evaluator": {
+        "system": EVALUATOR_PROMPT,
+        "evaluate_chapter": """评估以下章节并输出JSON：
+内容：{content}
+大纲：{chapter_outline}
+世界观：{world}
+角色：{characters}
 
-润色重点：
-{focus_areas}
+检查：plot/setting/character/writing/pacing/immersion + thread_checks。""",
+        "check_consistency": """检查多章一致性并输出JSON：
+章节集合：{chapters}
+世界观：{world}
+角色：{characters}""",
+        "check_thread_rules": """审计线程规则并输出JSON：
+章节：{chapter}
+线程指令：{plot_thread}
+历史状态：{thread_state}""",
+    },
+    "continuous_writer": {
+        "system": CONTINUOUS_WRITER_PROMPT,
+        "write_first_chapter": """基于故事开头创作第一章：
+{story_beginning}
+目标字数：{word_count}
+要求：建立冲突并给出章末钩子。""",
+        "continue_story": """续写下一章：
+前情：{previous_chapters_summary}
+上章结尾：{last_chapter_ending}
+灵感：{inspiration}
+设定约束：{important_settings}
+角色状态：{character_states}
+目标字数：{word_count}""",
+        "regenerate_chapter": """在保持章节目标不变前提下重生成：
+原章节：{chapter_content}
+重生成原因：{reason}""",
+        "apply_correction": """将以下纠正落到下一章：
+纠正：{correction}
+当前上下文：{context}""",
+    },
+    "ProjectScanner": {
+        "system": PROJECT_SCANNER_PROMPT,
+        "scan_project": """扫描项目并分析结构：
+项目路径：{project_path}
+扫描范围：{scan_scope}
+关注重点：{focus_areas}
+
+请提供：
+1. 文件清单（章节、设定、配置、知识库）
+2. 元数据提取（章节号、标题、字数）
+3. 统计分析（总章节数、总字数、平均字数）
+4. 异常标记（缺失章节、字数异常等）""",
+        "extract_metadata": """从文件名提取元数据：
+文件列表：{file_list}
+
+提取格式：章节号、标题、字数""",
+    },
+    "ContextStrategy": {
+        "system": CONTEXT_STRATEGY_PROMPT,
+        "create_strategy": """制定上下文读取策略：
+当前任务：{task_type}
+任务描述：{task_description}
+已有上下文：{existing_context}
+可用文件：{available_files}
+
+请提供：
+1. 必读文件列表（P0-P3优先级）
+2. 读取顺序和原因
+3. 预估token消耗
+4. 永久记忆项标记""",
+        "optimize_strategy": """优化现有策略：
+当前策略：{current_strategy}
+优化目标：{optimization_goal}
+约束条件：{constraints}""",
+    },
+    "ContentReader": {
+        "system": CONTENT_READER_PROMPT,
+        "read_files": """按策略读取文件：
+读取策略：{strategy}
+已加载内容：{loaded_content}
+
+请提供：
+1. 加载报告（成功/跳过/失败）
+2. 内容摘要
+3. 永久记忆项列表
+4. 去重统计""",
+        "extract_content": """提取文件关键信息：
+文件路径：{file_path}
+提取目标：{extraction_target}
+格式类型：{format_type}""",
+    },
+    "CreativeWriter": {
+        "system": CREATIVE_WRITER_PROMPT,
+        "create_content": """执行创作任务：
+创作类型：{content_type}
+任务要求：{requirements}
+上下文信息：{context}
+目标字数：{word_count}
+约束条件：{constraints}
+
+必须遵守：
+1. 禁用词汇表
+2. 反降智规则（12条）
+3. 创作提示词知识库
+
+请提供：
+1. 创作内容
+2. 字数统计报告
+3. 质量自检结果""",
+        "write_chapter": """创作章节：
+章节号：{chapter_number}
+章节标题：{chapter_title}
+大纲要求：{outline}
+前情提要：{previous_summary}
+世界观：{worldbuilding}
+角色设定：{characters}
+目标字数：{word_count}""",
+        "write_setting": """创作设定：
+设定类型：{setting_type}
+设定要求：{requirements}
+相关设定：{related_settings}""",
+    },
+    "ContentExpansion": {
+        "system": CONTENT_EXPANSION_PROMPT,
+        "expand_content": """扩写内容：
+原文内容：{original_content}
+当前字数：{current_word_count}
+目标字数：{target_word_count}
+扩写重点：{expansion_focus}
+风格参考：{style_reference}
 
 要求：
-- 保持原有情节和人物不变
-- 优化文字表达
-- 增强可读性"""
+1. 保持原文风格完全一致
+2. 严格遵守三重约束
+3. 特别注意避免AI降智特征
+4. 自然融入，无拼接感
+
+请提供：
+1. 扩写后的完整内容
+2. 字数对比报告
+3. 质量自检结果""",
+        "polish_and_expand": """润色并扩写：
+原文：{content}
+润色要求：{polish_requirements}
+扩写目标：{expansion_target}""",
     },
-    
-    # 评估Agent
-    "evaluator": {
-        "system": """你是一位资深的文学评论家和编辑，擅长分析和评估小说质量。
+    "FileNaming": {
+        "system": FILE_NAMING_PROMPT,
+        "generate_filename": """生成标准文件名：
+章节号：{chapter_number}
+章节标题：{chapter_title}
+字数：{word_count}
 
-评估维度：
-1. 情节完整性和吸引力
-2. 人物塑造的丰满度
-3. 文字表达的流畅度
-4. 逻辑一致性
-5. 节奏把控
-
-输出要求：
-- 客观公正的评价
-- 具体可行的建议
-- 分数和详细说明""",
-        
-        "evaluate_chapter": """请评估以下章节：
-
-章节内容：
-{content}
-
-评估要求：
-1. 情节评分（1-10）及说明
-2. 人物刻画评分（1-10）及说明
-3. 文笔评分（1-10）及说明
-4. 存在的问题和改进建议
-5. 综合评分和总体评价"""
+格式：第X章-[标题]-[字数]字.md""",
+        "update_filename": """更新文件名中的字数：
+原文件名：{old_filename}
+新字数：{new_word_count}""",
     },
-    
-    # 无限续写Agent
-    "continuous_writer": {
-        "system": """你是一位富有创意的小说作家，擅长根据灵感进行故事续写。
+    "SummaryOrchestrator": {
+        "system": SUMMARY_ORCHESTRATOR_PROMPT,
+        "trigger_summary": """生成章节总结：
+起始章节：{start_chapter}
+结束章节：{end_chapter}
+章节内容：{chapters_content}
 
-你的特点：
-1. 能够自然地延续故事
-2. 善于制造冲突和转折
-3. 人物刻画立体生动
-4. 情节发展逻辑严密
-
-工作原则：
-- 尊重已有设定，避免矛盾
-- 保持角色性格一致
-- 自然推进情节发展
-- 不让已死亡角色复活""",
-        
-        "write_first_chapter": """请根据以下故事开头/灵感，创作第一章：
-
-故事灵感：
-{story_beginning}
-
-写作要求：
-- 字数：{word_count}字左右
-- 建立清晰的故事世界
-- 引入主要角色
-- 设置悬念或冲突
-- 吸引读者继续阅读
-
-请在创作后提供：
-1. 章节标题
-2. 本章摘要（50字以内）
-3. 重要事件列表
-4. 新出场角色列表""",
-        
-        "continue_story": """请续写下一章：
-
-## 前情回顾
-{previous_chapters_summary}
-
-## 上一章内容摘要
-{last_chapter_summary}
-
-## 上一章结尾
-{last_chapter_ending}
-
-## 用户灵感/要求（如有）
-{inspiration}
-
-## 需要注意的设定
-{important_settings}
-
-## 角色状态
-{character_states}
-
-写作要求：
-- 字数：{word_count}字左右
-- 自然衔接上文
-- 推进故事发展
-- 保持人物一致性
-- 避免与已有设定矛盾
-
-请在创作后提供：
-1. 章节标题
-2. 本章摘要（50字以内）
-3. 重要事件列表
-4. 新出场角色列表（如有）"""
+请提供十章剧情梗概，包含：
+1. 主要情节发展
+2. 人物关系变化
+3. 关键转折点
+4. 伏笔和线索""",
     },
-    
-    # AI助手对话
-    "copilot": {
-        "system": """你是一位专业的小说创作助手，名叫"文思"。
+    "ContextCompressor": {
+        "system": CONTEXT_COMPRESSOR_PROMPT,
+        "compress_context": """压缩上下文信息：
+原始内容：{original_content}
+压缩目标：{compression_target}
+保留重点：{key_points}
 
-你的能力：
-1. 帮助作者解决创作难题
-2. 提供情节、角色、世界观建议
-3. 回答关于小说内容的问题
-4. 辅助润色和修改文字
-
-交流风格：
-- 友好专业
-- 言之有物
-- 给出具体可行的建议""",
-        
-        "chat": """用户问题：
-{user_message}
-
-相关上下文（用户@引用的内容）：
-{context}
-
-请回答用户的问题，如有需要可以参考上下文信息。"""
-    }
+请提供：
+1. 压缩后的内容
+2. 压缩比例
+3. 保留的关键信息列表""",
+        "create_summary": """生成章节摘要：
+章节内容：{chapter_content}
+摘要长度：{summary_length}""",
+    },
+    "FileEditor": {
+        "system": FILE_EDITOR_PROMPT,
+        "edit_file": """编辑文件内容：
+文件路径：{file_path}
+编辑操作：{edit_operation}
+目标内容：{target_content}
+修改原因：{reason}""",
+        "rename_file": """重命名文件：
+原文件名：{old_filename}
+新文件名：{new_filename}
+依赖文件：{dependent_files}""",
+    },
 }
 
 
@@ -515,12 +545,24 @@ class PromptManager:
         
         # Agent显示名称映射
         display_names = {
+            'communicator': '沟通助手',
             'worldbuilder': '世界观构建器',
             'outliner': '大纲生成器',
             'chapter_writer': '章节写作器',
             'polisher': '内容润色器',
             'evaluator': '质量评估器',
             'continuous_writer': '无限续写器',
+            'ProjectScanner': '项目扫描器',
+            'ContextStrategy': '上下文策略师',
+            'ContentReader': '内容读取器',
+            'CreativeWriter': '创意写作师',
+            'ContentExpansion': '内容扩展师',
+            'QualityValidator': '质量验证师',
+            'FileNaming': '文件命名器',
+            'SummaryOrchestrator': '摘要编排器',
+            'ContextCompressor': '上下文压缩器',
+            'FileEditor': '文件编辑器',
+            'Router': '路由器',
             'copilot': 'AI写作助手'
         }
         
@@ -649,10 +691,17 @@ class PromptManager:
         
         self.custom_prompts[agent_type][task_name] = content
         
-        # 保存到文件
+        # 保存到文件（原子写入）
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.custom_prompts, f, ensure_ascii=False, indent=2)
+            config_path = Path(self.config_path)
+            old_content = config_path.read_text(encoding='utf-8') if config_path.exists() else None
+            atomic_write_json(
+                config_path,
+                self.custom_prompts,
+                old_content=old_content,
+                ensure_ascii=False,
+                indent=2
+            )
             print(f"[PromptManager] 已保存自定义提示词: {agent_type}.{task_name}")
         except Exception as e:
             print(f"[PromptManager] 保存自定义提示词失败: {e}")
@@ -680,10 +729,17 @@ class PromptManager:
         else:
             return False
         
-        # 保存到文件
+        # 保存到文件（原子写入）
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.custom_prompts, f, ensure_ascii=False, indent=2)
+            config_path = Path(self.config_path)
+            old_content = config_path.read_text(encoding='utf-8') if config_path.exists() else None
+            atomic_write_json(
+                config_path,
+                self.custom_prompts,
+                old_content=old_content,
+                ensure_ascii=False,
+                indent=2
+            )
             return True
         except Exception as e:
             print(f"[PromptManager] 保存失败: {e}")

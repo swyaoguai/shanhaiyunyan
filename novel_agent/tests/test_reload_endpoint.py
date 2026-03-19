@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock
 
 from novel_agent.web.app import create_app
 from novel_agent.config import Config
+from novel_agent.web.dependencies import get_coordinator, get_router_agent
 
 
 @pytest.fixture
@@ -93,3 +94,28 @@ class TestReloadEndpoint:
             data = response.json()
             assert data["success"] is False
             assert "error" in data
+
+
+def test_reload_syncs_router_coordinator_reference():
+    app = create_app()
+
+    with TestClient(app) as local_client:
+        old_coordinator = get_coordinator()
+        old_router = get_router_agent()
+
+        assert old_coordinator is not None
+        assert old_router is not None
+        assert old_router.coordinator is old_coordinator
+
+        with patch.object(Config, "reload", return_value=True):
+            response = local_client.post("/api/settings/reload")
+
+        assert response.status_code == 200
+
+        new_coordinator = get_coordinator()
+        new_router = get_router_agent()
+
+        assert new_coordinator is not None
+        assert new_router is not None
+        assert new_coordinator is not old_coordinator
+        assert new_router.coordinator is new_coordinator

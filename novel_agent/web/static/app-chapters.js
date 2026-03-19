@@ -12,6 +12,100 @@ function addNewChapter() {
     showAddChapterDialog();
 }
 
+function showCollaborativeImportDialog() {
+    const modal = document.getElementById('modal-container');
+    if (!modal) return;
+
+    modal.classList.remove('hidden');
+    modal.innerHTML = `
+        <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.65); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
+            <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 14px; width: 560px; max-width: 100%; padding: 24px;">
+                <h3 style="margin: 0 0 16px 0; color: var(--text-primary); font-size: 18px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-upload-cloud-2-line"></i>
+                    导入小说到协作模式
+                </h3>
+                <p style="margin: 0 0 14px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7;">
+                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>。导入后会立即自动整理协作记忆。
+                </p>
+
+                <div style="margin-bottom: 14px;">
+                    <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">选择文件</label>
+                    <input id="collab-import-file" type="file" accept=".txt,.md,.docx"
+                        style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; color: var(--text-primary);">
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">导入方式</label>
+                    <select id="collab-import-merge-mode"
+                        style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; color: var(--text-primary);">
+                        <option value="append">追加到现有章节（推荐）</option>
+                        <option value="replace">替换现有章节</option>
+                    </select>
+                </div>
+
+                <div style="display: flex; gap: 10px;">
+                    <button id="collab-import-cancel" style="flex: 1; padding: 11px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.1); color: var(--text-primary); cursor: pointer;">
+                        取消
+                    </button>
+                    <button id="collab-import-confirm" style="flex: 1; padding: 11px; border-radius: 8px; border: none; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; font-weight: 600; cursor: pointer;">
+                        开始导入
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const closeModal = () => {
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+    };
+
+    document.getElementById('collab-import-cancel')?.addEventListener('click', closeModal);
+    document.getElementById('collab-import-confirm')?.addEventListener('click', async () => {
+        const fileInput = document.getElementById('collab-import-file');
+        const mergeModeEl = document.getElementById('collab-import-merge-mode');
+        const btn = document.getElementById('collab-import-confirm');
+        const file = fileInput?.files?.[0];
+        const mergeMode = mergeModeEl?.value || 'append';
+
+        if (!file) {
+            showToast('请先选择文件', 'warning');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 导入中...';
+
+        try {
+            const formData = new FormData();
+            formData.append('novel_file', file);
+            formData.append('merge_mode', mergeMode);
+
+            const response = await apiFormCall('/api/projects/import-novel', formData, 'POST');
+            if (!response.success) {
+                throw new Error(response.error || '导入失败');
+            }
+
+            await loadCurrentProjectData();
+            renderNavPanel('write');
+            closeModal();
+
+            const importedCount = response.imported_chapters || 0;
+            showToast(`已导入 ${importedCount} 章，协作记忆已自动整理`, 'success');
+
+            if (Array.isArray(store.projectData.outline) && store.projectData.outline.length > 0) {
+                const openIndex = Math.max(0, store.projectData.outline.length - importedCount);
+                openChapterEditor(openIndex);
+            }
+        } catch (e) {
+            showToast(`导入失败: ${e.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '开始导入';
+        }
+    });
+}
+
 function showAddChapterDialog() {
     const modal = document.getElementById('modal-container');
     modal.classList.remove('hidden');
@@ -221,12 +315,22 @@ function openChapterEditor(index) {
         
         try {
             const chapter = store.projectData.outline[currentEditingChapterIndex];
+            const trendsEnabled = typeof trendsState !== 'undefined'
+                ? trendsState.enabled !== false
+                : false;
+            const trendsPlatforms = Array.isArray(trendsState?.config?.defaultPlatforms)
+                && trendsState.config.defaultPlatforms.length > 0
+                ? trendsState.config.defaultPlatforms
+                : ['toutiao', 'douyin'];
             const response = await apiCall('/api/chapter', 'POST', {
                 chapter_index: currentEditingChapterIndex,
                 chapter_title: chapter.title,
                 existing_content: content,
                 action: 'continue',
-                word_count: 500  // 续写约500字
+                word_count: 500,  // 续写约500字
+                enable_trends: trendsEnabled,
+                trends_platforms: trendsPlatforms,
+                trends_query: `${chapter.title || ''} ${content.slice(-120)}`
             });
             
             if (response.content) {
@@ -423,6 +527,7 @@ async function saveOutlineData() {
 // 全局暴露章节管理函数
 window.currentEditingChapterIndex = currentEditingChapterIndex;
 window.addNewChapter = addNewChapter;
+window.showCollaborativeImportDialog = showCollaborativeImportDialog;
 window.showAddChapterDialog = showAddChapterDialog;
 window.editChapterTitle = editChapterTitle;
 window.deleteChapter = deleteChapter;

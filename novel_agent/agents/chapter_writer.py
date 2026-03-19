@@ -38,27 +38,8 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
         self.init_knowledge_mixin(knowledge_base)
     
     def _get_default_prompt(self) -> str:
-        return """你是一位才华横溢的网络小说作家。你擅长写出引人入胜、感染力强的小说章节。
-
-## 你的写作风格
-1. 文笔流畅，节奏明快
-2. 对话生动，符合角色性格
-3. 描写细腻，画面感强
-4. 情节紧凑，扣人心弦
-5. 善于设置悬念和爽点
-
-## 网文写作要点
-1. 开篇吸引：每章开头要有吸引力
-2. 节奏把控：张弛有度，高潮迭起
-3. 角色塑造：通过言行展现性格
-4. 场景描写：适度且有代入感
-5. 章末钩子：留下悬念吸引继续阅读
-
-## 字数要求
-每章 2000-4000 字，根据内容需要灵活调整
-
-## 输出格式
-直接输出章节正文内容，不需要额外格式包装。"""
+        from .enhanced_prompts import CHAPTER_WRITER_PROMPT
+        return CHAPTER_WRITER_PROMPT
     
     async def execute(
         self,
@@ -79,18 +60,48 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
         chapter_title = input_data.get("chapter_title", "")
         chapter_number = input_data.get("chapter_number", 1)
         word_count = input_data.get("word_count", WRITING_CONFIG.CHAPTER_DEFAULT_WORDS)
-        
+
         # 从上下文提取相关信息
         world = context.get("world", {}) if context else {}
         characters = context.get("characters", []) if context else []
         previous_summary = context.get("previous_summary", "") if context else ""
         style = context.get("style", "") if context else ""
+        aux_memory = context.get("aux_memory", {}) if context else {}
+        plot_thread = context.get("plot_thread", {}) if context else {}
+        trends_data = context.get("trends_data", []) if context else []
         
+        # 进度：开始
+        try:
+            await self.notify_progress(f"正在创作第{chapter_number}章...", 0)
+        except Exception:
+            pass
+
         # 从知识库获取写作上下文
         kb_context = await self._get_kb_context(chapter_outline, chapter_number)
-        
+
         # 构建约束提示词
         constraint_prompt = self.build_constraint_prompt()
+
+        aux_memory_prompt = aux_memory.get("prompt_preview", "") if isinstance(aux_memory, dict) else ""
+        if not aux_memory_prompt:
+            aux_memory_prompt = "未启用辅助记忆或无匹配"
+
+        plot_thread_prompt = ""
+        if isinstance(plot_thread, dict):
+            plot_thread_prompt = str(plot_thread.get("writer_guidance", "") or "").strip()
+            active_thread_id = str(plot_thread.get("active_thread_id", "") or "").strip()
+            if not plot_thread_prompt and active_thread_id and active_thread_id != "main":
+                plot_thread_prompt = f"当前章节处于支线[{active_thread_id}]，请在章末制造回主线钩子。"
+        if not plot_thread_prompt:
+            plot_thread_prompt = "当前章节默认推进主线。"
+
+        # 进度：整合上下文与约束
+        try:
+            await self.notify_progress("正在整合上下文与写作约束...", 20)
+        except Exception:
+            pass
+
+        trends_prompt = self._format_trends_context(trends_data)
         
         prompt = f"""请撰写以下章节：
 
@@ -114,6 +125,15 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 ## 写作风格要求
 {style if style else "网文爽文风格，节奏明快"}
 
+## 剧情线程状态（高优先级）
+{plot_thread_prompt}
+若本章已完成支线目标，可在文末添加隐藏注释：<!-- PLOT_THREAD:return_main -->
+
+{trends_prompt}
+
+## 辅助记忆约束（低优先级）
+{aux_memory_prompt}
+
 {constraint_prompt}
 
 {self._format_kb_context(kb_context)}
@@ -121,6 +141,12 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 请直接开始撰写章节正文："""
 
         messages = [{"role": "user", "content": prompt}]
+
+        # 进度：生成正文
+        try:
+            await self.notify_progress("正在生成章节正文...", 50)
+        except Exception:
+            pass
         
         response = await self.call_llm(
             messages,
@@ -136,14 +162,28 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
                 content=response,
                 chapter_number=chapter_number
             )
-        
+        # 统计字数（字符与非空白字符）
+        total_chars = len(response)
+        nonspace_chars = sum(1 for c in response if not c.isspace())
+
+        # 进度：完成
+        try:
+            await self.notify_progress(
+                f"第{chapter_number}章创作完成",
+                100,
+                {"chapter": {"number": chapter_number, "title": chapter_title, "chars": total_chars, "nonspace": nonspace_chars}}
+            )
+        except Exception:
+            pass
+
         return {
             "success": True,
             "agent": self.name,
             "chapter_number": chapter_number,
             "chapter_title": chapter_title,
             "content": response,
-            "word_count": len(response),
+            "word_count": total_chars,
+            "stats": {"chars": total_chars, "nonspace_chars": nonspace_chars},
             "dead_characters": self.get_dead_characters()
         }
     
@@ -178,6 +218,68 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
                 parts.append(f"- {content[:200]}...")
             parts.append("")
         
+        return "\n".join(parts)
+
+    def _select_balanced_trend_candidates(
+        self,
+        trends_data: List[Dict[str, Any]],
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """按平台轮询挑选热点，避免单个平台占满候选位。"""
+        if not trends_data or limit <= 0:
+            return []
+
+        platform_buckets: Dict[str, List[Dict[str, Any]]] = {}
+        platform_order: List[str] = []
+
+        for trend in trends_data:
+            platform = str(trend.get("platform", "")).strip().lower()
+            if platform not in platform_buckets:
+                platform_buckets[platform] = []
+                platform_order.append(platform)
+            platform_buckets[platform].append(trend)
+
+        merged: List[Dict[str, Any]] = []
+        cursor = {platform: 0 for platform in platform_order}
+        while len(merged) < limit:
+            appended = False
+            for platform in platform_order:
+                idx = cursor[platform]
+                items = platform_buckets.get(platform, [])
+                if idx >= len(items):
+                    continue
+                merged.append(items[idx])
+                cursor[platform] = idx + 1
+                appended = True
+                if len(merged) >= limit:
+                    break
+            if not appended:
+                break
+
+        return merged
+
+    def _format_trends_context(self, trends_data: List[Dict[str, Any]]) -> str:
+        if not trends_data:
+            return ""
+
+        parts: List[str] = []
+        parts.append("## 热点融合要求")
+        parts.append("请从热点候选中选择 1-2 条与当前章节最契合的内容进行改编融入。")
+        parts.append("不要照抄热点标题，不要写成新闻播报，要转化为角色动机/冲突/事件触发。")
+        parts.append("")
+        parts.append("## 热点候选")
+
+        for trend in self._select_balanced_trend_candidates(trends_data, limit=5):
+            title = str(trend.get("title", "")).strip()
+            if not title:
+                continue
+            platform = str(trend.get("platform", "")).strip()
+            hot = str(trend.get("hot", "")).strip()
+            source = f"[{platform}]" if platform else ""
+            heat = f"（热度:{hot}）" if hot else ""
+            parts.append(f"- {source}{title}{heat}")
+
+        parts.append("")
         return "\n".join(parts)
     
     async def write_chapters_batch(

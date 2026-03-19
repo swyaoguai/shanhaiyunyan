@@ -40,10 +40,12 @@ if not exist ".env" (
 
 :: Check port
 echo [1/3] Checking port 5656...
+set PORT_IN_USE=0
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5656 " ^| findstr "LISTENING"') do (
-    echo [INFO] Port 5656 in use, killing PID %%a
-    taskkill /F /PID %%a >nul 2>&1
-    timeout /t 2 >nul
+    set PORT_IN_USE=1
+)
+if !PORT_IN_USE! equ 1 (
+    echo [WARN] Port 5656 is in use. Will let run.py auto-select an available port.
 )
 
 :: Check dependencies

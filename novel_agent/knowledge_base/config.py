@@ -60,6 +60,23 @@ class ChunkingConfig:
 
 
 @dataclass
+class SummarySearchConfig:
+    """摘要索引检索配置（无向量RAG）
+    
+    使用LLM对每个条目生成摘要作为索引，检索时让LLM根据查询
+    从摘要列表中选择最相关的条目ID，然后读取原始内容。
+    
+    优点：语义理解更准确，无需向量化服务
+    缺点：每次检索消耗Token（约等于摘要总字数）
+    """
+    enabled: bool = False  # 默认关闭
+    target_categories: list = field(default_factory=lambda: ["character", "world"])  # 适用分类
+    max_entries: int = 200  # 最大条目数限制（超过则警告性能问题）
+    summary_max_length: int = 50  # 每条摘要最大字数
+    cache_summaries: bool = True  # 是否缓存摘要（避免重复生成）
+
+
+@dataclass
 class RetrievalConfig:
     """检索配置"""
     default_top_k: int = 5
@@ -67,6 +84,10 @@ class RetrievalConfig:
     vector_weight: float = 0.7  # 向量检索权重
     fulltext_weight: float = 0.3  # 全文检索权重
     min_score_threshold: float = 0.1  # 最小相关性阈值
+    
+    # 检索策略配置
+    chapter_search_mode: str = "hybrid"  # "hybrid", "vector", "fulltext"
+    summary_search: SummarySearchConfig = field(default_factory=SummarySearchConfig)
 
 
 @dataclass

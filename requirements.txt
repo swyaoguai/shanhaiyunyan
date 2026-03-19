@@ -21,5 +21,8 @@ psutil>=5.9.0
 # HTTP client for API calls (SiliconFlow, etc.)
 httpx>=0.25.0
 
+# MCP SDK
+mcp>=1.0.0
+
 # Optional: For better local embeddings, install:
 # pip install sentence-transformers

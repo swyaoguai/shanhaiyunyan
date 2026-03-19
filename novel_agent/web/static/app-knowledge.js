@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 文思Agent - 资料库管理模块
  * 包含：资料库分类、知识条目CRUD、设定管理
  */
@@ -523,8 +523,12 @@ async function saveSettingData(dataKey) {
 }
 
 // 加载扩展资料库数据
+function getExtendedKnowledgeProjectId() {
+    return store.currentProject || store.currentProjectId || 'default';
+}
+
 function loadExtendedKnowledgeData() {
-    const projectId = store.currentProjectId || 'default';
+    const projectId = getExtendedKnowledgeProjectId();
     
     // 加载内置扩展分类
     ['eventlines', 'outline_settings', 'detail_settings', 'chapter_settings'].forEach(key => {
@@ -553,7 +557,7 @@ function loadExtendedKnowledgeData() {
 
 // 保存扩展资料库数据
 function saveExtendedKnowledgeData(key) {
-    const projectId = store.currentProjectId || 'default';
+    const projectId = getExtendedKnowledgeProjectId();
     try {
         localStorage.setItem(`knowledge_${projectId}_${key}`, JSON.stringify(store.projectData[key] || []));
     } catch (e) {
@@ -885,3 +889,4 @@ window.saveExtendedKnowledgeData = saveExtendedKnowledgeData;
 window.showImportFileDialog = showImportFileDialog;
 
 console.log('[app-knowledge.js] 资料库模块已加载');
+

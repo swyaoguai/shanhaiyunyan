@@ -63,7 +63,7 @@ function searchMentions(query) {
 
 // 初始化Copilot增强功能
 function initCopilotEnhancements() {
-    const input = document.getElementById('copilot-input');
+    const input = document.getElementById('copilot-input-text');
     if (!input) return;
     
     // 监听输入
@@ -230,7 +230,7 @@ function updateMentionSelection(items) {
 
 // 插入提及
 function insertMention(type, name, id) {
-    const input = document.getElementById('copilot-input');
+    const input = document.getElementById('copilot-input-text');
     if (!input) return;
     
     const value = input.value;
@@ -378,11 +378,223 @@ async function sendCopilotMessageWithMentions(message) {
     };
 }
 
+// ===== Copilot面板宽度拖动调整功能 =====
+function initPanelWidthResizer() {
+    const dragHandle = document.getElementById('copilot-drag-handle');
+    const panel = document.getElementById('copilot-panel');
+    
+    if (!dragHandle || !panel) {
+        console.log('[Copilot] 面板宽度拖动初始化失败：元素未找到');
+        return;
+    }
+    
+    let isDragging = false;
+    let startX = 0;
+    let startWidth = 0;
+    
+    // 从localStorage恢复保存的宽度
+    const savedWidth = localStorage.getItem('copilot_panel_width');
+    if (savedWidth) {
+        const width = parseInt(savedWidth);
+        if (width >= 280 && width <= 600) {
+            panel.style.width = width + 'px';
+        }
+    }
+    
+    dragHandle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isDragging = true;
+        startX = e.clientX;
+        startWidth = panel.offsetWidth;
+        
+        dragHandle.classList.add('dragging');
+        document.body.classList.add('resizing-copilot');
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        
+        // 向左拖动增加宽度，向右拖动减少宽度
+        const deltaX = startX - e.clientX;
+        let newWidth = startWidth + deltaX;
+        
+        // 限制宽度范围
+        newWidth = Math.max(280, Math.min(600, newWidth));
+        
+        panel.style.width = newWidth + 'px';
+    });
+    
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            dragHandle.classList.remove('dragging');
+            document.body.classList.remove('resizing-copilot');
+            
+            // 保存宽度到localStorage
+            localStorage.setItem('copilot_panel_width', panel.offsetWidth);
+        }
+    });
+    
+    // 触摸设备支持
+    dragHandle.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        isDragging = true;
+        startX = touch.clientX;
+        startWidth = panel.offsetWidth;
+        
+        dragHandle.classList.add('dragging');
+    });
+    
+    document.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        
+        const touch = e.touches[0];
+        const deltaX = startX - touch.clientX;
+        let newWidth = startWidth + deltaX;
+        
+        newWidth = Math.max(280, Math.min(600, newWidth));
+        panel.style.width = newWidth + 'px';
+    });
+    
+    document.addEventListener('touchend', () => {
+        if (isDragging) {
+            isDragging = false;
+            dragHandle.classList.remove('dragging');
+            
+            localStorage.setItem('copilot_panel_width', panel.offsetWidth);
+        }
+    });
+    
+    // 双击重置为默认宽度
+    dragHandle.addEventListener('dblclick', () => {
+        panel.style.width = '320px';
+        localStorage.setItem('copilot_panel_width', 320);
+        if (typeof showToast === 'function') {
+            showToast('对话框已恢复默认宽度');
+        }
+    });
+    
+    console.log('[Copilot] 面板宽度拖动调整功能已初始化');
+}
+
+// ===== 输入框高度拖动调整功能 =====
+function initInputResizer() {
+    const resizeHandle = document.getElementById('copilot-resize-handle');
+    const textarea = document.getElementById('copilot-input-text');
+    const copilotInput = document.querySelector('.copilot-input');
+    
+    if (!resizeHandle || !textarea || !copilotInput) {
+        console.log('[Copilot] 输入框拖动调整初始化失败：元素未找到');
+        return;
+    }
+    
+    let isDragging = false;
+    let startY = 0;
+    let startHeight = 0;
+    
+    // 从localStorage恢复保存的高度
+    const savedHeight = localStorage.getItem('copilot_input_height');
+    if (savedHeight) {
+        const height = parseInt(savedHeight);
+        if (height >= 60 && height <= 400) {
+            textarea.style.height = height + 'px';
+        }
+    }
+    
+    resizeHandle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isDragging = true;
+        startY = e.clientY;
+        startHeight = textarea.offsetHeight;
+        
+        resizeHandle.classList.add('dragging');
+        document.body.classList.add('resizing-input');
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        
+        // 向上拖动增加高度，向下拖动减少高度
+        const deltaY = startY - e.clientY;
+        let newHeight = startHeight + deltaY;
+        
+        // 限制高度范围
+        newHeight = Math.max(60, Math.min(400, newHeight));
+        
+        textarea.style.height = newHeight + 'px';
+    });
+    
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            resizeHandle.classList.remove('dragging');
+            document.body.classList.remove('resizing-input');
+            
+            // 保存高度到localStorage
+            localStorage.setItem('copilot_input_height', textarea.offsetHeight);
+        }
+    });
+    
+    // 触摸设备支持
+    resizeHandle.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        isDragging = true;
+        startY = touch.clientY;
+        startHeight = textarea.offsetHeight;
+        
+        resizeHandle.classList.add('dragging');
+    });
+    
+    document.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        
+        const touch = e.touches[0];
+        const deltaY = startY - touch.clientY;
+        let newHeight = startHeight + deltaY;
+        
+        newHeight = Math.max(60, Math.min(400, newHeight));
+        textarea.style.height = newHeight + 'px';
+    });
+    
+    document.addEventListener('touchend', () => {
+        if (isDragging) {
+            isDragging = false;
+            resizeHandle.classList.remove('dragging');
+            
+            localStorage.setItem('copilot_input_height', textarea.offsetHeight);
+        }
+    });
+    
+    // 双击重置为默认高度
+    resizeHandle.addEventListener('dblclick', () => {
+        textarea.style.height = '80px';
+        localStorage.setItem('copilot_input_height', 80);
+        if (typeof showToast === 'function') {
+            showToast('输入框已恢复默认高度');
+        }
+    });
+    
+    console.log('[Copilot] 输入框拖动调整功能已初始化');
+}
+
+// 初始化时自动调用
+document.addEventListener('DOMContentLoaded', function() {
+    // 延迟初始化，确保DOM完全加载
+    setTimeout(() => {
+        initInputResizer();
+        initPanelWidthResizer();
+    }, 100);
+});
+
 // 全局暴露Copilot增强函数
 window.mentionData = mentionData;
 window.initCopilotEnhancements = initCopilotEnhancements;
 window.searchMentions = searchMentions;
 window.updateMentionData = updateMentionData;
 window.sendCopilotMessageWithMentions = sendCopilotMessageWithMentions;
+window.initInputResizer = initInputResizer;
+window.initPanelWidthResizer = initPanelWidthResizer;
 
 console.log('[app-copilot.js] Copilot增强模块已加载');

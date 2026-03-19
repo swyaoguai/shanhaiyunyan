@@ -98,13 +98,17 @@ class Config:
             True
         """
         try:
-            # 获取.env文件路径（项目根目录）
-            env_file = Path.cwd() / ".env"
+            # 优先使用项目根目录下的.env（与Web路由写入路径保持一致）
+            env_file = Path(__file__).resolve().parent.parent / ".env"
 
-            # 检查.env文件是否存在
+            # 兼容：若项目根目录不存在，则回退到当前工作目录
             if not env_file.exists():
-                logger.error(f".env file not found at: {env_file}")
-                return False
+                fallback_env = Path.cwd() / ".env"
+                if fallback_env.exists():
+                    env_file = fallback_env
+                else:
+                    logger.error(f".env file not found at: {env_file} or {fallback_env}")
+                    return False
 
             # 重新加载环境变量（使用override=True覆盖现有值）
             # 使用encoding='utf-8'避免Windows GBK编码问题

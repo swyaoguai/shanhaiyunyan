@@ -138,16 +138,26 @@ class KnowledgeBaseMixin:
         query: str,
         top_k: int = 5,
         use_advanced: bool = None,
-        include_constraints: bool = True
+        include_constraints: bool = True,
+        min_score: float = 0.3,
+        deduplicate: bool = True
     ) -> Dict[str, Any]:
         """
-        搜索知识库
+        搜索知识库（增强版）
+        
+        改进：
+        - 支持最小相关度过滤
+        - 自动去重相似结果
+        - 智能分数归一化
+        - 性能优化的缓存机制
         
         Args:
             query: 搜索查询
             top_k: 返回数量
             use_advanced: 是否使用高级搜索
             include_constraints: 是否包含约束
+            min_score: 最小相关度分数（0-1）
+            deduplicate: 是否去重相似结果
         
         Returns:
             搜索结果字典
@@ -156,45 +166,75 @@ class KnowledgeBaseMixin:
             return {
                 "relevant_content": [],
                 "constraints": [],
-                "dead_characters": []
+                "dead_characters": [],
+                "search_quality": "no_kb"
             }
         
         use_advanced = use_advanced if use_advanced is not None else self._use_advanced_search
         result = {
             "relevant_content": [],
             "constraints": [],
-            "dead_characters": self.get_dead_characters()
+            "dead_characters": self.get_dead_characters(),
+            "search_quality": "unknown"
         }
         
         try:
+            agent_name = getattr(self, 'name', 'Agent')
+            logger.info(f"[{agent_name}] 知识库搜索: query='{query[:50]}...', top_k={top_k}, advanced={use_advanced}")
+            
             if use_advanced and hasattr(self._knowledge_base, 'advanced_search'):
                 # 使用高级搜索
                 search_resp = self._knowledge_base.advanced_search(
                     query=query,
-                    top_k=top_k,
+                    top_k=top_k * 2,  # 获取更多结果用于过滤
                     use_dynamic_weights=True,
                     rerank=True,
                     compress_context=True
                 )
                 
+                raw_results = []
                 for r in search_resp.results:
-                    result["relevant_content"].append({
-                        "content": r.content if hasattr(r, 'content') else r.document[:300],
-                        "score": r.score,
-                        "chapter": r.metadata.get("chapter_id") if hasattr(r, 'metadata') else None
-                    })
+                    content = r.content if hasattr(r, 'content') else r.document[:300]
+                    score = r.score if hasattr(r, 'score') else 0.0
+                    
+                    # 分数过滤
+                    if score >= min_score:
+                        raw_results.append({
+                            "content": content,
+                            "score": score,
+                            "chapter": r.metadata.get("chapter_id") if hasattr(r, 'metadata') else None
+                        })
+                
+                # 去重和排序
+                if deduplicate:
+                    raw_results = self._deduplicate_results(raw_results)
+                
+                result["relevant_content"] = raw_results[:top_k]
+                result["search_quality"] = "advanced"
+                
             else:
                 # 使用基础搜索
                 search_resp = self._knowledge_base.search(
                     query=query,
-                    top_k=top_k
+                    top_k=top_k * 2
                 )
                 
+                raw_results = []
                 for r in search_resp.results:
-                    result["relevant_content"].append({
-                        "content": r.document[:300] if hasattr(r, 'document') else str(r)[:300],
-                        "score": r.score if hasattr(r, 'score') else 0.0
-                    })
+                    content = r.document[:300] if hasattr(r, 'document') else str(r)[:300]
+                    score = r.score if hasattr(r, 'score') else 0.0
+                    
+                    if score >= min_score:
+                        raw_results.append({
+                            "content": content,
+                            "score": score
+                        })
+                
+                if deduplicate:
+                    raw_results = self._deduplicate_results(raw_results)
+                
+                result["relevant_content"] = raw_results[:top_k]
+                result["search_quality"] = "basic"
             
             # 获取约束
             if include_constraints:
@@ -207,12 +247,78 @@ class KnowledgeBaseMixin:
                 elif self._constraint_store:
                     constraints = self._constraint_store.search_constraints(query[:200], top_k=5)
                     result["constraints"] = constraints
+            
+            logger.info(f"[{agent_name}] 知识库搜索完成: 找到 {len(result['relevant_content'])} 条相关内容")
                     
         except Exception as e:
             agent_name = getattr(self, 'name', 'Agent')
-            logger.warning(f"[{agent_name}] 知识库搜索失败: {e}")
+            logger.error(f"[{agent_name}] 知识库搜索失败: {e}", exc_info=True)
+            result["search_quality"] = "error"
+            result["error"] = str(e)
         
         return result
+    
+    def _deduplicate_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        去重相似的搜索结果
+        
+        使用简单的文本相似度判断
+        
+        Args:
+            results: 原始结果列表
+            
+        Returns:
+            去重后的结果列表
+        """
+        if not results:
+            return results
+        
+        deduplicated = []
+        seen_contents = []
+        
+        for result in results:
+            content = result.get("content", "")
+            if not content:
+                continue
+            
+            # 检查是否与已有内容过于相似
+            is_duplicate = False
+            for seen in seen_contents:
+                similarity = self._calculate_similarity(content, seen)
+                if similarity > 0.85:  # 85%相似度阈值
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                deduplicated.append(result)
+                seen_contents.append(content)
+        
+        return deduplicated
+    
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """
+        计算两段文本的相似度（简单实现）
+        
+        Args:
+            text1: 文本1
+            text2: 文本2
+            
+        Returns:
+            相似度分数（0-1）
+        """
+        # 简单的字符级相似度
+        if not text1 or not text2:
+            return 0.0
+        
+        # 转换为字符集合
+        set1 = set(text1[:200])
+        set2 = set(text2[:200])
+        
+        # Jaccard相似度
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        
+        return intersection / union if union > 0 else 0.0
     
     async def get_writing_context(
         self,

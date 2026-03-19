@@ -381,41 +381,75 @@ class WritingDashboard:
                 "average_writing_time": stats.total_writing_time / max(stats.completed_chapters, 1)
             }
     
+    def _collect_weekday_stats(
+        self,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Dict[str, Dict[str, int]]:
+        """收集按星期分组的写作统计"""
+        weekday_stats = defaultdict(lambda: {"chapters": 0, "words": 0})
+        
+        for date_str, stats in self._daily_stats.items():
+            try:
+                date = datetime.strptime(date_str, "%Y-%m-%d")
+                if start_date <= date <= end_date:
+                    weekday = date.strftime("%A")
+                    weekday_stats[weekday]["chapters"] += stats.chapters_written
+                    weekday_stats[weekday]["words"] += stats.words_written
+            except ValueError:
+                continue
+        
+        return weekday_stats
+    
+    def _collect_hourly_stats(
+        self,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Dict[int, Dict[str, int]]:
+        """收集按小时分组的会话统计"""
+        hourly_stats = defaultdict(lambda: {"sessions": 0, "chapters": 0})
+        
+        for session in self._sessions.values():
+            try:
+                start = datetime.fromisoformat(session.start_time)
+                if start_date <= start <= end_date:
+                    hour = start.hour
+                    hourly_stats[hour]["sessions"] += 1
+                    hourly_stats[hour]["chapters"] += session.chapters_written
+            except ValueError:
+                continue
+        
+        return hourly_stats
+    
+    def _find_best_writing_time(
+        self,
+        weekday_stats: Dict[str, Dict[str, int]],
+        hourly_stats: Dict[int, Dict[str, int]]
+    ) -> tuple:
+        """找出最佳写作时间（小时和星期几）"""
+        best_hour = 0
+        best_day = "N/A"
+        
+        if hourly_stats:
+            best_hour = max(hourly_stats.items(), key=lambda x: x[1]["chapters"])[0]
+        
+        if weekday_stats:
+            best_day = max(weekday_stats.items(), key=lambda x: x[1]["words"])[0]
+        
+        return best_hour, best_day
+    
     def get_writing_habits(self, days: int = 30) -> Dict[str, Any]:
         """分析写作习惯"""
         with self._lock:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
             
-            # 按星期统计
-            weekday_stats = defaultdict(lambda: {"chapters": 0, "words": 0})
-            
-            # 按小时统计（基于会话开始时间）
-            hourly_stats = defaultdict(lambda: {"sessions": 0, "chapters": 0})
-            
-            for date_str, stats in self._daily_stats.items():
-                try:
-                    date = datetime.strptime(date_str, "%Y-%m-%d")
-                    if start_date <= date <= end_date:
-                        weekday = date.strftime("%A")
-                        weekday_stats[weekday]["chapters"] += stats.chapters_written
-                        weekday_stats[weekday]["words"] += stats.words_written
-                except ValueError:
-                    continue
-            
-            for session in self._sessions.values():
-                try:
-                    start = datetime.fromisoformat(session.start_time)
-                    if start_date <= start <= end_date:
-                        hour = start.hour
-                        hourly_stats[hour]["sessions"] += 1
-                        hourly_stats[hour]["chapters"] += session.chapters_written
-                except ValueError:
-                    continue
+            # 收集统计数据
+            weekday_stats = self._collect_weekday_stats(start_date, end_date)
+            hourly_stats = self._collect_hourly_stats(start_date, end_date)
             
             # 找出最佳写作时间
-            best_hour = max(hourly_stats.items(), key=lambda x: x[1]["chapters"])[0] if hourly_stats else 0
-            best_day = max(weekday_stats.items(), key=lambda x: x[1]["words"])[0] if weekday_stats else "N/A"
+            best_hour, best_day = self._find_best_writing_time(weekday_stats, hourly_stats)
             
             return {
                 "weekday_stats": dict(weekday_stats),

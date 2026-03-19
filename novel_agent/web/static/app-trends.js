@@ -13,7 +13,7 @@ const trendsState = {
         enabled: true,
         autoRefresh: false,
         refreshInterval: 300,
-        defaultPlatforms: ['toutiao', 'douyin'],  // 只保留能用的平台
+        defaultPlatforms: ['douban', 'weread', 'zhihu', 'toutiao', 'bilibili', 'douyin'],
         showInInfiniteWrite: true,
         showInMultiAgent: true
     },
@@ -122,7 +122,7 @@ async function loadTrendsPlatforms() {
 }
 
 // ===== 获取热点数据 =====
-async function fetchTrends(platform = 'weibo', limit = 20) {
+async function fetchTrends(platform = 'toutiao', limit = 20) {
     if (trendsState.loading) return [];  // 返回空数组而不是 undefined
 
     trendsState.loading = true;
@@ -398,7 +398,6 @@ async function loadTrendsForPanel(containerId, maxItems = 10, onSelect = null) {
                         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                         ${escapeHtml(title)}
                     </div>
-                    ${hot ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${escapeHtml(hot)}</div>` : ''}
                 </div>
                 <button class="trends-use-btn" data-title="${escapeHtml(title)}"
                     style="padding: 4px 10px; background: rgba(139, 92, 246, 0.2); border: 1px solid rgba(139, 92, 246, 0.4);

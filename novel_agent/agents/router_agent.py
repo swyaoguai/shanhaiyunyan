@@ -5,7 +5,7 @@
 核心职责：
 1. 意图识别：分析用户消息，判断需要哪种处理方式
 2. 知识库优先：在回复前先检索知识库获取相关上下文
-3. 工具调用：自动识别并调用MCP工具（如网络搜索、热点获取等）
+3. 工具调用：自动识别并调用Skill工具（如网络搜索、热点获取等）
 4. 响应保证：确保每个用户请求都有明确的Agent响应
 """
 
@@ -77,27 +77,31 @@ class RouterAgent(BaseAgent):
     - 续写章节 → ContinuousWriter
     - 润色内容 → PolisherAgent
     - 普通对话 → CommunicatorAgent
-    - 搜索热点 → 直接调用MCP工具
+    - 搜索热点 → 直接调用Skill工具
     """
     
     # 意图关键词映射
     INTENT_KEYWORDS = {
         UserIntent.CREATE_NOVEL: [
-            "创作", "写一部", "新小说", "开始写", "创建小说", "开一本新书"
+            "创作", "写一部", "新小说", "开始写", "创建小说", "开一本新书",
+            "写一本", "写个", "写篇"
         ],
         UserIntent.CONTINUE_WRITE: [
-            "续写", "继续写", "接着写", "往下写", "下一章", "继续创作"
+            "续写", "继续写", "接着写", "往下写", "下一章", "继续创作",
+            "写第", "创作第", "生成第"
         ],
         UserIntent.POLISH_CONTENT: [
             "润色", "优化", "修改", "改进", "完善", "调整文风"
         ],
         UserIntent.SEARCH_WEB: [
             "搜索", "查一下", "查询", "找一下", "什么是", "解释",
-            "冷门梗", "冷梗", "网络梗", "梗是什么", "了解一下"
+            "冷门梗", "冷梗", "网络梗", "梗是什么", "了解一下",
+            "相关资料", "事件经过", "历史事件", "融合创作", "素材",
         ],
         UserIntent.SEARCH_TRENDS: [
-            "热点", "热搜", "热榜", "热门", "热梗", "趋势", 
-            "trending", "搜索热", "今日热点", "最新热点"
+            "今日热点", "最新热点", "实时热搜",
+            "热搜榜", "热榜", "看看热搜", "查看热点",
+            "热梗", "流行梗"
         ],
         UserIntent.QUERY_KNOWLEDGE: [
             "之前写的", "前面提到", "回顾", "查看设定", "角色状态",
@@ -114,21 +118,41 @@ class RouterAgent(BaseAgent):
         ]
     }
     
-    # MCP工具映射
-    MCP_TOOLS = {
+    # Skill 工具映射
+    SKILLS = {
         "web_search": {
-            "server": "web-search",
-            "tool": "search",
-            "description": "网络搜索"
+            "skill": "web_search",
+            "method": "search",
+            "description": "网络搜索（搜索任意内容、资料、事件、梗）"
+        },
+        "web_search_memes": {
+            "skill": "web_search",
+            "method": "search_memes",
+            "description": "搜索网络热梗"
+        },
+        "web_search_events": {
+            "skill": "web_search",
+            "method": "search_events",
+            "description": "搜索事件经过"
+        },
+        "web_search_material": {
+            "skill": "web_search",
+            "method": "search_creative_material",
+            "description": "搜索创作素材"
+        },
+        "web_read_url": {
+            "skill": "web_search",
+            "method": "read_url",
+            "description": "阅读网页内容"
         },
         "toutiao_trends": {
-            "server": "trends-hub",
-            "tool": "get-toutiao-trending",
+            "skill": "trends_search",
+            "method": "get_toutiao_trending",
             "description": "头条热榜"
         },
         "douyin_trends": {
-            "server": "trends-hub",
-            "tool": "get-douyin-trending",
+            "skill": "trends_search",
+            "method": "get_douyin_trending",
             "description": "抖音热点"
         }
     }
@@ -153,19 +177,8 @@ class RouterAgent(BaseAgent):
         self._continuous_writer = None
         
     def _get_default_prompt(self) -> str:
-        return """你是一个智能路由助手，负责分析用户意图并提供帮助。
-
-你的任务是：
-1. 理解用户的真实需求
-2. 提供准确、有帮助的回复
-3. 当需要查询信息时，主动使用可用的工具
-4. 保持友好、专业的沟通风格
-
-你可以帮助用户：
-- 创作小说（世界观构建、大纲规划、章节撰写）
-- 搜索网络信息和热点话题
-- 查询知识库中的已有内容
-- 解答使用问题"""
+        from .enhanced_prompts import ROUTER_AGENT_PROMPT
+        return ROUTER_AGENT_PROMPT
     
     async def analyze_intent(self, message: str) -> IntentAnalysis:
         """
@@ -272,6 +285,12 @@ class RouterAgent(BaseAgent):
         if chapter_match:
             entities["chapter_number"] = int(chapter_match.group(1))
         
+        # 检测是否是章节创作请求
+        if intent in [UserIntent.CREATE_NOVEL, UserIntent.CONTINUE_WRITE]:
+            # 检查是否明确要求写某一章
+            if re.search(r'(写|创作|生成)第\d+章', message):
+                entities["explicit_chapter_request"] = True
+        
         return entities
     
     async def retrieve_knowledge(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
@@ -299,7 +318,7 @@ class RouterAgent(BaseAgent):
             if hasattr(search_response, 'results'):
                 for result in search_response.results:
                     results.append({
-                        "content": result.content if hasattr(result, 'content') else str(result),
+                        "content": result.document if hasattr(result, 'document') else str(result),
                         "score": result.score if hasattr(result, 'score') else 0.0,
                         "metadata": result.metadata if hasattr(result, 'metadata') else {}
                     })
@@ -313,7 +332,7 @@ class RouterAgent(BaseAgent):
     
     async def call_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """
-        调用MCP工具
+        调用 Skill 工具
         
         Args:
             tool_name: 工具名称
@@ -322,26 +341,29 @@ class RouterAgent(BaseAgent):
         Returns:
             工具调用结果
         """
-        if tool_name not in self.MCP_TOOLS:
+        if tool_name not in self.SKILLS:
             return {"error": f"未知工具: {tool_name}"}
         
-        tool_config = self.MCP_TOOLS[tool_name]
+        skill_config = self.SKILLS[tool_name]
         
         try:
-            logger.info(f"[{self.name}] 调用MCP工具: {tool_config['server']}/{tool_config['tool']}")
+            logger.info(f"[{self.name}] 调用 Skill: {skill_config['skill']}/{skill_config['method']}")
             
-            result = await self.use_mcp_tool(
-                tool_config["server"],
-                tool_config["tool"],
-                args
+            result = self.use_skill(
+                skill_config["skill"],
+                skill_config["method"],
+                **args
             )
             
-            # 解析结果
-            parsed_result = self._parse_mcp_result(result, tool_name)
+            # 检查结果
+            if not result or not result.get("success"):
+                error_msg = result.get("error", "工具调用失败") if result else "工具调用失败"
+                raise Exception(error_msg)
+            
             return {
                 "success": True,
                 "tool": tool_name,
-                "data": parsed_result
+                "data": result.get("data", [])
             }
             
         except Exception as e:
@@ -352,33 +374,6 @@ class RouterAgent(BaseAgent):
                 "error": str(e)
             }
     
-    def _parse_mcp_result(self, result: Any, tool_name: str) -> Any:
-        """解析MCP工具返回结果"""
-        if result is None:
-            return []
-        
-        # 检查错误
-        if hasattr(result, 'isError') and result.isError:
-            error_msg = "工具调用失败"
-            if hasattr(result, 'content') and result.content:
-                if hasattr(result.content[0], 'text'):
-                    error_msg = result.content[0].text
-            raise Exception(error_msg)
-        
-        # 解析content
-        if hasattr(result, 'content') and result.content:
-            for item in result.content:
-                if hasattr(item, 'text') and item.text:
-                    try:
-                        data = json.loads(item.text)
-                        if isinstance(data, list):
-                            return data
-                        elif isinstance(data, dict):
-                            return data.get('data', data)
-                    except json.JSONDecodeError:
-                        continue
-        
-        return []
     
     async def route_and_respond(
         self,
@@ -386,10 +381,15 @@ class RouterAgent(BaseAgent):
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        路由用户请求并生成响应
+        路由用户请求并生成响应（增强透明化版本）
         
         这是主入口方法，保证每个请求都有响应
         会根据意图分析结果，将任务分发给对应的智能体执行
+        
+        改进：
+        - 透明化输出：清晰展示决策过程
+        - 友好错误提示：用户可理解的错误信息
+        - 性能优化：并行执行知识库和工具调用
         
         Args:
             message: 用户消息
@@ -403,7 +403,11 @@ class RouterAgent(BaseAgent):
             - tool_results: 工具调用结果
             - routed_to: 路由到的Agent
             - delegated_result: 被委派Agent的执行结果
+            - routing_info: 路由决策信息（透明化）
         """
+        import time
+        start_time = time.time()
+        
         result = {
             "response": "",
             "intent": None,
@@ -411,11 +415,21 @@ class RouterAgent(BaseAgent):
             "tool_results": None,
             "routed_to": None,
             "delegated_result": None,
-            "success": True
+            "success": True,
+            "routing_info": {
+                "steps": [],
+                "duration": 0
+            }
         }
         
         try:
-            # 1. 分析意图
+            # 1. 分析意图（透明化）
+            result["routing_info"]["steps"].append({
+                "step": "intent_analysis",
+                "status": "started",
+                "message": "🔍 正在分析您的意图..."
+            })
+            
             intent_analysis = await self.analyze_intent(message)
             result["intent"] = {
                 "type": intent_analysis.primary_intent.value,
@@ -423,25 +437,91 @@ class RouterAgent(BaseAgent):
                 "entities": intent_analysis.entities
             }
             
+            # 透明化输出
+            intent_emoji = self._get_intent_emoji(intent_analysis.primary_intent)
+            confidence_level = "高" if intent_analysis.confidence > 0.7 else "中" if intent_analysis.confidence > 0.5 else "低"
+            
+            result["routing_info"]["steps"].append({
+                "step": "intent_analysis",
+                "status": "completed",
+                "message": f"{intent_emoji} 意图识别：{self._get_intent_display_name(intent_analysis.primary_intent)}",
+                "details": f"置信度：{confidence_level}（{intent_analysis.confidence:.0%}）"
+            })
+            
             logger.info(
                 f"[{self.name}] 意图分析: {intent_analysis.primary_intent.value} "
                 f"(置信度: {intent_analysis.confidence:.2f})"
             )
             
-            # 2. 知识库检索（如果需要）
-            if intent_analysis.requires_knowledge_base:
-                kb_results = await self.retrieve_knowledge(message)
-                result["knowledge_results"] = kb_results
+            # 2. 并行执行知识库检索和工具调用（性能优化）
+            import asyncio
+            tasks = []
             
-            # 3. 工具调用（如果需要）
+            if intent_analysis.requires_knowledge_base:
+                result["routing_info"]["steps"].append({
+                    "step": "knowledge_retrieval",
+                    "status": "started",
+                    "message": "📚 正在检索知识库..."
+                })
+                tasks.append(("kb", self.retrieve_knowledge(message)))
+            
             if intent_analysis.requires_tool_call and intent_analysis.tool_name:
-                tool_result = await self.call_tool(
+                tool_display = self._get_tool_display_name(intent_analysis.tool_name)
+                result["routing_info"]["steps"].append({
+                    "step": "tool_call",
+                    "status": "started",
+                    "message": f"🔧 正在调用工具：{tool_display}"
+                })
+                tasks.append(("tool", self.call_tool(
                     intent_analysis.tool_name,
                     intent_analysis.tool_args or {}
-                )
-                result["tool_results"] = tool_result
+                )))
             
-            # 4. 根据意图分发任务给对应的智能体
+            # 并行执行
+            if tasks:
+                task_results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+                for i, (task_type, task_result) in enumerate(zip([t[0] for t in tasks], task_results)):
+                    if isinstance(task_result, Exception):
+                        logger.error(f"[{self.name}] {task_type} 执行失败: {task_result}")
+                        result["routing_info"]["steps"].append({
+                            "step": task_type,
+                            "status": "failed",
+                            "message": f"❌ {task_type} 执行失败",
+                            "error": str(task_result)
+                        })
+                    else:
+                        if task_type == "kb":
+                            result["knowledge_results"] = task_result
+                            kb_count = len(task_result) if isinstance(task_result, list) else 0
+                            result["routing_info"]["steps"].append({
+                                "step": "knowledge_retrieval",
+                                "status": "completed",
+                                "message": f"✅ 知识库检索完成：找到 {kb_count} 条相关内容"
+                            })
+                        elif task_type == "tool":
+                            result["tool_results"] = task_result
+                            if task_result and task_result.get("success"):
+                                data_count = len(task_result.get("data", []))
+                                result["routing_info"]["steps"].append({
+                                    "step": "tool_call",
+                                    "status": "completed",
+                                    "message": f"✅ 工具调用成功：获取 {data_count} 条结果"
+                                })
+                            else:
+                                result["routing_info"]["steps"].append({
+                                    "step": "tool_call",
+                                    "status": "failed",
+                                    "message": "⚠️ 工具调用失败",
+                                    "error": task_result.get("error") if task_result else "未知错误"
+                                })
+            
+            # 4. 根据意图分发任务给对应的智能体（透明化）
+            result["routing_info"]["steps"].append({
+                "step": "task_delegation",
+                "status": "started",
+                "message": "🎯 正在分发任务..."
+            })
+            
             delegated_result = await self._delegate_to_agent(
                 intent_analysis=intent_analysis,
                 message=message,
@@ -454,12 +534,31 @@ class RouterAgent(BaseAgent):
                 result["delegated_result"] = delegated_result
                 result["routed_to"] = delegated_result.get("agent_name")
                 
+                agent_name = delegated_result.get("agent_name", "未知Agent")
+                result["routing_info"]["steps"].append({
+                    "step": "task_delegation",
+                    "status": "completed",
+                    "message": f"📞 已分发给：{agent_name}"
+                })
+                
                 # 如果被委派的Agent返回了响应，使用它
                 if delegated_result.get("response"):
                     result["response"] = delegated_result["response"]
+            else:
+                result["routing_info"]["steps"].append({
+                    "step": "task_delegation",
+                    "status": "completed",
+                    "message": "💬 由路由器直接处理"
+                })
             
             # 5. 如果没有委派响应，生成路由层响应
             if not result["response"]:
+                result["routing_info"]["steps"].append({
+                    "step": "response_generation",
+                    "status": "started",
+                    "message": "✍️ 正在生成回复..."
+                })
+                
                 response = await self._generate_response(
                     message=message,
                     intent_analysis=intent_analysis,
@@ -468,17 +567,151 @@ class RouterAgent(BaseAgent):
                     context=context
                 )
                 result["response"] = response
+                
+                result["routing_info"]["steps"].append({
+                    "step": "response_generation",
+                    "status": "completed",
+                    "message": "✅ 回复生成完成"
+                })
             
         except Exception as e:
-            logger.error(f"[{self.name}] 路由处理失败: {e}")
+            logger.error(f"[{self.name}] 路由处理失败: {e}", exc_info=True)
             result["success"] = False
-            result["response"] = f"抱歉，处理您的请求时遇到问题: {str(e)}。请稍后重试或换个方式描述您的需求。"
+            
+            # 友好的错误提示
+            error_message = self._format_friendly_error(e, intent_analysis if 'intent_analysis' in locals() else None)
+            result["response"] = error_message
+            
+            result["routing_info"]["steps"].append({
+                "step": "error",
+                "status": "failed",
+                "message": "❌ 处理失败",
+                "error": str(e)
+            })
         
         # 保证有响应（双重保障）
         if not result["response"]:
             result["response"] = "我收到了您的消息，请问有什么可以帮助您的？"
         
+        # 计算总耗时
+        result["routing_info"]["duration"] = time.time() - start_time
+        result["routing_info"]["steps"].append({
+            "step": "completed",
+            "status": "success",
+            "message": f"⏱️ 处理完成（耗时 {result['routing_info']['duration']:.2f}秒）"
+        })
+        
         return result
+    
+    def _get_intent_emoji(self, intent: UserIntent) -> str:
+        """获取意图对应的emoji"""
+        emoji_map = {
+            UserIntent.CREATE_NOVEL: "✍️",
+            UserIntent.CONTINUE_WRITE: "📝",
+            UserIntent.POLISH_CONTENT: "✨",
+            UserIntent.SEARCH_WEB: "🔍",
+            UserIntent.SEARCH_TRENDS: "📊",
+            UserIntent.QUERY_KNOWLEDGE: "📚",
+            UserIntent.GENERAL_CHAT: "💬",
+            UserIntent.ASK_HELP: "❓",
+            UserIntent.PROJECT_MANAGE: "📁",
+            UserIntent.CONFIG_SETTINGS: "⚙️"
+        }
+        return emoji_map.get(intent, "🤔")
+    
+    def _get_intent_display_name(self, intent: UserIntent) -> str:
+        """获取意图的显示名称"""
+        name_map = {
+            UserIntent.CREATE_NOVEL: "创作小说",
+            UserIntent.CONTINUE_WRITE: "续写内容",
+            UserIntent.POLISH_CONTENT: "润色文字",
+            UserIntent.SEARCH_WEB: "网络搜索",
+            UserIntent.SEARCH_TRENDS: "热点查询",
+            UserIntent.QUERY_KNOWLEDGE: "知识库查询",
+            UserIntent.GENERAL_CHAT: "普通对话",
+            UserIntent.ASK_HELP: "寻求帮助",
+            UserIntent.PROJECT_MANAGE: "项目管理",
+            UserIntent.CONFIG_SETTINGS: "配置设置"
+        }
+        return name_map.get(intent, intent.value)
+    
+    def _get_tool_display_name(self, tool_name: str) -> str:
+        """获取工具的显示名称"""
+        name_map = {
+            "web_search": "网络搜索",
+            "toutiao_trends": "头条热榜",
+            "douyin_trends": "抖音热点",
+            "knowledge_base": "知识库"
+        }
+        return name_map.get(tool_name, tool_name)
+    
+    def _format_friendly_error(self, error: Exception, intent_analysis: Optional[IntentAnalysis] = None) -> str:
+        """
+        格式化用户友好的错误提示
+        
+        Args:
+            error: 异常对象
+            intent_analysis: 意图分析结果
+            
+        Returns:
+            友好的错误消息
+        """
+        error_str = str(error).lower()
+        
+        # 网络相关错误
+        if "connection" in error_str or "timeout" in error_str:
+            return (
+                "😔 抱歉，网络连接出现问题。\n\n"
+                "可能的原因：\n"
+                "• 网络不稳定或断开\n"
+                "• API服务器响应超时\n"
+                "• 代理服务器未启动\n\n"
+                "💡 建议：请检查网络连接后重试"
+            )
+        
+        # API相关错误
+        if "api" in error_str or "401" in error_str or "403" in error_str:
+            return (
+                "🔑 抱歉，API认证出现问题。\n\n"
+                "可能的原因：\n"
+                "• API密钥未配置或已过期\n"
+                "• API配额已用完\n"
+                "• 服务暂时不可用\n\n"
+                "💡 建议：请在设置中检查API配置"
+            )
+        
+        # 模型相关错误
+        if "model" in error_str or "404" in error_str:
+            return (
+                "🤖 抱歉，AI模型调用失败。\n\n"
+                "可能的原因：\n"
+                "• 模型名称不正确\n"
+                "• 模型暂时不可用\n"
+                "• 代理服务器配置问题\n\n"
+                "💡 建议：请尝试切换到其他模型"
+            )
+        
+        # 知识库相关错误
+        if "knowledge" in error_str or "search" in error_str:
+            return (
+                "📚 抱歉，知识库查询出现问题。\n\n"
+                "💡 建议：我将尝试不使用知识库来回答您的问题"
+            )
+        
+        # 通用错误
+        intent_hint = ""
+        if intent_analysis:
+            intent_name = self._get_intent_display_name(intent_analysis.primary_intent)
+            intent_hint = f"\n\n您想要：{intent_name}"
+        
+        return (
+            f"😔 抱歉，处理您的请求时遇到了问题。{intent_hint}\n\n"
+            f"错误详情：{str(error)[:100]}\n\n"
+            "💡 建议：\n"
+            "• 请尝试换个方式描述您的需求\n"
+            "• 或稍后再试\n"
+            "• 如果问题持续，请联系技术支持"
+        )
     
     async def _delegate_to_agent(
         self,
@@ -543,11 +776,29 @@ class RouterAgent(BaseAgent):
             
             # === 续写 → 无限续写Agent ===
             elif intent == UserIntent.CONTINUE_WRITE:
+                chapter_num = entities.get("chapter_number", 0)
+                explicit_request = entities.get("explicit_chapter_request", False)
+                
+                # 如果用户明确要求写某一章，引导使用正确的创作流程
+                if explicit_request and chapter_num:
+                    return {
+                        "agent_name": "Router",
+                        "action": "guide_to_creation",
+                        "response": f"我理解您想创作第{chapter_num}章。\n\n"
+                                   f"📝 **创作章节的正确方式**：\n"
+                                   f"1. 如果是新项目，请先在「创作面板」完成世界观和大纲设置\n"
+                                   f"2. 然后在「章节列表」中找到第{chapter_num}章，点击「生成」按钮\n"
+                                   f"3. 或者使用「无限续写」功能逐章创作\n\n"
+                                   f"💡 如果您想在对话中讨论第{chapter_num}章的创作思路，我很乐意帮助您！",
+                        "params": {
+                            "chapter_number": chapter_num,
+                            "needs_setup": True
+                        }
+                    }
+                
                 writer = self._get_continuous_writer()
                 if writer:
                     logger.info(f"[{self.name}] 分发续写任务到 ContinuousWriter")
-                    
-                    chapter_num = entities.get("chapter_number", 0)
                     
                     return {
                         "agent_name": "ContinuousWriter",
@@ -793,4 +1044,4 @@ class RouterAgent(BaseAgent):
         logger.info(f"[{self.name}] 知识库已配置")
 
 
-# 模块职责说明：智能路由智能体，负责意图识别、知识库检索、工具调用、任务分发和响应保证
+# 模块职责说明：智能路由智能体，负责意图识别、知识库检索、Skill工具调用、任务分发和响应保证

@@ -155,7 +155,7 @@ class KnowledgeBase:
         
         # 高级搜索（参考 SeekDB）
         self._advanced_search = AdvancedSearch(
-            hybrid_search=self._search,
+            base_search=self._search,
             embedding_service=self._embedding_service
         )
         
@@ -584,8 +584,8 @@ class KnowledgeBase:
         
         for result in search_results.results:
             context["relevant_content"].append({
-                "content": result.content,
-                "chapter": result.metadata.get("chapter_id"),
+                "content": result.document if hasattr(result, "document") else str(result),
+                "chapter": result.metadata.get("chapter_id") if result.metadata else None,
                 "score": result.score
             })
         

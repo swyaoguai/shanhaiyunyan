@@ -36,8 +36,18 @@ function loadSettingsTab(tabName) {
         case 'regex':
             loadRegexRulesSettings();
             break;
+        case 'skills':
+            loadSkillsSettings();
+            break;
         case 'trends':
-            loadTrendsSettings();
+            // 热点搜索已整合到Skills，重定向到Skills设置
+            loadSkillsSettings();
+            break;
+        case 'backup':
+            loadBackupSettings();
+            break;
+        case 'resources':
+            loadResourcesSettings();
             break;
     }
 }
@@ -865,10 +875,18 @@ function showConfigEditModal(configId = null) {
         btn.innerHTML = '<i class="ri-loader-4-line"></i>';
 
         try {
-            const result = await apiCall('/api/fetch-models', 'POST', {
+            // 构建请求数据，如果是编辑模式且没有输入新Key，传递config_id让后端使用保存的Key
+            const requestData = {
                 api_base: apiBase,
                 api_key: apiKey || ''
-            });
+            };
+            
+            // 如果是编辑模式且没有输入新的API Key，传递config_id
+            if (isEdit && !apiKey && editingConfigId) {
+                requestData.config_id = editingConfigId;
+            }
+            
+            const result = await apiCall('/api/models', 'POST', requestData);
 
             if (result.success && result.models && result.models.length > 0) {
                 // 添加获取到的模型（去重）
@@ -993,6 +1011,7 @@ async function loadAgentSettings() {
             agents[agent.name] = agent;
             // 调试：打印每个agent的关键字段
             console.log(`[AgentSettings] Agent ${agent.name}:`, {
+                api_config_id: agent.api_config_id,
                 api_base: agent.api_base,
                 model: agent.model,
                 use_global: agent.use_global,
@@ -1004,22 +1023,58 @@ async function loadAgentSettings() {
         agentPageApiConfigs = apiConfigData.configs || [];
         agentPageActiveConfigId = apiConfigData.active_config_id || '';
 
-        // 使用与后端 AGENT_DEFINITIONS 一致的名称
-        const agentTypes = [
-            { id: 'Outliner', name: '大纲Agent', icon: 'ri-file-list-3-line', desc: '负责创建和管理小说大纲结构' },
-            { id: 'Worldbuilder', name: '世界观Agent', icon: 'ri-earth-line', desc: '负责构建世界设定和背景' },
-            { id: 'ChapterWriter', name: '章节Agent', icon: 'ri-quill-pen-line', desc: '负责撰写具体章节内容' },
-            { id: 'Polisher', name: '润色Agent', icon: 'ri-magic-line', desc: '负责优化和润色文本' },
-            { id: 'Evaluator', name: '评估Agent', icon: 'ri-star-line', desc: '负责评估内容质量' },
-            { id: 'Communicator', name: '沟通助手', icon: 'ri-chat-3-line', desc: '与用户对话收集创作需求' },
-            { id: 'ContinuousWriter', name: '无限续写', icon: 'ri-infinity-line', desc: '根据故事开头进行连续创作' }
-        ];
+        // 从后端获取的agents数据构建agentTypes数组
+        const agentTypes = agentsList.map(agent => {
+            // 为每个agent分配图标
+            const iconMap = {
+                'Outliner': 'ri-file-list-3-line',
+                'Worldbuilder': 'ri-earth-line',
+                'ChapterWriter': 'ri-quill-pen-line',
+                'Polisher': 'ri-magic-line',
+                'Evaluator': 'ri-star-line',
+                'Communicator': 'ri-chat-3-line',
+                'ContinuousWriter': 'ri-infinity-line',
+                'ProjectScanner': 'ri-scan-line',
+                'ContextStrategy': 'ri-route-line',
+                'ContentReader': 'ri-file-text-line',
+                'CreativeWriter': 'ri-quill-pen-fill',
+                'ContentExpansion': 'ri-text-spacing',
+                'QualityValidator': 'ri-shield-check-line',
+                'FileNaming': 'ri-file-edit-line',
+                'SummaryOrchestrator': 'ri-list-ordered',
+                'ContextCompressor': 'ri-compasses-2-line',
+                'FileEditor': 'ri-edit-box-line'
+            };
+            
+            return {
+                id: agent.name,
+                name: agent.display_name || agent.name,
+                icon: iconMap[agent.name] || 'ri-robot-line',
+                desc: agent.description || '无描述'
+            };
+        });
 
-        // 辅助函数：根据 api_base 查找匹配的 API 配置 ID
-        const findApiConfigIdByBase = (apiBase) => {
+        // 辅助函数：优先按已保存的 api_config_id 回显，缺失时回退到 api_base 反查
+        const findApiConfigId = (config) => {
+            const explicitId = String(config.api_config_id || '').trim();
+            if (explicitId && agentPageApiConfigs.some(cfg => cfg.id === explicitId)) {
+                return explicitId;
+            }
+            const apiBase = String(config.api_base || '').trim();
             if (!apiBase) return '';
-            const matched = agentPageApiConfigs.find(cfg => cfg.api_base === apiBase);
-            return matched ? matched.id : '';
+            const sameBase = agentPageApiConfigs.filter(cfg => cfg.api_base === apiBase);
+            if (sameBase.length === 0) return '';
+
+            // 当同一 API Base 有多个配置时，优先用已保存模型反推正确配置
+            const savedModel = String(config.model || '').trim();
+            if (savedModel) {
+                const modelMatched = sameBase.find(cfg => Array.isArray(cfg.models) && cfg.models.includes(savedModel));
+                if (modelMatched) {
+                    return modelMatched.id;
+                }
+            }
+
+            return sameBase[0].id;
         };
 
         content.innerHTML = `
@@ -1038,7 +1093,7 @@ async function loadAgentSettings() {
             const config = agents[agent.id] || {};
             const isOverride = config.override || !config.use_global;
             // 关键修复：根据 api_base 反向查找匹配的 API 配置 ID
-            const matchedApiConfigId = findApiConfigIdByBase(config.api_base);
+            const matchedApiConfigId = findApiConfigId(config);
             const savedModel = config.model || '';
             
             console.log(`[AgentSettings] 渲染 ${agent.id}: api_base=${config.api_base}, matchedConfigId=${matchedApiConfigId}, model=${savedModel}`);
@@ -1175,8 +1230,8 @@ async function loadAgentSettings() {
                     if (config.override) {
                         // 构建保存数据，正确处理 null 值
                         const saveData = {
+                            api_config_id: config.api_config_id || '',
                             api_base: config.api_base || '',
-                            api_key: '',  // API Key 从配置中获取
                             model: config.model || '',
                             use_global: false
                         };
@@ -1197,7 +1252,8 @@ async function loadAgentSettings() {
                         await apiCall(`/api/agents/${agentId}`, 'POST', saveData);
                     } else {
                         await apiCall(`/api/agents/${agentId}`, 'POST', {
-                            use_global: true
+                            use_global: true,
+                            api_config_id: ''
                         });
                     }
                 }
@@ -1684,404 +1740,6 @@ function bindKnowledgeBaseEvents(existingConfig) {
     });
 }
 
-// ===== 热点搜索设置 =====
-
-async function loadTrendsSettings() {
-    let content = document.getElementById('settings-content');
-
-    // 如果容器不存在，先渲染设置页面
-    if (!content) {
-        renderSettings();
-        content = document.getElementById('settings-content');
-        if (!content) return;
-    }
-
-    // 先显示加载状态
-    content.innerHTML = `
-        <div style="display: flex; align-items: center; justify-content: center; height: 200px;">
-            <i class="ri-loader-4-line" style="font-size: 32px; color: var(--accent-color); animation: spin 1s linear infinite;"></i>
-        </div>
-    `;
-
-    // 先加载配置 - 注意：不要设置默认的 default_platforms，让API返回的值完全覆盖
-    let trendsConfig = null;
-
-    try {
-        trendsConfig = await apiCall('/api/trends/config', 'GET');
-        console.log('[Settings] 加载到热点配置:', JSON.stringify(trendsConfig, null, 2));
-        console.log('[Settings] default_platforms:', trendsConfig?.default_platforms);
-    } catch (e) {
-        console.error('[Settings] 加载热点配置失败:', e);
-        // 只有加载失败时才使用默认值 - 使用空数组，不预选任何平台
-        trendsConfig = {
-            enabled: true,
-            show_in_infinite_write: true,
-            show_in_multi_agent: true,
-            default_platforms: []
-        };
-    }
-
-    // 确保 trendsConfig 不为 null
-    if (!trendsConfig) {
-        trendsConfig = {
-            enabled: true,
-            show_in_infinite_write: true,
-            show_in_multi_agent: true,
-            default_platforms: []
-        };
-    }
-
-    // 确保 default_platforms 是数组 - 使用空数组作为回退值，不预选任何平台
-    const defaultPlatforms = Array.isArray(trendsConfig.default_platforms)
-        ? trendsConfig.default_platforms
-        : [];
-
-    console.log('[Settings] 渲染时使用的平台列表:', defaultPlatforms);
-
-    content.innerHTML = `
-        <div style="max-width: 900px;">
-            <h2 style="color: var(--text-primary); margin-bottom: 24px; font-size: 20px;">
-                <i class="ri-fire-fill" style="margin-right: 8px; color: #ef4444;"></i>
-                热点/热梗搜索
-            </h2>
-            
-            <p style="color: var(--text-secondary); margin-bottom: 24px; font-size: 14px;">
-                获取实时热点话题，激发创作灵感。支持微博、知乎、抖音、B站等多个平台。
-            </p>
-            
-            <!-- 服务状态 -->
-            <div id="trends-service-status" style="margin-bottom: 24px; padding: 16px 20px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px solid var(--border-color);">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <div id="trends-status-indicator" style="width: 12px; height: 12px; border-radius: 50%; background: #666;"></div>
-                    <span id="trends-status-text" style="font-size: 14px; color: var(--text-secondary);">检查热点服务状态...</span>
-                    <div style="flex: 1;"></div>
-                    <button id="trends-refresh-status" style="padding: 8px 16px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;">
-                        <i class="ri-refresh-line"></i> 刷新状态
-                    </button>
-                </div>
-            </div>
-            
-            <!-- 开关设置 -->
-            <div class="setting-section" style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 24px; margin-bottom: 20px;">
-                <h3 style="color: var(--text-primary); margin-bottom: 20px; font-size: 15px;">
-                    <i class="ri-toggle-line" style="margin-right: 6px;"></i>
-                    显示开关
-                </h3>
-                
-                <div style="display: grid; gap: 16px;">
-                    <label style="display: flex; align-items: center; justify-content: space-between; padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; cursor: pointer;">
-                        <div>
-                            <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">启用热点搜索</div>
-                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">开启后可在创作时获取实时热点灵感</div>
-                        </div>
-                        <input type="checkbox" id="trends-enabled" ${trendsConfig.enabled !== false ? 'checked' : ''}
-                            style="width: 20px; height: 20px; cursor: pointer; accent-color: var(--accent-color);">
-                    </label>
-                    
-                    <label style="display: flex; align-items: center; justify-content: space-between; padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; cursor: pointer;">
-                        <div>
-                            <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">无限续写中显示</div>
-                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">在无限续写界面显示热点灵感面板</div>
-                        </div>
-                        <input type="checkbox" id="trends-show-infinite" ${trendsConfig.show_in_infinite_write !== false ? 'checked' : ''}
-                            style="width: 20px; height: 20px; cursor: pointer; accent-color: var(--accent-color);">
-                    </label>
-                    
-                    <label style="display: flex; align-items: center; justify-content: space-between; padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; cursor: pointer;">
-                        <div>
-                            <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">协作创作中显示</div>
-                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">在协作创作界面显示热点灵感面板</div>
-                        </div>
-                        <input type="checkbox" id="trends-show-multi" ${trendsConfig.show_in_multi_agent !== false ? 'checked' : ''}
-                            style="width: 20px; height: 20px; cursor: pointer; accent-color: var(--accent-color);">
-                    </label>
-                </div>
-            </div>
-            
-            <!-- 默认平台设置（基于 mcp-trends-hub@1.6.0 实际可用的工具） -->
-            <div class="setting-section" style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 24px; margin-bottom: 20px;">
-                <h3 style="color: var(--text-primary); margin-bottom: 16px; font-size: 15px;">
-                    <i class="ri-apps-line" style="margin-right: 6px;"></i>
-                    默认平台
-                </h3>
-                <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 16px;">
-                    选择默认显示的热点平台（可多选）
-                </p>
-                
-                <!-- 创作灵感类 -->
-                <div style="margin-bottom: 16px;">
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <i class="ri-lightbulb-line"></i> 创作灵感类
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="douban" ${defaultPlatforms.includes('douban') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-douban-fill" style="color: #00b51d;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">豆瓣</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="weread" ${defaultPlatforms.includes('weread') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-book-open-fill" style="color: #1aad19;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">微信读书</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="zhihu" ${defaultPlatforms.includes('zhihu') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-zhihu-fill" style="color: #0084ff;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">知乎</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="gcores" ${defaultPlatforms.includes('gcores') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-gamepad-fill" style="color: #c00;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">机核</span>
-                        </label>
-                    </div>
-                </div>
-                
-                <!-- 热点资讯类 -->
-                <div style="margin-bottom: 16px;">
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <i class="ri-newspaper-line"></i> 热点资讯类
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="toutiao" ${defaultPlatforms.includes('toutiao') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-newspaper-fill" style="color: #f85959;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">头条</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="netease" ${defaultPlatforms.includes('netease') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-netease-cloud-music-fill" style="color: #c20c0c;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">网易</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="tencent" ${defaultPlatforms.includes('tencent') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-qq-fill" style="color: #12b7f5;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">腾讯</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="thepaper" ${defaultPlatforms.includes('thepaper') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-newspaper-line" style="color: #e60012;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">澎湃</span>
-                        </label>
-                    </div>
-                </div>
-                
-                <!-- 视频娱乐类 -->
-                <div style="margin-bottom: 16px;">
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <i class="ri-video-line"></i> 视频娱乐类
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="bilibili" ${defaultPlatforms.includes('bilibili') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-bilibili-fill" style="color: #fb7299;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">B站</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="douyin" ${defaultPlatforms.includes('douyin') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-tiktok-fill" style="color: #000;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">抖音</span>
-                        </label>
-                    </div>
-                </div>
-                
-                <!-- 科技资讯类 -->
-                <div style="margin-bottom: 16px;">
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <i class="ri-computer-line"></i> 科技资讯类
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="36kr" ${defaultPlatforms.includes('36kr') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-article-fill" style="color: #0084ff;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">36氪</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="sspai" ${defaultPlatforms.includes('sspai') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-apps-fill" style="color: #da282a;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">少数派</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="ifanr" ${defaultPlatforms.includes('ifanr') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-smartphone-fill" style="color: #00c0a5;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">爱范儿</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="juejin" ${defaultPlatforms.includes('juejin') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-code-s-slash-fill" style="color: #1e80ff;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">掘金</span>
-                        </label>
-                    </div>
-                </div>
-                
-                <!-- 购物生活类 -->
-                <div>
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <i class="ri-shopping-cart-line"></i> 购物生活类
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                        <label style="display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="checkbox" class="trends-platform-checkbox" value="smzdm" ${defaultPlatforms.includes('smzdm') ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                            <i class="ri-shopping-cart-fill" style="color: #e42f2f;"></i>
-                            <span style="font-size: 13px; color: var(--text-primary);">什么值得买</span>
-                        </label>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- MCP配置提示 -->
-            <div style="background: rgba(100, 180, 255, 0.1); border: 1px solid rgba(100, 180, 255, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-                <h3 style="margin-bottom: 12px; font-size: 14px; color: #7dd3fc; display: flex; align-items: center; gap: 8px;">
-                    <i class="ri-information-line"></i>
-                    MCP服务配置
-                </h3>
-                <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 12px;">
-                    热点搜索功能依赖MCP (Model Context Protocol) 服务。确保已正确配置 <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px;">mcp_config.json</code> 文件，并安装了 <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px;">mcp-trends-hub</code> 包。
-                </p>
-                <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; color: var(--text-primary); overflow-x: auto;">
-                    npx @anthropic-ai/mcp-trends-hub@latest
-                </div>
-            </div>
-            
-            <!-- 保存按钮 -->
-            <button id="save-trends-settings" style="width: 100%; padding: 14px; background: var(--accent-color); border: none; color: white; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 15px;">
-                <i class="ri-save-line"></i> 保存热点设置
-            </button>
-        </div>
-    `;
-
-    // 绑定事件
-    bindTrendsSettingsEvents();
-}
-
-// 绑定热点设置事件
-function bindTrendsSettingsEvents() {
-    // 检查服务状态
-    checkTrendsServiceStatus();
-
-    // 刷新状态按钮
-    document.getElementById('trends-refresh-status')?.addEventListener('click', () => {
-        checkTrendsServiceStatus();
-    });
-
-    // 保存按钮
-    document.getElementById('save-trends-settings')?.addEventListener('click', async () => {
-        const btn = document.getElementById('save-trends-settings');
-        btn.disabled = true;
-        btn.innerHTML = '<i class="ri-loader-4-line"></i> 保存中...';
-
-        try {
-            const enabled = document.getElementById('trends-enabled')?.checked ?? true;
-            const showInfinite = document.getElementById('trends-show-infinite')?.checked ?? true;
-            const showMulti = document.getElementById('trends-show-multi')?.checked ?? true;
-
-            // 获取选中的平台 - 使用更精确的选择器并调试
-            const checkboxes = document.querySelectorAll('.trends-platform-checkbox');
-            console.log('[Settings] 找到的平台checkbox数量:', checkboxes.length);
-
-            const defaultPlatforms = [];
-            checkboxes.forEach(cb => {
-                console.log(`[Settings] 平台 ${cb.value}: checked=${cb.checked}`);
-                if (cb.checked) {
-                    defaultPlatforms.push(cb.value);
-                }
-            });
-
-            console.log('[Settings] 保存热点设置:', {
-                enabled, showInfinite, showMulti, defaultPlatforms
-            });
-
-            // 验证至少选择了一个平台
-            if (defaultPlatforms.length === 0) {
-                showToast('请至少选择一个热点平台', 'warning');
-                btn.disabled = false;
-                btn.innerHTML = '<i class="ri-save-line"></i> 保存热点设置';
-                return;
-            }
-
-            // 合并为单次保存请求，所有配置在一个API调用中保存，避免竞态条件
-            const saveResult = await apiCall('/api/trends/config', 'POST', {
-                enabled: enabled,
-                auto_refresh: null,  // 保持现有值
-                refresh_interval: null,  // 保持现有值
-                default_platforms: defaultPlatforms,
-                show_in_infinite_write: showInfinite,
-                show_in_multi_agent: showMulti
-            });
-            console.log('[Settings] 配置保存结果:', saveResult);
-
-            // 验证保存结果 - 重新读取配置
-            const verifyConfig = await apiCall('/api/trends/config', 'GET');
-            console.log('[Settings] 验证保存后的配置:', verifyConfig);
-
-            // 检查是否保存成功
-            const savedPlatforms = verifyConfig.default_platforms || [];
-            const expectedSorted = [...defaultPlatforms].sort();
-            const actualSorted = [...savedPlatforms].sort();
-            const platformsMatch = JSON.stringify(expectedSorted) === JSON.stringify(actualSorted);
-
-            console.log('[Settings] 平台对比:', {
-                expected: expectedSorted,
-                actual: actualSorted,
-                match: platformsMatch
-            });
-
-            if (!platformsMatch) {
-                console.error('[Settings] 平台配置保存验证失败!');
-                showToast('保存可能未生效，请刷新页面重试', 'warning');
-            } else {
-                console.log('[Settings] 配置保存验证成功!');
-                showToast('热点设置已保存 ✓');
-            }
-
-            // 更新全局状态
-            if (typeof trendsState !== 'undefined') {
-                trendsState.config.enabled = enabled;
-                trendsState.config.showInInfiniteWrite = showInfinite;
-                trendsState.config.showInMultiAgent = showMulti;
-                trendsState.config.defaultPlatforms = defaultPlatforms;
-                trendsState.enabled = enabled;
-            }
-        } catch (e) {
-            console.error('[Settings] 保存热点设置失败:', e);
-            showToast('保存失败: ' + e.message, 'error');
-        } finally {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="ri-save-line"></i> 保存热点设置';
-        }
-    });
-}
-
-// 检查热点服务状态
-async function checkTrendsServiceStatus() {
-    const indicator = document.getElementById('trends-status-indicator');
-    const statusText = document.getElementById('trends-status-text');
-
-    if (!indicator || !statusText) return;
-
-    indicator.style.background = '#f59e0b';
-    statusText.textContent = '检查热点服务状态...';
-    statusText.style.color = 'var(--text-secondary)';
-
-    try {
-        const status = await apiCall('/api/trends/status', 'GET');
-
-        if (status.available) {
-            indicator.style.background = '#22c55e';
-            statusText.textContent = `热点服务已连接 (${status.tools?.length || 0} 个工具可用)`;
-            statusText.style.color = '#22c55e';
-        } else {
-            indicator.style.background = '#ef4444';
-            statusText.textContent = status.message || '热点服务未连接 - 请确保MCP服务已启动';
-            statusText.style.color = '#ef4444';
-        }
-    } catch (e) {
-        indicator.style.background = '#ef4444';
-        statusText.textContent = '检查服务状态失败: ' + e.message;
-        statusText.style.color = '#ef4444';
-    }
-}
-
 // ===== 正则规则设置 =====
 
 async function loadRegexRulesSettings() {
@@ -2192,6 +1850,184 @@ function bindRegexRuleEvents() {
     });
 }
 
+// ===== Skills管理设置 =====
+
+async function loadSkillsSettings() {
+    let content = document.getElementById('settings-content');
+    
+    if (!content) {
+        renderSettings();
+        content = document.getElementById('settings-content');
+        if (!content) return;
+    }
+    
+    content.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: center; height: 200px;">
+            <i class="ri-loader-4-line" style="font-size: 32px; color: var(--accent-color); animation: spin 1s linear infinite;"></i>
+        </div>
+    `;
+    
+    try {
+        const skillsData = await apiCall('/api/skills', 'GET');
+        const skills = skillsData.skills || [];
+        
+        content.innerHTML = `
+            <div style="max-width: 900px;">
+                <h2 style="color: var(--text-primary); margin-bottom: 24px; font-size: 20px;">
+                    <i class="ri-puzzle-line" style="margin-right: 8px; color: var(--accent-color);"></i>
+                    Skills 管理
+                </h2>
+                
+                <p style="color: var(--text-secondary); margin-bottom: 24px; font-size: 14px;">
+                    Skills 是可扩展的功能模块，可以为Agent提供额外的能力（如热点搜索、网络搜索等）。
+                    启用后，无限续写和协作创作模式都可以使用这些Skills。
+                </p>
+                
+                <!-- Skills列表 -->
+                <div class="setting-section" style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 24px; margin-bottom: 20px;">
+                    <h3 style="color: var(--text-primary); margin-bottom: 16px; font-size: 15px;">
+                        <i class="ri-list-check" style="margin-right: 6px;"></i>
+                        可用 Skills (${skills.length})
+                    </h3>
+                    
+                    ${skills.length === 0 ? `
+                        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                            <i class="ri-inbox-line" style="font-size: 48px; opacity: 0.5;"></i>
+                            <p style="margin-top: 12px;">未发现可用的Skills</p>
+                            <p style="font-size: 12px; margin-top: 8px;">请在 skills/ 目录下添加Skill模块</p>
+                        </div>
+                    ` : `
+                        <div style="display: grid; gap: 12px;">
+                            ${skills.map(skill => {
+                                // 根据skill名称分配图标
+                                const skillIcons = {
+                                    'web_search': '🔍',
+                                    'meme_search': '😄',
+                                    'trends_search': '🔥',
+                                    'novel_writing_assistant': '✍️'
+                                };
+                                const icon = skillIcons[skill.name] || '🧩';
+                                
+                                return `
+                                <div class="skill-card" data-skill="${skill.name}" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px;">
+                                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                                        <div style="flex: 1;">
+                                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                                                <span style="font-size: 24px;">${icon}</span>
+                                                <span style="font-size: 16px; font-weight: 500; color: var(--text-primary);">${skill.display_name || skill.name}</span>
+                                                ${skill.enabled ? '<span style="background: #10b981; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px;">已启用</span>' : '<span style="background: #6b7280; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px;">未启用</span>'}
+                                                ${!skill.available ? '<span style="background: #ef4444; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px;">不可用</span>' : ''}
+                                            </div>
+                                            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: 6px;">
+                                                ${skill.description || '无描述'}
+                                            </div>
+                                            <div style="color: var(--text-secondary); font-size: 12px;">
+                                                <i class="ri-folder-line"></i> ${skill.path}
+                                            </div>
+                                        </div>
+                                        <div style="display: flex; align-items: center; gap: 12px;">
+                                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                                <input type="checkbox" class="skill-toggle" data-skill="${skill.name}" ${skill.enabled ? 'checked' : ''} ${!skill.available ? 'disabled' : ''} style="width: 20px; height: 20px; cursor: pointer; accent-color: var(--accent-color);">
+                                                <span style="color: var(--text-secondary); font-size: 13px;">${skill.available ? '启用' : '不可用'}</span>
+                                            </label>
+                                            <button class="delete-skill-btn" data-skill="${skill.name}" style="padding: 8px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #ef4444; border-radius: 6px; cursor: pointer;" title="删除Skill">
+                                                <i class="ri-delete-bin-line"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `}).join('')}
+                        </div>
+                    `}
+                </div>
+                
+                <!-- 提示信息 -->
+                <div style="background: rgba(100, 180, 255, 0.1); border: 1px solid rgba(100, 180, 255, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+                    <h3 style="margin-bottom: 12px; font-size: 14px; color: #7dd3fc; display: flex; align-items: center; gap: 8px;">
+                        <i class="ri-information-line"></i>
+                        关于 Skills
+                    </h3>
+                    <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                        Skills 是独立的功能模块，位于 skills/ 目录下。每个Skill包含一个 SKILL.md 描述文件和 scripts/ 目录下的服务实现。
+                        启用后，Agent可以通过 use_skill() 方法调用这些功能。
+                    </p>
+                </div>
+                
+                <!-- 保存按钮 -->
+                <button id="save-skills-settings" style="width: 100%; padding: 14px; background: var(--accent-color); border: none; color: white; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 15px;">
+                    <i class="ri-save-line"></i> 保存 Skills 配置
+                </button>
+            </div>
+        `;
+        
+        // 绑定事件
+        bindSkillsSettingsEvents();
+        
+    } catch (e) {
+        content.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <i class="ri-error-warning-line" style="font-size: 48px; color: #ef4444;"></i>
+                <p style="margin-top: 16px;">加载Skills失败: ${e.message}</p>
+            </div>
+        `;
+    }
+}
+
+function bindSkillsSettingsEvents() {
+    // 删除Skill按钮
+    document.querySelectorAll('.delete-skill-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const skillName = btn.dataset.skill;
+            
+            if (!confirm(`确定要删除 Skill "${skillName}" 吗？\n\n此操作将删除整个Skill目录及其所有文件，不可恢复！`)) {
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i>';
+            
+            try {
+                await apiCall(`/api/skills/${skillName}`, 'DELETE');
+                showToast(`Skill "${skillName}" 已删除`);
+                
+                // 刷新Skills列表
+                loadSkillsSettings();
+            } catch (e) {
+                showToast('删除失败: ' + e.message, 'error');
+                btn.disabled = false;
+                btn.innerHTML = '<i class="ri-delete-bin-line"></i>';
+            }
+        });
+    });
+    
+    // 保存按钮
+    document.getElementById('save-skills-settings')?.addEventListener('click', async () => {
+        const btn = document.getElementById('save-skills-settings');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line"></i> 保存中...';
+        
+        try {
+            const toggles = document.querySelectorAll('.skill-toggle');
+            const skillsConfig = {};
+            
+            toggles.forEach(toggle => {
+                const skillName = toggle.dataset.skill;
+                skillsConfig[skillName] = toggle.checked;
+            });
+            
+            await apiCall('/api/skills/batch-toggle', 'POST', { skills: skillsConfig });
+            
+            showToast('Skills配置已保存 ✓');
+        } catch (e) {
+            showToast('保存失败: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="ri-save-line"></i> 保存 Skills 配置';
+        }
+    });
+}
+
 // 全局暴露设置模块函数
 window.renderSettings = renderSettings;
 window.loadSettingsTab = loadSettingsTab;
@@ -2200,6 +2036,7 @@ window.loadGlobalAPISettings = loadGlobalAPISettings;
 window.loadAgentSettings = loadAgentSettings;
 window.loadKnowledgeBaseSettings = loadKnowledgeBaseSettings;
 window.loadRegexRulesSettings = loadRegexRulesSettings;
-window.loadTrendsSettings = loadTrendsSettings;
+window.loadSkillsSettings = loadSkillsSettings;
+// 备份和资料库功能将由 app-backup-resources.js 提供
 
 console.log('[app-settings.js] 设置模块已加载');

@@ -636,6 +636,7 @@ class AdvancedSearch:
         use_dynamic_weights: bool = True,
         rerank: bool = True,
         rerank_method: str = "combined",
+        compress_context: bool = False,
         chapter_filter: Optional[List[str]] = None,
         min_score: Optional[float] = None
     ) -> SearchResponse:
@@ -648,6 +649,7 @@ class AdvancedSearch:
             use_dynamic_weights: 是否使用动态权重
             rerank: 是否重排序
             rerank_method: 重排序方法
+            compress_context: 是否压缩返回结果中的文档内容
             chapter_filter: 章节过滤
             min_score: 最小分数阈值
         
@@ -692,6 +694,14 @@ class AdvancedSearch:
                 )
                 response.results = rerank_result.results
                 response.total = len(rerank_result.results)
+
+            # 压缩上下文（对返回文档做片段提取，保持接口兼容）
+            if compress_context and response.results:
+                for result in response.results:
+                    result.document = self.compressor._extract_relevant_snippet(
+                        query=analysis.cleaned_query,
+                        document=result.document
+                    )
         
         finally:
             # 恢复原始权重

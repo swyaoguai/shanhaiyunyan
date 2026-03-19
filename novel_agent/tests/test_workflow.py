@@ -344,6 +344,26 @@ class TestWorkflowCallbacks:
             coordinator.set_input_callback(input_handler)
 
 
+def test_coordinator_aux_memory_query_building():
+    coordinator = NovelCoordinator()
+    query = coordinator._build_aux_memory_query(
+        chapter_num=3,
+        chapter_outline={"title": "夜战", "summary": "主角突袭敌营"},
+        context={"previous_summary": "上一章主角拿到情报"},
+    )
+    assert "夜战" in query
+    assert "突袭" in query
+    assert "chapter:3" in query
+
+
+def test_coordinator_aux_memory_injection_context_without_project():
+    coordinator = NovelCoordinator()
+    coordinator.project_manager.current_project_id = None
+    payload = coordinator._get_aux_memory_injection_context("测试")
+    assert payload["enabled"] is False
+    assert payload["count"] == 0
+
+
 # ==================== Message Bus Tests ====================
 
 class TestMessageBus:

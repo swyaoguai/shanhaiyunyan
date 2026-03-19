@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 无限续写功能模块（独立版本）
  * 与多Agent写作完全分离，有独立的数据存储
  */
@@ -11,15 +11,15 @@ const infiniteWriteState = {
     currentChapter: 0,
     totalWords: 0,
     selectedModel: '',
-    selectedApiConfigId: '', // 选中的API配置ID
-    summaryInterval: 10, // 默认每10章生成一次总结
-    pendingSummaries: [], // 待确认的总结
-    globalApiConfig: null, // 全局API配置缓存
-    apiConfigs: [], // 所有API配置列表
-    activeConfigId: '', // 当前激活的配置ID
-    showTrends: true, // 是否显示热点面板
-    enableTrendsFusion: false, // 是否启用热点融合到创作中
-    selectedTrendsPlatforms: ['zhihu', 'douban'], // 选择的热点平台
+    selectedApiConfigId: '',
+    summaryInterval: 10,
+    pendingSummaries: [],
+    globalApiConfig: null,
+    apiConfigs: [],
+    activeConfigId: '',
+    showTrends: true,
+    enableTrendsFusion: false,
+    selectedTrendsPlatforms: ['toutiao', 'douyin'],
     config: {
         wordsPerChapter: 2500,
         autoSaveToKB: true
@@ -27,6 +27,34 @@ const infiniteWriteState = {
 };
 
 // ===== 无限续写导航面板（左侧） =====
+const IW_TREND_PLATFORMS = [
+    { id: 'toutiao', name: 'Toutiao' },
+    { id: 'douyin', name: 'Douyin' },
+    { id: 'weibo', name: 'Weibo' },
+    { id: 'zhihu', name: 'Zhihu' },
+    { id: 'douban', name: 'Douban' },
+    { id: 'weread', name: 'WeRead' },
+    { id: 'bilibili', name: 'Bilibili' },
+    { id: 'netease', name: 'Netease' },
+    { id: 'tencent', name: 'Tencent' },
+    { id: 'thepaper', name: 'ThePaper' },
+    { id: 'gcores', name: 'Gcores' },
+    { id: '36kr', name: '36Kr' },
+    { id: 'sspai', name: 'SSPAI' },
+    { id: 'ifanr', name: 'ifanr' },
+    { id: 'juejin', name: 'Juejin' },
+    { id: 'smzdm', name: 'SMZDM' }
+];
+
+function renderInfiniteWriteTrendPlatformOptions() {
+    return IW_TREND_PLATFORMS.map((platform) => `
+        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+            <input type="checkbox" class="iw-trend-platform" value="${platform.id}" ${infiniteWriteState.selectedTrendsPlatforms.includes(platform.id) ? 'checked' : ''}>
+            ${platform.name}
+        </label>
+    `).join('');
+}
+
 function renderInfiniteWriteNavPanel() {
     const navList = document.getElementById('nav-list-container');
     if (!navList) return;
@@ -59,7 +87,7 @@ function renderInfiniteWriteNavPanel() {
     const chapterTitle = document.createElement('div');
     chapterTitle.style.cssText = 'font-size: 11px; color: var(--text-secondary); padding: 8px 12px; opacity: 0.7; display: flex; align-items: center; justify-content: space-between;';
     chapterTitle.innerHTML = `
-        <span>已创作章节</span>
+        <span>章节列表</span>
         <span id="iw-nav-total-words" style="font-size: 10px;">${infiniteWriteState.totalWords.toLocaleString()}字</span>
     `;
     navList.appendChild(chapterTitle);
@@ -81,11 +109,13 @@ function loadInfiniteWriteNavChapterList() {
     
     // 从本地存储加载
     const savedData = localStorage.getItem('infinite_write_data');
+    console.log('[InfiniteWrite] nav load: localStorage hit =', !!savedData);
     if (savedData) {
         try {
             const data = JSON.parse(savedData);
             infiniteWriteState.chapters = data.chapters || [];
             infiniteWriteState.totalWords = data.totalWords || 0;
+            console.log('[InfiniteWrite] nav load: chapters =', infiniteWriteState.chapters.length, 'totalWords =', infiniteWriteState.totalWords);
         } catch (e) {
             console.error('[InfiniteWrite] 解析存储数据失败:', e);
         }
@@ -116,8 +146,7 @@ function loadInfiniteWriteNavChapterList() {
                 第${ch.chapter_number}章 ${ch.title || ''}
             </span>
             <span style="color: var(--text-secondary); font-size: 10px; flex-shrink: 0;">
-                ${(ch.word_count || 0).toLocaleString()}字
-            </span>
+                ${(ch.word_count || 0).toLocaleString()}字            </span>
         </div>
     `).join('');
     
@@ -147,6 +176,20 @@ function renderMultiAgentWriteNavPanel() {
     chapterTitle.style.cssText = 'font-size: 11px; color: var(--text-secondary); padding: 8px 12px; opacity: 0.7;';
     chapterTitle.textContent = '章节大纲（协作模式）';
     navList.appendChild(chapterTitle);
+
+    const importEntry = document.createElement('div');
+    importEntry.className = 'list-item';
+    importEntry.style.cssText = 'display: flex; align-items: center; gap: 8px; margin: 4px 8px 10px 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.12); cursor: pointer;';
+    importEntry.innerHTML = `
+        <i class="ri-upload-cloud-2-line" style="color: #22c55e;"></i>
+        <span style="font-size: 12px; color: #22c55e; font-weight: 500;">导入小说文件</span>
+    `;
+    importEntry.addEventListener('click', () => {
+        if (typeof showCollaborativeImportDialog === 'function') {
+            showCollaborativeImportDialog();
+        }
+    });
+    navList.appendChild(importEntry);
     
     // 渲染章节列表
     const chapters = (window.store && window.store.projectData && window.store.projectData.outline) || [];
@@ -221,6 +264,7 @@ async function loadInfiniteWriteChapterList() {
     try {
         // 从本地存储加载
         const savedData = localStorage.getItem('infinite_write_data');
+        console.log('[InfiniteWrite] list load: localStorage hit =', !!savedData);
         if (savedData) {
             const data = JSON.parse(savedData);
             infiniteWriteState.chapters = data.chapters || [];
@@ -229,8 +273,10 @@ async function loadInfiniteWriteChapterList() {
             infiniteWriteState.selectedModel = data.selectedModel || '';
             infiniteWriteState.selectedApiConfigId = data.selectedApiConfigId || '';
             infiniteWriteState.summaryInterval = data.summaryInterval || 10;
+            infiniteWriteState.pendingSummaries = data.pendingSummaries || [];
             infiniteWriteState.enableTrendsFusion = data.enableTrendsFusion || false;
-            infiniteWriteState.selectedTrendsPlatforms = data.selectedTrendsPlatforms || ['zhihu', 'douban'];
+            infiniteWriteState.selectedTrendsPlatforms = data.selectedTrendsPlatforms || ['toutiao', 'douyin'];
+            console.log('[InfiniteWrite] list load: chapters =', infiniteWriteState.chapters.length, 'totalWords =', infiniteWriteState.totalWords);
         }
         
         if (infiniteWriteState.chapters.length === 0) {
@@ -250,8 +296,7 @@ async function loadInfiniteWriteChapterList() {
                     第${ch.chapter_number}章 ${ch.title || ''}
                 </span>
                 <span style="color: var(--text-secondary); font-size: 10px; margin-left: 4px;">
-                    ${(ch.word_count || 0).toLocaleString()}字
-                </span>
+                    ${(ch.word_count || 0).toLocaleString()}字                </span>
             </div>
         `).join('');
         
@@ -295,7 +340,7 @@ async function renderInfiniteWriteInterface() {
     
     workspace.innerHTML = `
         <div style="max-width: 900px; margin: 0 auto; padding: 30px 20px;">
-            <!-- 标题区 -->
+            <!-- 标题 -->
             <div style="text-align: center; margin-bottom: 30px;">
                 <h1 style="font-size: 28px; color: var(--text-primary); margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 12px;">
                     <i class="ri-infinity-line" style="color: #8b5cf6;"></i>
@@ -312,8 +357,7 @@ async function renderInfiniteWriteInterface() {
                     <div>
                         <div style="font-weight: 500; color: #ef4444;">全局API未配置</div>
                         <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
-                            请先在 <a href="#" onclick="switchModule('settings'); loadSettingsTab('api'); return false;" style="color: #60a5fa; text-decoration: underline;">设置 → API配置</a> 中配置全局API，无限续写将使用全局API进行创作。
-                        </div>
+                            请先在 <a href="#" onclick="switchModule('settings'); loadSettingsTab('api'); return false;" style="color: #60a5fa; text-decoration: underline;">设置 > API配置</a> 中配置全局API，无限续写将使用全局API进行创作。                        </div>
                     </div>
                 </div>
             </div>
@@ -356,13 +400,13 @@ async function renderInfiniteWriteInterface() {
                             <select id="iw-model-input" style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
                                 ${renderInfiniteWriteModelOptions(infiniteWriteState.selectedApiConfigId || infiniteWriteState.activeConfigId, savedModel)}
                             </select>
-                            <button id="iw-custom-model-btn" style="padding: 10px 16px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; white-space: nowrap;" title="输入自定义模型名称">
+                            <button id="iw-custom-model-btn" style="padding: 10px 16px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; white-space: nowrap;" title="输入自定义模型名">
                                 <i class="ri-edit-line"></i>
                             </button>
                         </div>
                         <div id="iw-custom-model-container" style="display: none; margin-top: 8px;">
                             <input type="text" id="iw-custom-model-input" value=""
-                                placeholder="输入自定义模型名称"
+                                placeholder="输入自定义模型名"
                                 style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
                         </div>
                     </div>
@@ -381,60 +425,13 @@ async function renderInfiniteWriteInterface() {
                     <!-- 总结间隔 -->
                     <div>
                         <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">
-                            <i class="ri-file-list-line"></i> 总结间隔（章）
-                        </label>
+                            <i class="ri-file-list-line"></i> 总结间隔（章）                        </label>
                         <select id="iw-summary-interval" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
-                            <option value="5" ${infiniteWriteState.summaryInterval === 5 ? 'selected' : ''}>每5章</option>
-                            <option value="10" ${infiniteWriteState.summaryInterval === 10 ? 'selected' : ''}>每10章</option>
-                            <option value="15" ${infiniteWriteState.summaryInterval === 15 ? 'selected' : ''}>每15章</option>
-                            <option value="20" ${infiniteWriteState.summaryInterval === 20 ? 'selected' : ''}>每20章</option>
+                            <option value="5" ${infiniteWriteState.summaryInterval === 5 ? 'selected' : ''}>5章</option>
+                            <option value="10" ${infiniteWriteState.summaryInterval === 10 ? 'selected' : ''}>10章</option>
+                            <option value="15" ${infiniteWriteState.summaryInterval === 15 ? 'selected' : ''}>15章</option>
+                            <option value="20" ${infiniteWriteState.summaryInterval === 20 ? 'selected' : ''}>20章</option>
                         </select>
-                    </div>
-                </div>
-                
-                <!-- 热点融合开关 -->
-                <div style="margin-top: 16px; padding: 16px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <i class="ri-fire-fill" style="color: #ef4444;"></i>
-                            <span style="font-weight: 500; color: var(--text-primary);">热点融合创作</span>
-                        </div>
-                        <label class="switch" style="position: relative; display: inline-block; width: 44px; height: 24px;">
-                            <input type="checkbox" id="iw-enable-trends-fusion" ${infiniteWriteState.enableTrendsFusion ? 'checked' : ''} style="opacity: 0; width: 0; height: 0;">
-                            <span style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255,255,255,0.2); transition: .3s; border-radius: 24px;"></span>
-                        </label>
-                    </div>
-                    <p style="font-size: 12px; color: var(--text-secondary); margin-top: 8px; margin-bottom: 0;">
-                        启用后，创作时会先搜索热点/热梗，并自然融入剧情中
-                    </p>
-                    
-                    <!-- 热点平台选择（仅在启用时显示） -->
-                    <div id="iw-trends-platforms-container" style="${infiniteWriteState.enableTrendsFusion ? '' : 'display: none;'} margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1);">
-                        <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">
-                            选择热点来源平台：
-                        </label>
-                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="iw-trend-platform" value="zhihu" ${infiniteWriteState.selectedTrendsPlatforms.includes('zhihu') ? 'checked' : ''}>
-                                知乎
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="iw-trend-platform" value="douban" ${infiniteWriteState.selectedTrendsPlatforms.includes('douban') ? 'checked' : ''}>
-                                豆瓣
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="iw-trend-platform" value="weread" ${infiniteWriteState.selectedTrendsPlatforms.includes('weread') ? 'checked' : ''}>
-                                微信读书
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="iw-trend-platform" value="bilibili" ${infiniteWriteState.selectedTrendsPlatforms.includes('bilibili') ? 'checked' : ''}>
-                                B站
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="iw-trend-platform" value="toutiao" ${infiniteWriteState.selectedTrendsPlatforms.includes('toutiao') ? 'checked' : ''}>
-                                头条
-                            </label>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -464,14 +461,14 @@ async function renderInfiniteWriteInterface() {
                     </label>
                     <textarea id="iw-story-beginning" rows="6" placeholder="输入故事开头、创意灵感或简要设定...
 
-例如：
-在一个被永恒迷雾笼罩的大陆上，年轻的猎魔人林风第一次踏出了村庄的边界..."
+例如：在一个被永恒迷雾笼罩的大陆上，年轻的猎魔人林风第一次踏出了村庄的边界..."
                         style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 14px; color: var(--text-primary); border-radius: 8px; font-size: 14px; line-height: 1.6; resize: vertical;"></textarea>
                 </div>
                 
                 <button id="iw-start-btn" style="width: 100%; padding: 14px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px;">
-                    <i class="ri-play-circle-line"></i> 开始创作第一章
-                </button>
+                    <i class="ri-play-circle-line"></i> 开始创作第一章                </button>
+                <button id="iw-import-btn" style="width: 100%; margin-top: 10px; padding: 12px; background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 8px; cursor: pointer; font-weight: 500; font-size: 14px;">
+                    <i class="ri-upload-cloud-2-line"></i> 导入已有小说（txt/md/docx）                </button>
             </div>
             
             <!-- 续写控制区域（当有章节时显示） -->
@@ -502,7 +499,9 @@ async function renderInfiniteWriteInterface() {
                 <!-- 操作按钮 -->
                 <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                     <button id="iw-continue-btn" style="flex: 1; min-width: 200px; padding: 14px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px;">
-                        <i class="ri-play-line"></i> 续写下一章
+                        <i class="ri-play-line"></i> 续写下一章                    </button>
+                    <button id="iw-import-btn-inline" style="padding: 14px 20px; background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 8px; cursor: pointer; font-weight: 500;">
+                        <i class="ri-upload-cloud-2-line"></i> 导入小说
                     </button>
                     <button id="iw-finish-btn" style="padding: 14px 20px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
                         <i class="ri-flag-line"></i> 完结故事
@@ -517,24 +516,11 @@ async function renderInfiniteWriteInterface() {
             <div id="iw-pending-summaries" style="display: none; background: rgba(100, 180, 255, 0.1); border: 1px solid rgba(100, 180, 255, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 12px; font-size: 15px; color: #7dd3fc; display: flex; align-items: center; gap: 8px;">
                     <i class="ri-file-list-3-line"></i>
-                    剧情总结待确认
-                </h3>
+                    剧情总结待确认                </h3>
                 <div id="iw-summary-content"></div>
             </div>
             
-            <!-- 已写章节列表 -->
-            <div id="iw-chapters-section" style="${infiniteWriteState.chapters.length === 0 ? 'display: none;' : ''} background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px;">
-                <h3 style="margin-bottom: 16px; font-size: 16px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
-                    <i class="ri-file-list-3-line"></i>
-                    已创作章节
-                    <span id="iw-total-words" style="margin-left: auto; font-size: 13px; color: var(--text-secondary);">
-                        共 ${infiniteWriteState.totalWords.toLocaleString()} 字
-                    </span>
-                </h3>
-                <div id="iw-chapters-list" style="display: flex; flex-direction: column; gap: 12px; max-height: 400px; overflow-y: auto;">
-                    <!-- 动态生成 -->
-                </div>
-            </div>
+            <!-- 章节列表已移至左侧导航面板，此处不再重复显示 -->
             
             <!-- 热点灵感面板 -->
             <div id="iw-trends-container" style="${infiniteWriteState.showTrends ? '' : 'display: none;'} margin-top: 24px;">
@@ -561,8 +547,8 @@ async function renderInfiniteWriteInterface() {
                     <li><strong>独立数据</strong>：与协作创作模式完全分离，有专属存储</li>
                     <li><strong>模型自选</strong>：可以选择不同的模型进行创作</li>
                     <li><strong>自动总结</strong>：每${infiniteWriteState.summaryInterval}章自动生成剧情总结</li>
-                    <li><strong>知识库存储</strong>：确认总结后自动向量化存入知识库</li>
-                    <li><strong>角色追踪</strong>：追踪角色状态，防止已死角色复活</li>
+                    <li><strong>自动向量化</strong>：配置向量模型后，保存章节时自动存入知识库</li>
+                    <li><strong>剧情追踪</strong>：自动提取剧情约束，防止逻辑矛盾（如角色复活）</li>
                     <li><strong>热点灵感</strong>：获取实时热点，激发创作灵感</li>
                 </ul>
             </div>
@@ -572,10 +558,8 @@ async function renderInfiniteWriteInterface() {
     // 绑定事件
     bindInfiniteWriteEvents();
     
-    // 加载章节列表
-    if (infiniteWriteState.chapters.length > 0) {
-        renderInfiniteWriteChaptersList();
-    }
+    // 更新左侧导航的章节列表
+    loadInfiniteWriteNavChapterList();
     
     // 初始化热点面板
     initInfiniteWriteTrends();
@@ -694,7 +678,7 @@ async function loadGlobalApiConfigForInfiniteWrite() {
             infiniteWriteState.selectedApiConfigId = infiniteWriteState.activeConfigId;
         }
         
-        console.log('[InfiniteWrite] API配置已加载:', infiniteWriteState.apiConfigs.length, '个配置，当前激活:', infiniteWriteState.activeConfigId);
+        console.log('[InfiniteWrite] API配置已加载', infiniteWriteState.apiConfigs.length, '个配置，当前激活', infiniteWriteState.activeConfigId);
     } catch (e) {
         console.error('[InfiniteWrite] 加载API配置失败:', e);
         infiniteWriteState.globalApiConfig = null;
@@ -777,11 +761,10 @@ function bindInfiniteWriteEvents() {
     // 模型下拉选择
     const modelSelect = document.getElementById('iw-model-input');
     if (modelSelect && modelSelect.tagName === 'SELECT') {
-        // 【修复】初始化时，如果selectedModel为空，但下拉框有选中值，则使用下拉框的值
-        // 这修复了用户不手动切换模型时，模型名不被传递的BUG
+        // 【修复】初始化时，如果 selectedModel 为空，但下拉框有选中值，则使用下拉框值。
         if (!infiniteWriteState.selectedModel && modelSelect.value) {
             infiniteWriteState.selectedModel = modelSelect.value;
-            console.log('[InfiniteWrite] 初始化模型名称:', modelSelect.value);
+            console.log('[InfiniteWrite] 初始化模型名:', modelSelect.value);
             saveInfiniteWriteData();
         }
         
@@ -832,52 +815,20 @@ function bindInfiniteWriteEvents() {
         });
     }
     
-    // 热点融合开关
-    const trendsFusionToggle = document.getElementById('iw-enable-trends-fusion');
-    if (trendsFusionToggle) {
-        // 更新开关样式
-        const updateSwitchStyle = (checked) => {
-            const span = trendsFusionToggle.nextElementSibling;
-            if (span) {
-                span.style.backgroundColor = checked ? '#ef4444' : 'rgba(255,255,255,0.2)';
-            }
-        };
-        updateSwitchStyle(trendsFusionToggle.checked);
-        
-        trendsFusionToggle.addEventListener('change', (e) => {
-            infiniteWriteState.enableTrendsFusion = e.target.checked;
-            updateSwitchStyle(e.target.checked);
-            
-            // 显示/隐藏平台选择
-            const platformsContainer = document.getElementById('iw-trends-platforms-container');
-            if (platformsContainer) {
-                platformsContainer.style.display = e.target.checked ? '' : 'none';
-            }
-            
-            saveInfiniteWriteData();
-            
-            if (e.target.checked) {
-                showToast('已启用热点融合，创作时将自动搜索并融入热点', 'success');
-            }
-        });
-    }
-    
-    // 热点平台选择
-    document.querySelectorAll('.iw-trend-platform').forEach(checkbox => {
-        checkbox.addEventListener('change', () => {
-            const selectedPlatforms = [];
-            document.querySelectorAll('.iw-trend-platform:checked').forEach(cb => {
-                selectedPlatforms.push(cb.value);
-            });
-            infiniteWriteState.selectedTrendsPlatforms = selectedPlatforms;
-            saveInfiniteWriteData();
-        });
-    });
-    
     // 开始创作
     const startBtn = document.getElementById('iw-start-btn');
     if (startBtn) {
         startBtn.addEventListener('click', startInfiniteWrite);
+    }
+
+    const importBtn = document.getElementById('iw-import-btn');
+    if (importBtn) {
+        importBtn.addEventListener('click', showInfiniteWriteImportDialog);
+    }
+
+    const importBtnInline = document.getElementById('iw-import-btn-inline');
+    if (importBtnInline) {
+        importBtnInline.addEventListener('click', showInfiniteWriteImportDialog);
     }
     
     // 续写
@@ -943,10 +894,17 @@ async function startInfiniteWrite() {
     }
     
     const btn = document.getElementById('iw-start-btn');
+    
+    // 设置运行状态
+    infiniteWriteState.isRunning = true;
+    
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<i class="ri-loader-4-line"></i> 正在创作第一章...';
+        btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 正在创作第一章...';
     }
+    
+    // 更新状态指示器
+    updateRunningStatus(true);
     
     try {
         // 重置状态
@@ -983,13 +941,104 @@ async function startInfiniteWrite() {
             showInfiniteWriteError('创作失败', errorMsg);
         }
     } catch (e) {
-        showInfiniteWriteError('请求失败', e.message);
+        console.error('[InfiniteWrite] 开始创作失败:', e);
+        showInfiniteWriteError('请求失败', e.message || '未知错误');
     } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="ri-play-circle-line"></i> 开始创作第一章';
+        // 恢复运行状态
+        infiniteWriteState.isRunning = false;
+        updateRunningStatus(false);
+        
+        // 恢复按钮状态
+        const startBtn = document.getElementById('iw-start-btn');
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="ri-play-circle-line"></i> 开始创作第一章';
         }
     }
+}
+
+function showInfiniteWriteImportDialog() {
+    const modal = document.getElementById('modal-container');
+    if (!modal) return;
+
+    const hasExisting = Array.isArray(infiniteWriteState.chapters) && infiniteWriteState.chapters.length > 0;
+    modal.classList.remove('hidden');
+    modal.innerHTML = `
+        <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
+            <div style="width: 560px; max-width: 100%; background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 14px; padding: 24px;">
+                <h3 style="margin: 0 0 14px 0; color: var(--text-primary); font-size: 18px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-upload-cloud-2-line"></i>
+                    导入小说到无限续写
+                </h3>
+                <p style="margin: 0 0 12px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7;">
+                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>，导入后会立即自动整理无限续写记忆。
+                </p>
+                ${hasExisting ? `
+                <div style="margin-bottom: 12px; padding: 10px; border-radius: 8px; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; font-size: 12px;">
+                    当前已存有 ${infiniteWriteState.chapters.length} 章内容。导入后将切换到新的续写会话。
+                </div>` : ''}
+
+                <div style="margin-bottom: 18px;">
+                    <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">选择文件</label>
+                    <input id="iw-import-file" type="file" accept=".txt,.md,.docx"
+                        style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; color: var(--text-primary);">
+                </div>
+
+                <div style="display: flex; gap: 10px;">
+                    <button id="iw-import-cancel" style="flex: 1; padding: 11px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.1); color: var(--text-primary); cursor: pointer;">取消</button>
+                    <button id="iw-import-confirm" style="flex: 1; padding: 11px; border-radius: 8px; border: none; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; font-weight: 600; cursor: pointer;">开始导入</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const closeModal = () => {
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+    };
+
+    document.getElementById('iw-import-cancel')?.addEventListener('click', closeModal);
+    document.getElementById('iw-import-confirm')?.addEventListener('click', async () => {
+        const fileInput = document.getElementById('iw-import-file');
+        const btn = document.getElementById('iw-import-confirm');
+        const file = fileInput?.files?.[0];
+        if (!file) {
+            showToast('请先选择文件', 'warning');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 导入中...';
+
+        try {
+            const nextSessionId = 'infinite_' + Date.now();
+            const formData = new FormData();
+            formData.append('novel_file', file);
+            formData.append('session_id', nextSessionId);
+
+            const response = await apiFormCall('/api/continuous-write/import', formData, 'POST');
+            if (!response.success) {
+                throw new Error(response.error || '导入失败');
+            }
+
+            infiniteWriteState.sessionId = response.session_id || nextSessionId;
+            infiniteWriteState.chapters = Array.isArray(response.chapters) ? response.chapters : [];
+            infiniteWriteState.currentChapter = response.current_chapter || infiniteWriteState.chapters.length;
+            infiniteWriteState.totalWords = response.total_words || 0;
+            infiniteWriteState.pendingSummaries = [];
+            infiniteWriteState.isRunning = false;
+
+            saveInfiniteWriteData();
+            closeModal();
+            renderInfiniteWriteInterface();
+            showToast(`已导入 ${response.imported_chapters || 0} 章，记忆整理完成`, 'success');
+        } catch (e) {
+            showToast(`导入失败: ${e.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '开始导入';
+        }
+    });
 }
 
 // ===== 续写下一章 =====
@@ -1004,10 +1053,18 @@ async function continueInfiniteWrite() {
     }
     
     const btn = document.getElementById('iw-continue-btn');
+    const originalBtnHtml = btn ? btn.innerHTML : '';
+    
+    // 设置运行状态
+    infiniteWriteState.isRunning = true;
+    
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<i class="ri-loader-4-line"></i> 续写中...';
+        btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 续写中...';
     }
+    
+    // 更新状态指示器
+    updateRunningStatus(true);
     
     try {
         // 如果有纠正内容，先添加
@@ -1063,7 +1120,7 @@ async function continueInfiniteWrite() {
                 }
                 
                 // 重新开始会话，传递当前章节号和完整章节数据以便正确续写
-                // 关键修复：传递 recovered_chapters 确保后端有完整上下文
+                // 关键修复：传递 recovered_chapters，确保后端有完整上下文
                 const startResult = await apiCall('/api/continuous-write/start', 'POST', {
                     story_beginning: storyContext,
                     session_id: infiniteWriteState.sessionId,
@@ -1102,11 +1159,45 @@ async function continueInfiniteWrite() {
             showInfiniteWriteError('续写失败', errorMsg);
         }
     } catch (e) {
-        showInfiniteWriteError('请求失败', e.message);
+        console.error('[InfiniteWrite] 续写失败:', e);
+        showInfiniteWriteError('请求失败', e.message || '未知错误');
     } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="ri-play-line"></i> 续写下一章';
+        // 恢复运行状态
+        infiniteWriteState.isRunning = false;
+        updateRunningStatus(false);
+        
+        // 恢复按钮状态
+        const continueBtn = document.getElementById('iw-continue-btn');
+        if (continueBtn) {
+            continueBtn.disabled = false;
+            continueBtn.innerHTML = '<i class="ri-play-line"></i> 续写下一章';
+        }
+    }
+}
+
+// ===== 更新运行状态指示器 =====
+function updateRunningStatus(isRunning) {
+    const indicator = document.getElementById('iw-status-indicator');
+    const statusText = document.getElementById('iw-status-text');
+    
+    if (isRunning) {
+        if (indicator) {
+            indicator.style.background = '#f59e0b';
+            indicator.style.animation = 'pulse 1.5s ease-in-out infinite';
+        }
+        if (statusText) {
+            const chapterCount = infiniteWriteState.chapters.length;
+            statusText.innerHTML = `<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 正在创作第${chapterCount + 1}章...`;
+        }
+    } else {
+        if (indicator) {
+            indicator.style.animation = 'none';
+            indicator.style.background = infiniteWriteState.chapters.length > 0 ? '#22c55e' : '#666';
+        }
+        if (statusText) {
+            statusText.textContent = infiniteWriteState.chapters.length > 0
+                ? `已创作${infiniteWriteState.chapters.length}章，共${infiniteWriteState.totalWords.toLocaleString()}字`
+                : '尚未开始，请输入故事开头';
         }
     }
 }
@@ -1126,7 +1217,7 @@ async function checkAndGenerateSummary() {
         try {
             // 获取这些章节的内容
             const chaptersToSummarize = infiniteWriteState.chapters.slice(-interval);
-            const content = chaptersToSummarize.map(ch => 
+            const content = chaptersToSummarize.map(ch =>
                 `第${ch.chapter_number}章 ${ch.title || ''}\n${ch.content || ''}`
             ).join('\n\n---\n\n');
             
@@ -1161,6 +1252,7 @@ ${content.substring(0, 8000)}`,
 // ===== 显示待确认总结 =====
 function showPendingSummary(summary) {
     infiniteWriteState.pendingSummaries.push(summary);
+    saveInfiniteWriteData();
     
     const container = document.getElementById('iw-pending-summaries');
     const contentEl = document.getElementById('iw-summary-content');
@@ -1172,7 +1264,7 @@ function showPendingSummary(summary) {
     contentEl.innerHTML = `
         <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 16px; margin-bottom: 12px;">
             <div style="font-weight: 500; color: var(--text-primary); margin-bottom: 8px;">
-                第${summary.startChapter}-${summary.endChapter}章 剧情总结
+                第${summary.startChapter}-${summary.endChapter}章剧情总结
             </div>
             <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap;">
                 ${summary.content}
@@ -1195,6 +1287,11 @@ function showPendingSummary(summary) {
     document.getElementById('confirm-summary-btn')?.addEventListener('click', () => confirmSummary(summary));
     document.getElementById('skip-summary-btn')?.addEventListener('click', () => skipSummary(summary));
     document.getElementById('edit-summary-btn')?.addEventListener('click', () => editSummary(summary));
+
+    const hint = document.createElement('div');
+    hint.style.cssText = 'margin-top: 10px; font-size: 12px; color: var(--text-secondary); opacity: 0.85;';
+    hint.textContent = '提示：点击“确认并存入知识库”后才会真正写入，跳过不会保存。';
+    contentEl.appendChild(hint);
 }
 
 // ===== 确认总结并存入知识库 =====
@@ -1207,22 +1304,35 @@ async function confirmSummary(summary) {
     
     try {
         // 调用知识库API存储
-        // TODO: 实现知识库存储API
-        await new Promise(resolve => setTimeout(resolve, 500)); // 模拟
+        const result = await apiCall('/api/knowledge-base/infinite-summary', 'POST', {
+            summary: summary.content,
+            start_chapter: summary.startChapter,
+            end_chapter: summary.endChapter,
+            chapter_id: summary.id || ''
+        });
+
+        if (!result || result.success !== true) {
+            throw new Error((result && result.error) || '知识库存储失败');
+        }
         
         // 从待确认列表移除
         infiniteWriteState.pendingSummaries = infiniteWriteState.pendingSummaries.filter(
             s => s.timestamp !== summary.timestamp
         );
         
-        showToast('剧情总结已存入知识库 ✓');
+        showToast('剧情总结已存入知识库 ✨', 'success');
         
         // 隐藏确认区域
         const container = document.getElementById('iw-pending-summaries');
         if (container) container.style.display = 'none';
         
     } catch (e) {
-        showToast('存储失败: ' + e.message, 'error');
+        const msg = (e && e.message) ? e.message : '未知错误';
+        if (msg.includes('未配置') || msg.includes('暂不可用') || msg.includes('503')) {
+            showToast('知识库未就绪：当前总结仅保留在本地，可稍后重试', 'warning');
+        } else {
+            showToast('存储失败: ' + msg, 'error');
+        }
     } finally {
         if (btn) {
             btn.disabled = false;
@@ -1236,6 +1346,7 @@ function skipSummary(summary) {
     infiniteWriteState.pendingSummaries = infiniteWriteState.pendingSummaries.filter(
         s => s.timestamp !== summary.timestamp
     );
+    saveInfiniteWriteData();
     
     const container = document.getElementById('iw-pending-summaries');
     if (container) container.style.display = 'none';
@@ -1251,7 +1362,7 @@ function editSummary(summary) {
     contentEl.innerHTML = `
         <div style="margin-bottom: 12px;">
             <div style="font-weight: 500; color: var(--text-primary); margin-bottom: 8px;">
-                编辑第${summary.startChapter}-${summary.endChapter}章 剧情总结
+                编辑第${summary.startChapter}-${summary.endChapter}章剧情总结
             </div>
             <textarea id="edit-summary-textarea" rows="10" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 13px; line-height: 1.6; resize: vertical;">${summary.content}</textarea>
         </div>
@@ -1269,6 +1380,7 @@ function editSummary(summary) {
         const textarea = document.getElementById('edit-summary-textarea');
         if (textarea) {
             summary.content = textarea.value;
+            saveInfiniteWriteData();
             confirmSummary(summary);
         }
     });
@@ -1280,7 +1392,7 @@ function editSummary(summary) {
 
 // ===== 重置无限续写 =====
 function resetInfiniteWrite() {
-    if (!confirm('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销！')) {
+    if (!confirm('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销。')) {
         return;
     }
     
@@ -1312,7 +1424,7 @@ function updateInfiniteWriteUI() {
     }
     
     if (statusText) {
-        statusText.textContent = infiniteWriteState.chapters.length > 0 
+        statusText.textContent = infiniteWriteState.chapters.length > 0
             ? `已创作${infiniteWriteState.chapters.length}章，共${infiniteWriteState.totalWords.toLocaleString()}字`
             : '尚未开始，请输入故事开头';
     }
@@ -1320,17 +1432,12 @@ function updateInfiniteWriteUI() {
     // 显示/隐藏区域
     const startSection = document.getElementById('iw-start-section');
     const controlSection = document.getElementById('iw-control-section');
-    const chaptersSection = document.getElementById('iw-chapters-section');
     
     if (startSection) startSection.style.display = infiniteWriteState.chapters.length === 0 ? 'block' : 'none';
     if (controlSection) controlSection.style.display = infiniteWriteState.chapters.length > 0 ? 'block' : 'none';
-    if (chaptersSection) chaptersSection.style.display = infiniteWriteState.chapters.length > 0 ? 'block' : 'none';
     
-    // 更新总字数
-    const totalWordsEl = document.getElementById('iw-total-words');
-    if (totalWordsEl) {
-        totalWordsEl.textContent = `共 ${infiniteWriteState.totalWords.toLocaleString()} 字`;
-    }
+    // 更新左侧导航的总字数和章节列表
+    loadInfiniteWriteNavChapterList();
 }
 
 // ===== 渲染章节列表 =====
@@ -1377,8 +1484,165 @@ function renderInfiniteWriteChaptersList() {
     });
 }
 
+function recomputeInfiniteWriteStats() {
+    let total = 0;
+    let maxChapter = 0;
+    infiniteWriteState.chapters.forEach(ch => {
+        total += ch.word_count || 0;
+        if (ch.chapter_number && ch.chapter_number > maxChapter) {
+            maxChapter = ch.chapter_number;
+        }
+    });
+    infiniteWriteState.totalWords = total;
+    infiniteWriteState.currentChapter = maxChapter;
+}
+
+async function syncInfiniteWriteSession(deletedChapters = []) {
+    try {
+        await apiCall('/api/continuous-write/sync', 'POST', {
+            session_id: infiniteWriteState.sessionId,
+            chapters: infiniteWriteState.chapters,
+            current_chapter: infiniteWriteState.currentChapter,
+            deleted_chapters: deletedChapters
+        });
+    } catch (e) {
+        console.warn('[InfiniteWrite] 同步会话失败:', e);
+    }
+}
+
+async function deleteInfiniteWriteChapterFrom(chapterNumber) {
+    const idx = infiniteWriteState.chapters.findIndex(ch => ch.chapter_number === chapterNumber);
+    if (idx === -1) {
+        showToast(`未找到第${chapterNumber}章`, 'error');
+        return;
+    }
+    
+    const removed = infiniteWriteState.chapters.slice(idx);
+    const removedNumbers = removed.map(ch => ch.chapter_number).filter(n => typeof n === 'number');
+    
+    infiniteWriteState.chapters = infiniteWriteState.chapters.slice(0, idx);
+    recomputeInfiniteWriteStats();
+    saveInfiniteWriteData();
+    
+    updateInfiniteWriteUI();
+    renderInfiniteWriteChaptersList();
+    loadInfiniteWriteChapterList();
+    loadInfiniteWriteNavChapterList();
+    
+    await syncInfiniteWriteSession(removedNumbers);
+    
+    showToast(`已删除第${chapterNumber}章及之后的章节`);
+}
+
+async function regenerateInfiniteWriteChapter(chapterNumber) {
+    const model = getSelectedModelForInfiniteWrite();
+    if (!model) {
+        showToast('请先在设置中配置全局API，或选择一个模型', 'error');
+        return;
+    }
+    
+    const apiConfigId = getSelectedApiConfigIdForInfiniteWrite();
+    const inspiration = document.getElementById('iw-inspiration')?.value.trim() || '';
+    
+    const backup = {
+        chapters: [...infiniteWriteState.chapters],
+        currentChapter: infiniteWriteState.currentChapter,
+        totalWords: infiniteWriteState.totalWords
+    };
+    
+    const idx = infiniteWriteState.chapters.findIndex(ch => ch.chapter_number === chapterNumber);
+    if (idx === -1) {
+        showToast(`未找到第${chapterNumber}章`, 'error');
+        return;
+    }
+    
+    const removed = infiniteWriteState.chapters.slice(idx);
+    const removedNumbers = removed.map(ch => ch.chapter_number).filter(n => typeof n === 'number');
+    
+    infiniteWriteState.chapters = infiniteWriteState.chapters.slice(0, idx);
+    recomputeInfiniteWriteStats();
+    saveInfiniteWriteData();
+    
+    updateInfiniteWriteUI();
+    renderInfiniteWriteChaptersList();
+    loadInfiniteWriteChapterList();
+    loadInfiniteWriteNavChapterList();
+    
+    await syncInfiniteWriteSession(removedNumbers);
+    
+    try {
+        const result = await apiCall('/api/continuous-write/regenerate', 'POST', {
+            session_id: infiniteWriteState.sessionId,
+            chapter_number: chapterNumber,
+            inspiration: inspiration,
+            model: model,
+            api_config_id: apiConfigId,
+            enable_trends: infiniteWriteState.enableTrendsFusion,
+            trends_platforms: infiniteWriteState.selectedTrendsPlatforms
+        });
+        
+        if (result.success && result.chapter) {
+            showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
+            const isFirst = chapterNumber === 1;
+            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirst);
+            return;
+        }
+        
+        throw new Error(result.error || '重新生成失败');
+    } catch (e) {
+        infiniteWriteState.chapters = backup.chapters;
+        infiniteWriteState.currentChapter = backup.currentChapter;
+        infiniteWriteState.totalWords = backup.totalWords;
+        saveInfiniteWriteData();
+        
+        updateInfiniteWriteUI();
+        renderInfiniteWriteChaptersList();
+        loadInfiniteWriteChapterList();
+        loadInfiniteWriteNavChapterList();
+        
+        showInfiniteWriteError('重新生成失败', e.message);
+    }
+}
+
+async function regeneratePreviewChapter(chapterNumber, isFirstChapter) {
+    const model = getSelectedModelForInfiniteWrite();
+    if (!model) {
+        showToast('请先在设置中配置全局API，或选择一个模型', 'error');
+        return;
+    }
+
+    const apiConfigId = getSelectedApiConfigIdForInfiniteWrite();
+    const inspiration = document.getElementById('iw-inspiration')?.value.trim() || '';
+
+    try {
+        const result = await apiCall('/api/continuous-write/regenerate', 'POST', {
+            session_id: infiniteWriteState.sessionId,
+            chapter_number: chapterNumber,
+            inspiration: inspiration,
+            model: model,
+            api_config_id: apiConfigId,
+            enable_trends: infiniteWriteState.enableTrendsFusion,
+            trends_platforms: infiniteWriteState.selectedTrendsPlatforms
+        });
+
+        if (result.success && result.chapter) {
+            showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
+            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirstChapter);
+            return;
+        }
+
+        throw new Error(result.error || '重新生成失败');
+    } catch (e) {
+        showInfiniteWriteError('重新生成失败', e.message);
+    }
+}
+
 // ===== 显示章节预览（带确认选项，用于新创作的章节） =====
 function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = false) {
+    console.log('[InfiniteWrite] preview confirm open:', {
+        chapterNumber: chapter.chapter_number,
+        isFirstChapter: isFirstChapter
+    });
     const modal = document.getElementById('modal-container');
     if (!modal) return;
     
@@ -1410,23 +1674,25 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
                 ` : ''}
                 <div style="padding: 16px 24px; border-top: 1px solid var(--border-color); background: rgba(139, 92, 246, 0.05);">
                     <p style="margin: 0 0 12px 0; font-size: 13px; color: var(--text-secondary);">
-                        <i class="ri-information-line"></i> 请确认是否保留这一章到无限续写列表？
-                    </p>
+                        <i class="ri-information-line"></i> 请确认是否保留这一章到无限续写列表。                    </p>
                     <div style="display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap;">
                         <button id="iw-discard-btn" style="padding: 10px 20px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer; font-weight: 500;">
                             <i class="ri-delete-bin-line"></i> 放弃本章
                         </button>
                         <button id="iw-keep-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                            <i class="ri-check-line"></i> 保留到列表
-                        </button>
-                        <button id="iw-keep-and-save-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                            <i class="ri-save-line"></i> 保留并保存到项目
+                            <i class="ri-check-line"></i> 保留到列表                        </button>
+                        <button id="iw-regenerate-preview-btn" style="padding: 10px 20px; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; border-radius: 8px; cursor: pointer; font-weight: 500;">
+                            <i class="ri-refresh-line"></i> 重新生成本章
                         </button>
                     </div>
                 </div>
             </div>
         </div>
     `;
+    console.log('[InfiniteWrite] preview confirm open:', {
+        chapterNumber: chapter.chapter_number,
+        isFirstChapter: isFirstChapter
+    });
     
     // 放弃本章
     document.getElementById('iw-discard-btn')?.addEventListener('click', () => {
@@ -1460,29 +1726,16 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
         showToast(`第${chapter.chapter_number}章已保留到列表 ✓`);
     });
     
-    // 保留并保存到项目
-    document.getElementById('iw-keep-and-save-btn')?.addEventListener('click', async () => {
-        // 先保存到无限续写列表
-        infiniteWriteState.chapters.push(chapter);
-        infiniteWriteState.currentChapter = chapter.chapter_number;
-        infiniteWriteState.totalWords += chapter.word_count || 0;
-        saveInfiniteWriteData();
-        
-        // 更新界面
-        updateInfiniteWriteUI();
-        renderInfiniteWriteChaptersList();
-        loadInfiniteWriteChapterList();
-        
-        // 检查是否需要生成总结（仅非第一章）
-        if (!isFirstChapter) {
-            checkAndGenerateSummary();
-        }
-        
-        // 再保存到项目
-        await saveChapterToProject(chapter);
-        
+    // 重新生成本章（预览态）
+    document.getElementById('iw-regenerate-preview-btn')?.addEventListener('click', async () => {
+        const chapterNumber = chapter.chapter_number;
+        console.log('[InfiniteWrite] preview regenerate click:', {
+            chapterNumber: chapterNumber,
+            isFirstChapter: isFirstChapter
+        });
         modal.classList.add('hidden');
         modal.innerHTML = '';
+        await regeneratePreviewChapter(chapterNumber, isFirstChapter);
     });
 }
 
@@ -1517,10 +1770,14 @@ function showInfiniteWriteChapterPreview(chapter) {
                     </div>
                 </div>
                 ` : ''}
-                <div style="padding: 16px 24px; border-top: 1px solid var(--border-color); display: flex; gap: 12px; justify-content: flex-end;">
-                    <button id="save-to-project-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                        <i class="ri-save-line"></i> 保存到项目章节
-                    </button>
+                <div style="padding: 16px 24px; border-top: 1px solid var(--border-color); display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap;">
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <button id="iw-delete-chapter-btn" style="padding: 10px 20px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer; font-weight: 500;">
+                            <i class="ri-delete-bin-line"></i> 删除本章及之后章节                        </button>
+                        <button id="iw-regenerate-chapter-btn" style="padding: 10px 20px; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; border-radius: 8px; cursor: pointer; font-weight: 500;">
+                            <i class="ri-refresh-line"></i> 重新生成本章
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1531,11 +1788,23 @@ function showInfiniteWriteChapterPreview(chapter) {
         modal.innerHTML = '';
     });
     
-    // 保存到项目章节
-    document.getElementById('save-to-project-btn')?.addEventListener('click', async () => {
-        await saveChapterToProject(chapter);
+    
+    // 删除本章及之后章节
+    document.getElementById('iw-delete-chapter-btn')?.addEventListener('click', async () => {
+        const confirmed = confirm(`确定要删除第${chapter.chapter_number}章及之后章节吗？\n\n此操作不可撤销。`);
+        if (!confirmed) return;
         modal.classList.add('hidden');
         modal.innerHTML = '';
+        await deleteInfiniteWriteChapterFrom(chapter.chapter_number);
+    });
+    
+    // 重新生成本章
+    document.getElementById('iw-regenerate-chapter-btn')?.addEventListener('click', async () => {
+        const confirmed = confirm(`确定要重新生成第${chapter.chapter_number}章吗？\n\n将删除本章及之后章节并重新生成。`);
+        if (!confirmed) return;
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+        await regenerateInfiniteWriteChapter(chapter.chapter_number);
     });
     
     // 点击背景关闭
@@ -1550,9 +1819,17 @@ function showInfiniteWriteChapterPreview(chapter) {
 // ===== 保存章节到项目 =====
 async function saveChapterToProject(chapter) {
     try {
-        // 获取当前项目的大纲数据
+        // 获取当前项目的大纲数量
         const outlineRes = await apiCall('/api/project-data/outline', 'GET');
         let outline = outlineRes.data || [];
+        console.log('[InfiniteWrite] saveToProject:', {
+            projectId: store?.currentProject,
+            outlineLen: outline.length,
+            chapterNumber: chapter.chapter_number,
+            chapterIndex: chapter.chapter_number - 1,
+            exists: !!outline[chapter.chapter_number - 1],
+            existingTitle: outline[chapter.chapter_number - 1]?.title || ''
+        });
         
         const chapterNum = chapter.chapter_number;
         const chapterIndex = chapterNum - 1;
@@ -1569,6 +1846,7 @@ async function saveChapterToProject(chapter) {
         
         // 检查章节是否已存在
         if (outline[chapterIndex]) {
+            console.log('[InfiniteWrite] saveToProject: chapter exists, ask overwrite');
             // 章节已存在，询问是否覆盖
             const overwrite = confirm(`第${chapterNum}章已存在，是否覆盖？\n\n现有标题：${outline[chapterIndex].title}\n新标题：${chapterData.title}`);
             if (!overwrite) {
@@ -1602,58 +1880,10 @@ async function saveChapterToProject(chapter) {
         
     } catch (e) {
         showToast('保存失败: ' + e.message, 'error');
-        console.error('[InfiniteWrite] 保存章节到项目失败:', e);
+        console.error('[InfiniteWrite] 保存章节到项目失败', e);
     }
 }
 
-// ===== 显示保存提示对话框 =====
-function showSaveToProjectPrompt(chapter) {
-    const modal = document.getElementById('modal-container');
-    if (!modal) return;
-    
-    modal.classList.remove('hidden');
-    
-    modal.innerHTML = `
-        <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
-            <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 500px; max-width: 100%; padding: 24px;">
-                <h3 style="margin: 0 0 16px 0; font-size: 18px; color: var(--text-primary); display: flex; align-items: center; gap: 10px;">
-                    <i class="ri-save-line" style="color: #22c55e;"></i>
-                    保存到项目
-                </h3>
-                
-                <p style="color: var(--text-secondary); margin-bottom: 20px; font-size: 14px;">
-                    是否将刚才创作的 <strong style="color: var(--text-primary);">第${chapter.chapter_number}章 ${chapter.title || ''}</strong> 保存到当前项目的章节中？
-                </p>
-                
-                <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px; margin-bottom: 20px;">
-                    <div style="font-size: 13px; color: var(--text-secondary);">
-                        <i class="ri-file-text-line"></i> 字数：${(chapter.word_count || 0).toLocaleString()} 字
-                    </div>
-                </div>
-                
-                <div style="display: flex; gap: 12px; justify-content: flex-end;">
-                    <button id="prompt-skip-btn" style="padding: 10px 20px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">
-                        暂不保存
-                    </button>
-                    <button id="prompt-save-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                        <i class="ri-save-line"></i> 保存到项目
-                    </button>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    document.getElementById('prompt-skip-btn')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
-    });
-    
-    document.getElementById('prompt-save-btn')?.addEventListener('click', async () => {
-        await saveChapterToProject(chapter);
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
-    });
-}
 
 // ===== 保存数据到本地存储 =====
 function saveInfiniteWriteData() {
@@ -1665,12 +1895,15 @@ function saveInfiniteWriteData() {
         selectedModel: infiniteWriteState.selectedModel,
         selectedApiConfigId: infiniteWriteState.selectedApiConfigId,
         summaryInterval: infiniteWriteState.summaryInterval,
+        pendingSummaries: infiniteWriteState.pendingSummaries,
         enableTrendsFusion: infiniteWriteState.enableTrendsFusion,
         selectedTrendsPlatforms: infiniteWriteState.selectedTrendsPlatforms,
         config: infiniteWriteState.config
     };
     
-    localStorage.setItem('infinite_write_data', JSON.stringify(data));
+    const payload = JSON.stringify(data);
+    console.log('[InfiniteWrite] save: chapters =', data.chapters?.length || 0, 'totalWords =', data.totalWords || 0, 'payloadBytes =', payload.length);
+    localStorage.setItem('infinite_write_data', payload);
     localStorage.setItem('infinite_write_model', infiniteWriteState.selectedModel);
 }
 
@@ -1682,8 +1915,10 @@ window.loadInfiniteWriteNavChapterList = loadInfiniteWriteNavChapterList;
 window.renderInfiniteWriteInterface = renderInfiniteWriteInterface;
 window.showInfiniteWriteChapterPreview = showInfiniteWriteChapterPreview;
 window.showInfiniteWriteChapterPreviewWithConfirm = showInfiniteWriteChapterPreviewWithConfirm;
+window.deleteInfiniteWriteChapterFrom = deleteInfiniteWriteChapterFrom;
+window.regenerateInfiniteWriteChapter = regenerateInfiniteWriteChapter;
 
-// 兼容旧版本
+// 兼容旧版
 window.renderWriteNavPanel = renderMultiAgentWriteNavPanel;
 window.showContinuousWriteInterface = renderInfiniteWriteInterface;
 
@@ -1712,7 +1947,7 @@ function showInfiniteWriteError(title, message) {
                     <li>代理/VPN配置问题</li>
                 </ul>
                 <div style="margin-top: 12px; font-size: 13px;">
-                    <strong>解决方法：</strong>请到 <a href="#" onclick="switchModule('settings'); return false;" style="color: #60a5fa;">设置 → 全局API配置</a> 检查配置是否正确，或尝试更换模型。
+                    <strong>解决方法：</strong>请到 <a href="#" onclick="switchModule('settings'); return false;" style="color: #60a5fa;">设置 > 全局API配置</a> 检查配置是否正确，或尝试更换模型。
                 </div>
             </div>
         `;
@@ -1838,8 +2073,7 @@ function showFinishStoryDialog() {
                     <!-- 新项目名称输入 -->
                     <div id="new-project-input-section">
                         <label style="display: block; font-size: 14px; color: var(--text-primary); margin-bottom: 8px; font-weight: 500;">
-                            <i class="ri-book-2-line"></i> 新项目名称
-                        </label>
+                            <i class="ri-book-2-line"></i> 新项目名称                        </label>
                         <input type="text" id="finish-project-name"
                             value="${getDefaultProjectName()}"
                             placeholder="输入项目名称..."
@@ -1853,8 +2087,7 @@ function showFinishStoryDialog() {
                             <div>
                                 <div style="font-weight: 500; color: var(--text-primary);">保存后清空无限续写数据</div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-                                    <i class="ri-information-line"></i> 建议勾选，以便开始新的创作
-                                </div>
+                                    <i class="ri-information-line"></i> 建议勾选，以便开始新的创作                                </div>
                             </div>
                         </label>
                     </div>
@@ -1960,9 +2193,10 @@ async function executeFinishStory() {
         if (targetProjectId !== store.currentProject) {
             await apiCall(`/api/projects/${targetProjectId}/switch`, 'POST');
             store.currentProject = targetProjectId;
+            store.currentProjectId = targetProjectId;
         }
         
-        // 获取目标项目的现有大纲数据
+        // 获取目标项目的现有大纲数
         const outlineRes = await apiCall('/api/project-data/outline', 'GET');
         let outline = outlineRes.data || [];
         const startIndex = outline.length;
@@ -2035,6 +2269,18 @@ async function executeFinishStory() {
 
 // 全局暴露错误提示函数和完结功能
 window.showInfiniteWriteError = showInfiniteWriteError;
+window.showInfiniteWriteImportDialog = showInfiniteWriteImportDialog;
 window.showFinishStoryDialog = showFinishStoryDialog;
+window.updateRunningStatus = updateRunningStatus;
 
-console.log('[continuous_write.js] 无限续写模块已加载（独立版本）');
+// 页面卸载前检查是否有运行中的任务
+window.addEventListener('beforeunload', (e) => {
+    if (infiniteWriteState.isRunning) {
+        e.preventDefault();
+        e.returnValue = '有正在进行的创作任务，确定要离开吗？';
+        return e.returnValue;
+    }
+});
+
+console.log('[continuous_write.js] 无限续写模块已加载（独立版本，含错误处理增强）');
+

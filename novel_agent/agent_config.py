@@ -12,6 +12,7 @@ from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, asdict, field
 
 from .constants import LLM_DEFAULTS
+from .utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,8 @@ class GlobalAPIConfig:
 @dataclass
 class AgentModelConfig:
     """单个Agent的模型配置"""
-    agent_name: str
+    agent_name: str = ""
+    api_config_id: str = ""
     api_base: str = ""
     api_key: str = ""
     model: str = ""
@@ -130,43 +132,43 @@ class AgentConfigManager:
     AGENT_DEFINITIONS = {
         "Communicator": {
             "display_name": "沟通助手",
-            "description": "与用户对话收集创作需求",
-            "recommended_models": ["gpt-3.5-turbo", "deepseek-chat"],
+            "description": "专业的需求分析专家，擅长通过结构化对话深入理解用户的创作意图、风格偏好和具体需求。能够识别隐含需求，提出针对性问题，确保收集到完整准确的创作信息。",
+            "recommended_models": ["gpt-4", "gpt-3.5-turbo", "deepseek-chat"],
             "default_temperature": 0.8
         },
         "Worldbuilder": {
-            "display_name": "世界观构建",
-            "description": "构建小说的世界设定",
-            "recommended_models": ["gpt-4", "claude-3-opus"],
+            "display_name": "世界观构建师",
+            "description": "资深的世界观设计专家，精通构建完整、自洽、富有深度的虚构世界。能够设计复杂的社会体系、权力结构、文化背景、历史脉络和独特的世界规则，确保世界观的逻辑性和可扩展性。",
+            "recommended_models": ["gpt-4", "claude-3-opus", "claude-3-sonnet"],
             "default_temperature": 0.8
         },
         "Outliner": {
-            "display_name": "大纲规划",
-            "description": "规划故事结构和章节大纲",
-            "recommended_models": ["gpt-4-turbo", "gpt-4"],
+            "display_name": "大纲规划师",
+            "description": "经验丰富的故事架构师，擅长设计引人入胜的故事结构。能够规划完整的情节线、设置合理的冲突节奏、安排精妙的伏笔铺垫，确保故事的逻辑连贯性和戏剧张力。",
+            "recommended_models": ["gpt-4-turbo", "gpt-4", "claude-3-opus"],
             "default_temperature": 0.7
         },
         "ChapterWriter": {
-            "display_name": "章节撰写",
-            "description": "根据大纲生成章节内容",
-            "recommended_models": ["gpt-4", "claude-3-sonnet"],
+            "display_name": "章节撰写师",
+            "description": "专业的内容创作者，精通将大纲转化为生动的章节内容。擅长场景描写、人物刻画、对话设计和情节推进，能够保持风格一致性，创作出引人入胜的章节内容。",
+            "recommended_models": ["gpt-4", "claude-3-sonnet", "claude-3-opus"],
             "default_temperature": 0.8
         },
         "Polisher": {
-            "display_name": "文字润色",
-            "description": "优化文字质量和表达",
-            "recommended_models": ["gpt-4", "gpt-3.5-turbo"],
+            "display_name": "文字润色师",
+            "description": "资深的文字编辑专家，擅长优化文字表达、提升语言质量。能够识别并修正语法错误、改善句式结构、增强文字感染力，同时保持原有风格和意境。",
+            "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-sonnet"],
             "default_temperature": 0.6
         },
         "Evaluator": {
-            "display_name": "质量评估",
-            "description": "检测内容质量和逻辑问题",
-            "recommended_models": ["gpt-4", "gpt-4-turbo"],
+            "display_name": "质量评估师",
+            "description": "严谨的内容审核专家，具备敏锐的逻辑分析能力。能够系统性地检测内容中的逻辑漏洞、情节矛盾、人物行为不一致等问题，并提供详细的改进建议。",
+            "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-opus"],
             "default_temperature": 0.3
         },
         "ContinuousWriter": {
-            "display_name": "无限续写",
-            "description": "根据故事开头或灵感进行连续创作",
+            "display_name": "连续创作师",
+            "description": "富有创造力的长篇创作专家，擅长基于已有内容进行连续性创作。能够保持故事连贯性、维持人物性格一致性、推进情节发展，创作出自然流畅的续写内容。",
             "recommended_models": ["gpt-4", "claude-3-opus", "gemini-pro"],
             "default_temperature": 0.8
         }
@@ -277,26 +279,42 @@ class AgentConfigManager:
             for name, cfg in self.configs.items()
         }
         try:
-            self.config_file.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8"
+            old_content = self.config_file.read_text(encoding="utf-8") if self.config_file.exists() else None
+            atomic_write_json(
+                self.config_file,
+                data,
+                old_content=old_content,
+                ensure_ascii=False,
+                indent=2,
             )
         except (OSError, IOError, PermissionError) as e:
             logger.error(f"Failed to save agent configs to {self.config_file}: {e}")
             raise
     
-    def _save_global_config(self) -> None:
-        """保存全局API配置到文件（使用多配置格式）"""
+    def _save_global_config(self, sync_env: bool = False) -> None:
+        """
+        保存全局API配置到文件（使用多配置格式）
+        
+        Args:
+            sync_env: 是否同步更新.env文件（仅在应用配置时为True）
+        """
         data = {
             "configs": [asdict(cfg) for cfg in self.multi_config.configs],
             "active_config_id": self.multi_config.active_config_id,
             "active_model": self.multi_config.active_model
         }
         try:
-            self.global_config_file.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8"
+            old_content = self.global_config_file.read_text(encoding="utf-8") if self.global_config_file.exists() else None
+            atomic_write_json(
+                self.global_config_file,
+                data,
+                old_content=old_content,
+                ensure_ascii=False,
+                indent=2,
             )
+            # 只在明确指定时才同步.env文件（避免编辑非激活配置时误同步）
+            if sync_env:
+                self._sync_to_env_file()
         except (OSError, IOError, PermissionError) as e:
             logger.error(f"Failed to save global API config to {self.global_config_file}: {e}")
             raise
@@ -305,6 +323,48 @@ class AgentConfigManager:
         """获取全局API配置（兼容接口）"""
         self._sync_global_from_multi()
         return self.global_config
+    
+    def _sync_to_env_file(self) -> None:
+        """将当前激活的配置同步到.env文件"""
+        try:
+            # 获取当前激活的配置
+            active = self.multi_config.get_active_config()
+            if not active:
+                logger.warning("No active config to sync to .env file")
+                return
+            
+            # 获取.env文件路径
+            env_path = Path(__file__).parent.parent / ".env"
+            
+            # 读取现有.env内容
+            env_content = {}
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, value = line.split("=", 1)
+                        env_content[key.strip()] = value.strip()
+            
+            # 更新API配置相关的环境变量
+            env_content["OPENAI_API_BASE"] = active.api_base
+            env_content["OPENAI_API_KEY"] = active.api_key
+            env_content["OPENAI_MODEL"] = self.multi_config.get_effective_model()
+            
+            # 确保其他必要的环境变量存在
+            env_content.setdefault("HOST", "0.0.0.0")
+            env_content.setdefault("PORT", "8000")
+            env_content.setdefault("DEBUG", "false")
+            env_content.setdefault("MAX_TOKENS", str(active.max_tokens))
+            env_content.setdefault("TEMPERATURE", str(active.temperature))
+            
+            # 写入.env文件
+            lines = [f"{k}={v}" for k, v in env_content.items()]
+            env_path.write_text("\n".join(lines), encoding="utf-8")
+            
+            logger.info(f"Synced active config to .env file: {active.name} ({active.api_base})")
+        except Exception as e:
+            logger.error(f"Failed to sync config to .env file: {e}")
+            # 不抛出异常，避免影响配置保存
     
     def get_multi_config(self) -> MultiAPIConfig:
         """获取多API配置"""
@@ -369,14 +429,16 @@ class AgentConfigManager:
         return config_item
     
     def update_api_config(self, config_id: str, **kwargs) -> Optional[APIConfigItem]:
-        """更新API配置"""
+        """更新API配置，如果是激活配置则同步到.env"""
         for config in self.multi_config.configs:
             if config.id == config_id:
                 for key, value in kwargs.items():
                     if hasattr(config, key):
                         setattr(config, key, value)
                 self._sync_global_from_multi()
-                self._save_global_config()
+                # 如果更新的是当前激活的配置，同步到.env文件
+                is_active = (config_id == self.multi_config.active_config_id)
+                self._save_global_config(sync_env=is_active)
                 return config
         return None
     
@@ -400,7 +462,7 @@ class AgentConfigManager:
         return False
     
     def set_active_config(self, config_id: str, model: str = "") -> bool:
-        """设置激活的配置和模型"""
+        """设置激活的配置和模型，并同步到.env文件"""
         for config in self.multi_config.configs:
             if config.id == config_id:
                 self.multi_config.active_config_id = config_id
@@ -412,7 +474,8 @@ class AgentConfigManager:
                 else:
                     self.multi_config.active_model = ""
                 self._sync_global_from_multi()
-                self._save_global_config()
+                # 应用配置时同步到.env文件
+                self._save_global_config(sync_env=True)
                 return True
         return False
     
@@ -451,6 +514,16 @@ class AgentConfigManager:
             config_dict["is_active"] = config.id == self.multi_config.active_config_id
             result.append(config_dict)
         return result
+
+    def _get_api_config_by_id(self, config_id: str) -> Optional[APIConfigItem]:
+        """根据配置ID查找多API配置项。"""
+        target = str(config_id or "").strip()
+        if not target:
+            return None
+        for config in self.multi_config.configs:
+            if config.id == target:
+                return config
+        return None
     
     def get_effective_config(self, agent_name: str) -> AgentModelConfig:
         """
@@ -458,26 +531,82 @@ class AgentConfigManager:
         如果Agent使用全局配置且全局已配置，则返回合并后的配置
         """
         config = self.get_config(agent_name)
-        
+        global_auth_configured = bool(self.global_config.api_base and self.global_config.api_key)
+        selected_api_config = self._get_api_config_by_id(config.api_config_id) if not config.use_global else None
+
         # 如果Agent选择使用全局配置，且全局配置已设置
-        if config.use_global and self.global_config.is_configured():
-            # 创建一个新的配置，使用全局配置的API信息
-            # 使用配置的值，如果Agent配置使用全局配置则使用全局值
-            effective_temperature = config.temperature if not config.use_global else self.global_config.temperature
-            effective_max_tokens = config.max_tokens if not config.use_global else self.global_config.max_tokens
-            
+        if config.use_global and global_auth_configured:
+            # 全局模型为空时，回退到 Agent 自身模型，避免“测试可用但聊天缺模型/缺Key”
+            effective_model = self.global_config.model or config.model
             return AgentModelConfig(
                 agent_name=config.agent_name,
+                api_config_id=config.api_config_id,
                 api_base=self.global_config.api_base,
                 api_key=self.global_config.api_key,
-                model=self.global_config.model,
-                temperature=effective_temperature,
-                max_tokens=effective_max_tokens,
+                model=effective_model,
+                temperature=self.global_config.temperature if self.global_config.model else config.temperature,
+                max_tokens=self.global_config.max_tokens if self.global_config.model else config.max_tokens,
                 enabled=config.enabled,
                 description=config.description,
                 use_global=True
             )
-        
+
+        # 独立配置优先按 api_config_id 解析真实 API 配置，避免仅靠 api_base 误匹配。
+        if not config.use_global and selected_api_config:
+            merged_api_base = selected_api_config.api_base or config.api_base
+            merged_api_key = selected_api_config.api_key or config.api_key
+
+            selected_model = config.model
+            if not selected_model:
+                selected_model = selected_api_config.models[0] if selected_api_config.models else ""
+
+            if global_auth_configured:
+                merged_api_base = merged_api_base or self.global_config.api_base
+                merged_api_key = merged_api_key or self.global_config.api_key
+                selected_model = selected_model or self.global_config.model
+
+            if (
+                merged_api_base != config.api_base or
+                merged_api_key != config.api_key or
+                selected_model != config.model
+            ):
+                return AgentModelConfig(
+                    agent_name=config.agent_name,
+                    api_config_id=config.api_config_id,
+                    api_base=merged_api_base,
+                    api_key=merged_api_key,
+                    model=selected_model,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                    enabled=config.enabled,
+                    description=config.description,
+                    use_global=False
+                )
+
+        # 独立配置缺失关键字段时，回退使用全局配置补齐缺失值，避免认证失败。
+        if not config.use_global and global_auth_configured:
+            merged_api_base = config.api_base or self.global_config.api_base
+            merged_api_key = config.api_key or self.global_config.api_key
+            merged_model = config.model or self.global_config.model
+
+            if (
+                merged_api_base != config.api_base or
+                merged_api_key != config.api_key or
+                merged_model != config.model
+            ):
+                return AgentModelConfig(
+                    agent_name=config.agent_name,
+                    api_config_id=config.api_config_id,
+                    api_base=merged_api_base,
+                    api_key=merged_api_key,
+                    model=merged_model,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                    enabled=config.enabled,
+                    description=config.description,
+                    use_global=False
+                )
+
         return config
     
     def get_config(self, agent_name: str) -> AgentModelConfig:
@@ -543,6 +672,7 @@ class AgentConfigManager:
                 "is_configured": is_configured,
                 "current_model": current_model,
                 "model": config.model,  # 新增：原始的 model 字段，用于前端回显
+                "api_config_id": config.api_config_id,
                 "api_base": config.api_base,  # 修复：使用原始的 api_base，不带前缀
                 "use_global": config.use_global,
                 "global_configured": global_configured,
@@ -557,6 +687,7 @@ class AgentConfigManager:
         for agent_name in self.AGENT_DEFINITIONS:
             if agent_name != source_agent:
                 config = self.get_config(agent_name)
+                config.api_config_id = source.api_config_id
                 config.api_base = source.api_base
                 config.api_key = source.api_key
                 config.model = source.model

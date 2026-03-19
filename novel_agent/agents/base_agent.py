@@ -21,7 +21,6 @@ from ..config import config
 from ..agent_config import AgentModelConfig, get_config_manager
 from ..utils.retry import async_retry, RetryConfig
 from ..utils.metrics import get_metrics_collector, MetricsContext
-from ..utils.mcp_manager import mcp_manager
 from ..utils.token_stats import record_token_usage
 from ..constants import TIMEOUTS, RETRY_DEFAULTS
 
@@ -153,6 +152,36 @@ class BaseAgent(ABC):
         self.model_config = manager.update_config(self.name, **kwargs)
         self.client = self._create_client()
         logger.info(f"[{self.name}] Config updated, model: {self._get_model_name()}")
+
+    def refresh_model_config(self) -> bool:
+        """
+        重新从配置管理器加载生效配置。
+
+        Returns:
+            bool: 配置是否发生变化
+        """
+        latest = self._load_model_config()
+        current = self.model_config
+
+        changed = any([
+            current.api_base != latest.api_base,
+            current.api_key != latest.api_key,
+            current.model != latest.model,
+            current.temperature != latest.temperature,
+            current.max_tokens != latest.max_tokens,
+            current.use_global != latest.use_global,
+        ])
+
+        if not changed:
+            return False
+
+        self.model_config = latest
+        self.client = self._create_client()
+        logger.info(
+            f"[{self.name}] Effective config refreshed: model={self._get_model_name()}, "
+            f"use_global={self.model_config.use_global}"
+        )
+        return True
     
     def set_callback_handler(self, handler: CallbackHandler) -> None:
         """设置回调处理器"""
@@ -414,6 +443,16 @@ class BaseAgent(ABC):
                 return self._stream_response(params)
             else:
                 response = await self.client.chat.completions.create(**params)
+                
+                # 验证响应格式
+                if isinstance(response, str):
+                    logger.error(f"[{self.name}] API返回了字符串而不是对象: {response[:200]}")
+                    raise Exception(f"API返回格式错误: {response[:200]}")
+                
+                if not hasattr(response, 'choices') or not response.choices:
+                    logger.error(f"[{self.name}] API响应缺少choices字段: {response}")
+                    raise Exception(f"API响应格式错误，缺少choices字段")
+                
                 content = response.choices[0].message.content
                 
                 # 计算token使用
@@ -499,7 +538,12 @@ class BaseAgent(ABC):
     
     def _parse_api_error(self, error_msg: str, model_name: str, api_base: str) -> Optional[str]:
         """
-        解析API错误并返回用户友好的提示消息
+        解析API错误并返回用户友好的提示消息（增强版）
+        
+        改进：
+        - 更详细的错误分类
+        - 提供具体的解决方案
+        - 友好的格式化输出
         
         Args:
             error_msg: 原始错误消息
@@ -515,59 +559,135 @@ class BaseAgent(ABC):
         if "404" in error_msg or "not found" in error_lower or "not_found" in error_lower:
             if "entity" in error_lower or "model" in error_lower or "requested" in error_lower:
                 return (
-                    f"模型 '{model_name}' 在API服务器上不可用。\n"
-                    f"API地址: {api_base}\n"
-                    f"可能原因:\n"
-                    f"1. 模型名称不正确或已更改\n"
-                    f"2. 代理服务器暂时无法访问该模型\n"
-                    f"3. Google API 配额已用完\n"
-                    f"建议: 请在设置中切换到其他可用模型（如 gemini-2.5-flash）"
+                    f"🤖 模型不可用\n\n"
+                    f"模型名称：{model_name}\n"
+                    f"API地址：{api_base}\n\n"
+                    f"❌ 可能原因：\n"
+                    f"  • 模型名称不正确或已更改\n"
+                    f"  • 代理服务器暂时无法访问该模型\n"
+                    f"  • API配额已用完或权限不足\n\n"
+                    f"💡 解决方案：\n"
+                    f"  1. 在设置中切换到其他可用模型\n"
+                    f"  2. 推荐模型：gemini-2.0-flash-exp, claude-3-5-sonnet\n"
+                    f"  3. 检查API密钥是否有该模型的访问权限"
                 )
         
         # 检查是否是认证错误
-        if "401" in error_msg or "unauthorized" in error_lower or "invalid" in error_lower and "key" in error_lower:
+        if "401" in error_msg or "unauthorized" in error_lower or ("invalid" in error_lower and "key" in error_lower):
             return (
-                f"API认证失败。\n"
-                f"API地址: {api_base}\n"
-                f"请检查API密钥是否正确配置。"
+                f"🔑 API认证失败\n\n"
+                f"API地址：{api_base}\n\n"
+                f"❌ 可能原因：\n"
+                f"  • API密钥未配置或格式错误\n"
+                f"  • API密钥已过期或被撤销\n"
+                f"  • 密钥权限不足\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 检查.env文件中的API密钥配置\n"
+                f"  2. 确认密钥格式正确（无多余空格）\n"
+                f"  3. 在API提供商网站重新生成密钥"
             )
         
         # 检查是否是配额限制
         if "429" in error_msg or "rate limit" in error_lower or "quota" in error_lower:
             return (
-                f"API请求频率超限或配额已用完。\n"
-                f"模型: {model_name}\n"
-                f"请稍后重试，或切换到其他模型。"
+                f"⏱️ API请求限制\n\n"
+                f"模型：{model_name}\n\n"
+                f"❌ 可能原因：\n"
+                f"  • 请求频率超过限制（每分钟/每天）\n"
+                f"  • 免费配额已用完\n"
+                f"  • 并发请求数超限\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 等待1-2分钟后重试\n"
+                f"  2. 切换到其他模型分散负载\n"
+                f"  3. 升级API套餐获取更高配额\n"
+                f"  4. 检查是否有其他程序在使用同一API密钥"
             )
         
         # 检查是否是超时
         if "timeout" in error_lower or "timed out" in error_lower:
             return (
-                f"API请求超时。\n"
-                f"模型: {model_name}\n"
-                f"API地址: {api_base}\n"
-                f"可能原因: 网络问题或服务器响应慢，请稍后重试。"
+                f"⏰ 请求超时\n\n"
+                f"模型：{model_name}\n"
+                f"API地址：{api_base}\n\n"
+                f"❌ 可能原因：\n"
+                f"  • 网络连接不稳定\n"
+                f"  • API服务器响应慢\n"
+                f"  • 请求内容过长导致处理时间长\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 检查网络连接状态\n"
+                f"  2. 稍后重试（服务器可能繁忙）\n"
+                f"  3. 减少单次请求的内容长度\n"
+                f"  4. 切换到响应更快的模型"
             )
         
         # 检查是否是连接错误
         if "connection" in error_lower or "connect" in error_lower:
             return (
-                f"无法连接到API服务器。\n"
-                f"API地址: {api_base}\n"
-                f"请检查:\n"
-                f"1. 网络连接是否正常\n"
-                f"2. 代理服务器是否已启动\n"
-                f"3. API地址是否正确"
+                f"🌐 网络连接失败\n\n"
+                f"API地址：{api_base}\n\n"
+                f"❌ 可能原因：\n"
+                f"  • 本地网络断开或不稳定\n"
+                f"  • 代理服务器未启动或配置错误\n"
+                f"  • API服务器暂时不可用\n"
+                f"  • 防火墙阻止了连接\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 检查网络连接（尝试访问其他网站）\n"
+                f"  2. 确认代理服务器已启动（如使用代理）\n"
+                f"  3. 检查API地址是否正确\n"
+                f"  4. 尝试关闭VPN或防火墙后重试"
+            )
+        
+        # 检查是否是内容过滤错误
+        if "content" in error_lower and ("filter" in error_lower or "policy" in error_lower or "safety" in error_lower):
+            return (
+                f"🛡️ 内容安全检查\n\n"
+                f"❌ 您的请求或生成的内容触发了安全策略\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 调整您的输入内容，避免敏感话题\n"
+                f"  2. 使用更中性的表达方式\n"
+                f"  3. 切换到其他模型（不同模型的安全策略不同）"
+            )
+        
+        # 检查是否是token超限
+        if "token" in error_lower and ("limit" in error_lower or "exceed" in error_lower or "maximum" in error_lower):
+            return (
+                f"📏 内容长度超限\n\n"
+                f"模型：{model_name}\n\n"
+                f"❌ 请求或响应的token数量超过模型限制\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 减少输入内容的长度\n"
+                f"  2. 分段处理长文本\n"
+                f"  3. 切换到支持更长上下文的模型\n"
+                f"  4. 在设置中降低max_tokens参数"
             )
         
         return None
     
     async def _stream_response(self, params: dict) -> AsyncGenerator[str, None]:
         """流式响应生成器"""
-        response = await self.client.chat.completions.create(**params)
-        async for chunk in response:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        try:
+            response = await self.client.chat.completions.create(**params)
+            
+            # 验证响应是否是流式生成器
+            if isinstance(response, str):
+                logger.error(f"[{self.name}] 流式API返回了字符串: {response[:200]}")
+                raise Exception(f"流式API返回格式错误: {response[:200]}")
+            
+            chunk_count = 0
+            async for chunk in response:
+                chunk_count += 1
+                if hasattr(chunk, 'choices') and chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                elif isinstance(chunk, str):
+                    # 如果chunk是字符串，直接yield
+                    yield chunk
+            
+            if chunk_count == 0:
+                logger.warning(f"[{self.name}] 流式响应没有产生任何chunk")
+                
+        except Exception as e:
+            logger.error(f"[{self.name}] 流式响应处理失败: {e}")
+            raise
     
     def inject_context(self, base_prompt: str, context: Dict[str, Any]) -> str:
         """
@@ -804,61 +924,94 @@ class BaseAgent(ABC):
         finally:
             self._pending_responses.pop(message.id, None)
     
-    # ==================== MCP 工具集成 ====================
+    # ==================== Skill 系统集成 ====================
 
-    async def use_mcp_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    def use_skill(self, skill_name: str, method: str, **kwargs):
         """
-        调用MCP工具
+        使用 Skill
         
         Args:
-            server_name: MCP服务器名称 (如 "trends-hub")
-            tool_name: 工具名称 (如 "get-weibo-trending")
-            arguments: 工具参数
+            skill_name: Skill 名称（如 "trends_search"）
+            method: 要调用的方法名（如 "get_weibo_trending"）
+            **kwargs: 方法参数
             
         Returns:
-            工具调用结果
+            {"success": bool, "data": Any, "error": str}
         """
         try:
-            # 确保MCP管理器已初始化
-            await mcp_manager.initialize()
+            # 检查Skill是否启用
+            config_path = Path(__file__).parent.parent / "data" / "skills_config.json"
+            if config_path.exists():
+                import json
+                try:
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    enabled_skills = config.get("enabled_skills", {})
+                    if not enabled_skills.get(skill_name, False):
+                        logger.warning(f"[{self.name}] Skill '{skill_name}' is not enabled")
+                        return {"success": False, "error": f"Skill '{skill_name}' is not enabled"}
+                except Exception as e:
+                    logger.warning(f"[{self.name}] Failed to load skills config: {e}")
             
-            # 调用工具
-            logger.info(f"[{self.name}] Calling MCP tool {tool_name} on {server_name}")
-            result = await mcp_manager.call_tool(server_name, tool_name, arguments)
+            # 动态导入 Skill
+            # 将 skill_name 中的 "-" 转换为 "_" 用于目录名
+            skill_dir_name = skill_name.replace("-", "_")
+            skill_path = Path(__file__).parent.parent.parent / "skills" / skill_dir_name / "scripts"
             
-            # 记录指标
-            self.metrics.record_call(
-                agent_name=self.name,
-                duration=0,  # 简化处理，暂不记录详细时间
-                success=True,
-                method=f"mcp_tool:{server_name}:{tool_name}"
-            )
+            if not skill_path.exists():
+                logger.error(f"[{self.name}] Skill directory not found: {skill_path}")
+                return {"success": False, "error": f"Skill '{skill_name}' not found"}
             
-            return result
+            # 查找服务文件
+            service_file = None
+            for f in skill_path.glob("*_service.py"):
+                service_file = f
+                break
+            
+            if not service_file:
+                logger.error(f"[{self.name}] No service file found in {skill_path}")
+                return {"success": False, "error": f"Skill '{skill_name}' service not found"}
+            
+            # 导入模块
+            import importlib.util
+            import sys
+            
+            module_name = f"{skill_dir_name}_service"
+            
+            # 如果模块已经加载，重新加载以获取最新版本
+            if module_name in sys.modules:
+                module = sys.modules[module_name]
+            else:
+                spec = importlib.util.spec_from_file_location(module_name, service_file)
+                if spec is None or spec.loader is None:
+                    return {"success": False, "error": f"Failed to load module spec for {skill_name}"}
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+            
+            # 获取服务实例
+            if not hasattr(module, 'get_service'):
+                logger.error(f"[{self.name}] Module {module_name} has no get_service function")
+                return {"success": False, "error": f"Skill '{skill_name}' has no get_service function"}
+            
+            service = module.get_service()
+            
+            # 调用方法
+            if not hasattr(service, method):
+                logger.error(f"[{self.name}] Service has no method '{method}'")
+                return {"success": False, "error": f"Method '{method}' not found in skill '{skill_name}'"}
+            
+            logger.info(f"[{self.name}] Calling skill: {skill_name}.{method}({kwargs})")
+            result = getattr(service, method)(**kwargs)
+            
+            # 确保返回格式统一
+            if isinstance(result, dict):
+                return result
+            else:
+                return {"success": True, "data": result}
+                
         except Exception as e:
-            logger.error(f"[{self.name}] Failed to call MCP tool {tool_name}: {e}")
-            self.metrics.record_call(
-                agent_name=self.name,
-                duration=0,
-                success=False,
-                error=str(e),
-                method=f"mcp_tool:{server_name}:{tool_name}"
-            )
-            raise
-
-    async def get_available_mcp_tools(self) -> List[Dict]:
-        """
-        获取所有可用的MCP工具列表
-        
-        Returns:
-            工具列表，每个工具包含 name, description, server_name 等字段
-        """
-        try:
-            await mcp_manager.initialize()
-            return await mcp_manager.get_all_tools()
-        except Exception as e:
-            logger.error(f"[{self.name}] Failed to get MCP tools: {e}")
-            return []
+            logger.error(f"[{self.name}] Failed to use skill {skill_name}.{method}: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     # ==================== 指标获取 ====================
     
@@ -870,4 +1023,4 @@ class BaseAgent(ABC):
         return {}
 
 
-# 模块职责说明：Agent基类，实现LLM调用封装、上下文注入、回调机制、重试支持、指标收集和MCP工具调用。
+# 模块职责说明：Agent基类，实现LLM调用封装、上下文注入、回调机制、重试支持、指标收集和Skill系统集成。

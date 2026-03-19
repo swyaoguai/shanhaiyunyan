@@ -19,34 +19,8 @@ class OutlinerAgent(BaseAgent):
         )
     
     def _get_default_prompt(self) -> str:
-        return """你是一位资深的小说大纲规划师。你擅长构建引人入胜的故事结构，设计精妙的情节走向。
-
-## 你的能力
-1. 故事结构设计：三幕式、英雄之旅等经典结构
-2. 情节节奏把控：起承转合，高潮迭起
-3. 伏笔布局：前后呼应，草蛇灰线
-4. 冲突设计：内外冲突交织，推动剧情发展
-5. 人物弧线规划：角色成长与转变
-
-## 大纲层级
-1. 总纲：核心冲突、主题、结局走向
-2. 分卷大纲：每卷的核心事件和目标
-3. 章节大纲：每章的具体内容和情节点
-
-## 输出格式
-请以JSON格式输出，包含：
-- title: 小说标题
-- theme: 核心主题
-- main_conflict: 主要冲突
-- ending_type: 结局类型
-- volumes: 分卷列表
-  - volume_title: 卷标题
-  - volume_summary: 卷简介
-  - chapters: 章节列表
-    - chapter_title: 章节标题
-    - chapter_summary: 章节简介
-    - key_events: 关键事件
-    - characters_involved: 涉及角色"""
+        from .enhanced_prompts import OUTLINER_PROMPT
+        return OUTLINER_PROMPT
     
     async def execute(
         self, 
@@ -72,6 +46,10 @@ class OutlinerAgent(BaseAgent):
         # Prompt Chaining: 先生成总纲，再细化
         
         # Step 1: 生成总纲
+        try:
+            await self.notify_progress("正在读取世界观与需求，规划总体目标与规模...", 20)
+        except Exception:
+            pass
         total_prompt = f"""基于以下信息，规划小说的总体大纲：
 
 ## 世界观
@@ -94,6 +72,10 @@ class OutlinerAgent(BaseAgent):
         total_response = await self.call_llm(messages)
         
         # Step 2: 细化各卷大纲
+        try:
+            await self.notify_progress("正在完成分卷设计（核心冲突与成长）...", 50)
+        except Exception:
+            pass
         detail_prompt = f"""基于上面的总纲，请详细规划每一卷的内容：
 
 {total_response}
@@ -123,6 +105,12 @@ class OutlinerAgent(BaseAgent):
             outline_data = json.loads(json_str.strip())
         except (json.JSONDecodeError, ValueError, IndexError):
             outline_data = {"raw_content": detail_response}
+
+        try:
+            await self.notify_progress("正在补齐章节详情雏形...", 90)
+            await self.notify_progress("大纲规划完成", 100)
+        except Exception:
+            pass
         
         return {
             "success": True,

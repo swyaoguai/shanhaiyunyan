@@ -18,23 +18,8 @@ class PolisherAgent(BaseAgent):
         )
     
     def _get_default_prompt(self) -> str:
-        return """你是一位专业的小说编辑和润色专家。你的任务是优化小说章节的文字质量。
-
-## 你的能力
-1. 语言润色：优化措辞，提升文采
-2. 节奏调整：调整句子长短，把控阅读节奏
-3. 细节补充：丰富场景描写和心理描写
-4. 风格统一：保持全文风格一致
-5. 错误修正：修复语法和逻辑问题
-
-## 润色原则
-1. 保持原意：不改变剧情和人物设定
-2. 适度润色：不过度堆砌华丽辞藻
-3. 符合风格：根据小说类型调整文风
-4. 提升可读性：让文章更加流畅
-
-## 输出格式
-直接输出润色后的完整章节内容。"""
+        from .enhanced_prompts import POLISHER_PROMPT
+        return POLISHER_PROMPT
     
     async def execute(
         self, 

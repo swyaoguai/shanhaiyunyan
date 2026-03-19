@@ -1,6 +1,6 @@
 """
 小说创作记忆管理器
-管理 Letta Agent 的记忆结构，针对小说创作场景优化
+管理 Wensi Agent 的记忆结构，针对小说创作场景优化
 """
 
 import json
@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, asdict
 
-from .letta_service import get_letta_service, LettaService
+from .wensi_service import get_wensi_service, WensiService
 from .project_manager import get_project_manager
 from .constants import WRITING_CONFIG
 
@@ -35,11 +35,11 @@ class NovelMemoryBlocks:
 class MemoryManager:
     """
     记忆管理器
-    同步项目数据与 Letta Agent 记忆
+    同步项目数据与 Wensi Agent 记忆
     """
     
     def __init__(self):
-        self.letta_service: LettaService = get_letta_service()
+        self.wensi_service: WensiService = get_wensi_service()
         self.project_manager = get_project_manager()
     
     async def sync_project_to_memory(
@@ -52,12 +52,12 @@ class MemoryManager:
         
         Args:
             agent_type: Agent 类型
-            agent_id: Letta Agent ID
+            agent_id: Wensi Agent ID
             
         Returns:
             是否成功
         """
-        if not self.letta_service.is_available:
+        if not self.wensi_service.is_available:
             return False
         
         try:
@@ -74,7 +74,7 @@ class MemoryManager:
 字数: {project.word_count}"""
             
             # 更新 project 记忆块
-            await self.letta_service.update_memory(
+            await self.wensi_service.update_memory(
                 agent_id, 
                 "project", 
                 project_summary
@@ -102,21 +102,21 @@ class MemoryManager:
         worldbuilding = self.project_manager.load_project_data("worldbuilding")
         if worldbuilding:
             summary = self._summarize_worldbuilding(worldbuilding)
-            await self.letta_service.update_memory(agent_id, "worldview", summary)
+            await self.wensi_service.update_memory(agent_id, "worldview", summary)
     
     async def _sync_outline(self, agent_id: str) -> None:
         """同步大纲数据"""
         outline = self.project_manager.load_project_data("outline")
         if outline:
             summary = self._summarize_outline(outline)
-            await self.letta_service.update_memory(agent_id, "plot_summary", summary)
+            await self.wensi_service.update_memory(agent_id, "plot_summary", summary)
     
     async def _sync_characters(self, agent_id: str) -> None:
         """同步角色数据"""
         characters = self.project_manager.load_project_data("characters")
         if characters:
             summary = self._summarize_characters(characters)
-            await self.letta_service.update_memory(agent_id, "characters", summary)
+            await self.wensi_service.update_memory(agent_id, "characters", summary)
     
     def _summarize_worldbuilding(self, data: List[Dict]) -> str:
         """生成世界观摘要"""
@@ -174,10 +174,10 @@ class MemoryManager:
         
         用于持久化 Agent 在对话中学习到的信息
         """
-        if not self.letta_service.is_available:
+        if not self.wensi_service.is_available:
             return {}
         
-        memory = await self.letta_service.get_memory(agent_id)
+        memory = await self.wensi_service.get_memory(agent_id)
         
         # 可以将记忆保存到项目的元数据中
         # 这里返回原始记忆，由调用方决定如何处理
@@ -196,4 +196,4 @@ def get_memory_manager() -> MemoryManager:
     return _memory_manager
 
 
-# 模块职责说明：管理Letta Agent的记忆结构，同步项目数据与Agent记忆。
+# 模块职责说明：管理Wensi Agent的记忆结构，同步项目数据与Agent记忆。

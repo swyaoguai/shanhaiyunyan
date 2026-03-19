@@ -6,6 +6,7 @@
 - 向量化服务（Embeddings）
 - 章节标记管理（ChapterMarker）
 - 剧情约束管理（PlotConstraints）
+- 摘要索引（SummaryIndex）- 无向量RAG核心实现
 """
 
 from .chunker import TextChunker
@@ -17,6 +18,7 @@ from .plot_constraints import (
     PlotConstraintStore,
     ConstraintType
 )
+from .summary_index import SummaryIndex, SummaryEntry
 
 __all__ = [
     "TextChunker",
@@ -26,4 +28,6 @@ __all__ = [
     "PlotConstraintExtractor",
     "PlotConstraintStore",
     "ConstraintType",
+    "SummaryIndex",
+    "SummaryEntry",
 ]

@@ -1,0 +1,47 @@
+{
+  "enabled": true,
+  "timeout": 10,
+  "default_limit": 10,
+  "platforms": {
+    "weibo": {
+      "enabled": true,
+      "name": "微博热搜"
+    },
+    "zhihu": {
+      "enabled": true,
+      "name": "知乎热榜"
+    },
+    "baidu": {
+      "enabled": true,
+      "name": "百度热搜"
+    },
+    "douyin": {
+      "enabled": true,
+      "name": "抖音热点"
+    },
+    "toutiao": {
+      "enabled": true,
+      "name": "今日头条"
+    },
+    "36kr": {
+      "enabled": true,
+      "name": "36氪快讯"
+    },
+    "sspai": {
+      "enabled": true,
+      "name": "少数派"
+    },
+    "ithome": {
+      "enabled": true,
+      "name": "IT之家"
+    },
+    "thepaper": {
+      "enabled": true,
+      "name": "澎湃新闻"
+    },
+    "tophub": {
+      "enabled": true,
+      "name": "今日热榜"
+    }
+  }
+}

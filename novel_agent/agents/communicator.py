@@ -27,14 +27,9 @@ TRENDS_PLATFORMS = {
     "toutiao": "头条热榜"
 }
 
-# 自动工具调用的触发模式
+# 自动工具调用的触发模式（已废弃，改用LLM智能判断）
+# 保留用于热点搜索的简单匹配
 AUTO_TOOL_PATTERNS = {
-    "web_search": [
-        r"帮我(查|搜|找).{0,10}(梗|热词|流行语|网络用语)",
-        r"(什么是|解释一下).{0,20}(梗|热梗|冷梗)",
-        r"(最近|现在).{0,10}(流行|火|热门).{0,10}(什么|啥)",
-        r"(融入|加入|使用).{0,10}(梗|热点|热词)",
-    ],
     "trends_search": [
         r"(今日|今天|最新|实时).{0,10}(热点|热搜|热榜)",
         r"(头条|抖音|微博).{0,10}(热搜|热榜|热点)",
@@ -80,29 +75,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         self._shared_context: Optional[SharedKnowledgeContext] = None
     
     def _get_default_prompt(self) -> str:
-        return """你是一位专业的小说创作顾问，负责与用户沟通，收集小说创作的需求信息。
-
-你的任务是：
-1. 友好地与用户对话，了解他们想创作什么样的小说
-2. 通过提问引导用户提供更详细的信息
-3. 帮助用户明确模糊的想法
-4. 整理收集到的信息
-
-你需要收集的关键信息：
-- 小说类型（玄幻、都市、科幻、言情等）
-- 主题风格（热血、轻松、黑暗、治愈等）
-- 主角设定（性格、背景、能力）
-- 剧情构思（大致故事方向）
-- 篇幅规划（多少卷、每卷多少章）
-
-沟通技巧：
-- 根据用户的回答灵活调整问题
-- 如果用户答案模糊，帮他们具体化
-- 适时给出建议和参考
-- 保持对话轻松友好
-
-当你认为信息足够时，在回复末尾加上标记：[INFO_COMPLETE]
-如果还需要更多信息，继续提问即可。"""
+        from .enhanced_prompts import COMMUNICATOR_AGENT_PROMPT
+        return COMMUNICATOR_AGENT_PROMPT
     
     async def start_conversation(self) -> str:
         """开始对话，发送开场白"""
@@ -189,19 +163,24 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             reply, trends_data = await self._process_trends_search(reply, user_message)
             
             # === 步骤5: 整合自动工具调用结果 ===
+            # 注意：web_search结果已在_build_analysis_prompt中传递给LLM分析
+            # 只有trends_search等其他工具才需要追加到回复中
             if auto_tool_result and auto_tool_result.get("success"):
-                tool_text = self._format_auto_tool_result(auto_tool_result)
-                if tool_text and tool_text not in reply:
-                    reply = f"{reply}\n\n{tool_text}"
+                tool = auto_tool_result.get("tool", "")
+                if tool != "web_search":  # web_search结果不追加，已由LLM分析
+                    tool_text = self._format_auto_tool_result(auto_tool_result)
+                    if tool_text and tool_text not in reply:
+                        reply = f"{reply}\n\n{tool_text}"
             
-            # 添加AI回复到历史
+            # 移除技术标记（不应该显示给用户），再写入对话历史
+            reply_clean = reply.replace("[INFO_COMPLETE]", "").strip()
             self.conversation_history.append({
                 "role": "assistant",
-                "content": reply
+                "content": reply_clean
             })
             
             response_data = {
-                "reply": reply,
+                "reply": reply_clean,
                 "is_complete": result.get("is_complete", False) or "[INFO_COMPLETE]" in reply,
                 "collected_info": self.collected_info,
                 "knowledge_used": bool(kb_context),
@@ -254,26 +233,27 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             messages.append({"role": "user", "content": analysis_prompt})
 
             # === 流式LLM调用 ===
+            logger.info(f"[{self.name}] 开始流式LLM调用...")
             stream = await self.call_llm(
                 messages, temperature=AGENT_TEMPERATURE.CREATIVE_HIGH, stream=True
             )
 
             full_text = ""
+            chunk_count = 0
             async for chunk in stream:
+                chunk_count += 1
                 full_text += chunk
                 yield f"data: {_json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
+            
+            logger.info(f"[{self.name}] 流式输出完成，共 {chunk_count} 个chunk，总长度 {len(full_text)} 字符")
 
             # === 后处理 ===
-            # 处理热点搜索
-            reply, trends_data = await self._process_trends_search(full_text, user_message)
-
-            # 整合工具结果
-            if auto_tool_result and auto_tool_result.get("success"):
-                tool_text = self._format_auto_tool_result(auto_tool_result)
-                if tool_text and tool_text not in reply:
-                    extra = f"\n\n{tool_text}"
-                    reply = f"{reply}{extra}"
-                    yield f"data: {_json.dumps({'type': 'chunk', 'content': extra}, ensure_ascii=False)}\n\n"
+            # 流式模式下不需要处理热点搜索，因为：
+            # 1. 热点搜索已在预处理阶段通过auto_tool_result处理
+            # 2. LLM的回复已经流式输出给用户
+            # 3. 不应该在流式输出后再修改回复内容
+            
+            reply = full_text  # 直接使用LLM的完整输出
 
             # 添加AI回复到历史
             self.conversation_history.append({
@@ -290,8 +270,6 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 "knowledge_used": bool(kb_context),
                 "auto_tool_called": bool(auto_tool_result)
             }
-            if trends_data:
-                done_data["trends"] = trends_data
             yield f"data: {_json.dumps(done_data, ensure_ascii=False)}\n\n"
 
         except Exception as e:
@@ -315,10 +293,34 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             parts.append(f"\n【知识库相关内容】\n{kb_text}")
 
         if auto_tool_result and auto_tool_result.get("success"):
+            tool = auto_tool_result.get("tool", "")
             tool_data = auto_tool_result.get("data", [])
-            if tool_data:
+            
+            if tool_data and tool == "web_search":
+                # 网络搜索：传递原始数据供LLM分析
+                query = auto_tool_result.get("query", "")
+                search_content = []
+                for i, item in enumerate(tool_data[:5], 1):
+                    title = item.get("title", "")
+                    desc = item.get("description") or item.get("snippet", "")
+                    if title:
+                        search_content.append(f"{i}. {title}")
+                        if desc:
+                            search_content.append(f"   {desc[:200]}")
+                
+                parts.append(f"\n【网络搜索结果】（关键词：{query}）")
+                parts.append("\n".join(search_content))
+                parts.append("\n**重要指令**：")
+                parts.append("1. 仔细分析以上搜索结果")
+                parts.append("2. 提取适合融入小说创作的元素（梗、术语、黑话、背景资料等）")
+                parts.append("3. **立即回复用户**，告诉他们你找到了什么有用的内容")
+                parts.append("4. 给出具体的创作建议，说明如何将这些元素融入剧情")
+            
+            elif tool_data:
+                # 其他工具：使用原有格式化方法
                 tool_text = self._format_auto_tool_result(auto_tool_result)
-                parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
+                if tool_text:
+                    parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
 
         parts.append("""
 请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
@@ -331,7 +333,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         """
         检测并执行自动工具调用
         
-        识别用户消息中隐含的工具调用需求，自动执行
+        使用LLM智能判断用户是否需要搜索，而不是简单的正则匹配
         
         Args:
             message: 用户消息
@@ -339,26 +341,26 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         Returns:
             工具调用结果，如果不需要调用则返回None
         """
-        # 检查网络搜索模式
-        for pattern in AUTO_TOOL_PATTERNS.get("web_search", []):
-            if re.search(pattern, message):
-                # 提取搜索关键词
-                query = self._extract_search_query(message)
-                logger.info(f"[{self.name}] 自动触发网络搜索: {query}")
-                
-                try:
-                    results = await self.web_search(query, limit=5)
-                    return {
-                        "success": True,
-                        "tool": "web_search",
-                        "query": query,
-                        "data": results
-                    }
-                except Exception as e:
-                    logger.warning(f"[{self.name}] 自动网络搜索失败: {e}")
-                    return {"success": False, "tool": "web_search", "error": str(e)}
+        # 使用LLM判断是否需要网络搜索
+        search_intent = await self._detect_search_intent(message)
         
-        # 检查热点搜索模式
+        if search_intent and search_intent.get("need_search"):
+            query = search_intent.get("query", message)
+            logger.info(f"[{self.name}] LLM检测到搜索需求: {query}")
+            
+            try:
+                results = await self.web_search(query, limit=5)
+                return {
+                    "success": True,
+                    "tool": "web_search",
+                    "query": query,
+                    "data": results
+                }
+            except Exception as e:
+                logger.warning(f"[{self.name}] 自动网络搜索失败: {e}")
+                return {"success": False, "tool": "web_search", "error": str(e)}
+        
+        # 检查热点搜索模式（保留简单正则匹配）
         for pattern in AUTO_TOOL_PATTERNS.get("trends_search", []):
             if re.search(pattern, message):
                 platform = self._detect_platform(message) or "toutiao"
@@ -435,10 +437,34 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         
         # 工具调用结果
         if auto_tool_result and auto_tool_result.get("success"):
+            tool = auto_tool_result.get("tool", "")
             tool_data = auto_tool_result.get("data", [])
-            if tool_data:
+            
+            if tool_data and tool == "web_search":
+                # 网络搜索：传递原始数据供LLM分析和融入建议
+                query = auto_tool_result.get("query", "")
+                search_content = []
+                for i, item in enumerate(tool_data[:5], 1):
+                    title = item.get("title", "")
+                    desc = item.get("description") or item.get("snippet", "")
+                    if title:
+                        search_content.append(f"{i}. {title}")
+                        if desc:
+                            search_content.append(f"   {desc[:200]}")
+                
+                parts.append(f"\n【网络搜索结果】（关键词：{query}）")
+                parts.append("\n".join(search_content))
+                parts.append("\n**重要指令**：")
+                parts.append("1. 仔细分析以上搜索结果")
+                parts.append("2. 提取适合融入小说创作的元素（梗、术语、黑话、背景资料等）")
+                parts.append("3. **立即回复用户**，告诉他们你找到了什么有用的内容")
+                parts.append("4. 给出具体的创作建议，说明如何将这些元素融入剧情")
+            
+            elif tool_data:
+                # 其他工具：使用原有格式化方法
                 tool_text = self._format_auto_tool_result(auto_tool_result)
-                parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
+                if tool_text:
+                    parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
         
         # 指令
         parts.append("""
@@ -459,7 +485,11 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         return "\n".join(parts)
     
     def _format_auto_tool_result(self, result: Dict[str, Any]) -> str:
-        """格式化自动工具调用结果"""
+        """
+        格式化自动工具调用结果
+        
+        注意：对于web_search，不直接展示搜索结果，而是返回原始数据供LLM分析
+        """
         tool = result.get("tool", "")
         data = result.get("data", [])
         
@@ -467,17 +497,12 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             return ""
         
         if tool == "web_search":
-            lines = [f"🔍 **搜索结果**: {result.get('query', '')}\n"]
-            for i, item in enumerate(data[:5], 1):
-                title = item.get("title", "")
-                desc = item.get("description") or item.get("snippet", "")
-                if title:
-                    lines.append(f"**{i}. {title}**")
-                    if desc:
-                        lines.append(f"   {desc[:80]}...")
-            return "\n".join(lines)
+            # 不直接展示搜索结果，返回空字符串
+            # 搜索结果会通过_build_analysis_prompt传递给LLM进行分析
+            return ""
         
         elif tool == "trends_search":
+            # 热点搜索仍然直接展示
             platform = result.get("platform", "")
             platform_name = TRENDS_PLATFORMS.get(platform, platform)
             lines = [f"📊 **{platform_name}** (实时):\n"]
@@ -591,19 +616,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 else:
                     reply = f"{reply}{error_msg}"
         
-        # 3. 检查是否是网络搜索请求（冷门梗等）
-        elif self._is_web_search_request(user_message):
-            try:
-                query = self._extract_search_query(user_message)
-                logger.info(f"[Communicator] 执行网络搜索: {query}")
-                
-                results = await self.web_search(query, limit=5)
-                if results:
-                    search_text = self._format_web_results(results, query)
-                    reply = f"{reply}\n\n{search_text}"
-            except Exception as e:
-                logger.error(f"[Communicator] 网络搜索失败: {e}", exc_info=True)
-                reply = f"{reply}\n\n⚠️ 网络搜索失败: {str(e)}"
+        # 注意：网络搜索已在_check_auto_tool_call中处理，不需要在这里重复处理
+        # 搜索结果已通过_build_analysis_prompt传递给LLM进行分析
         
         return reply, trends_data
     
@@ -717,7 +731,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
     
     async def web_search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        使用Web Search MCP搜索冷门梗或特定内容
+        使用agent_reach技能进行网络搜索
         
         Args:
             query: 搜索关键词
@@ -727,41 +741,28 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             搜索结果列表
         """
         try:
-            logger.info(f"[Communicator] 开始网络搜索: query='{query}', limit={limit}")
-            # Web搜索暂时禁用，返回空结果
-            result = {"isError": False, "content": [{"text": "[]"}]}
-            logger.info(f"[Communicator] 网络搜索返回: type={type(result)}")
+            logger.info(f"[Communicator] 调用agent_reach技能搜索: query='{query}', limit={limit}")
             
-            # 检查错误
-            if result and hasattr(result, 'isError') and result.isError:
-                error_msg = "搜索服务暂时不可用"
-                if result.content and len(result.content) > 0:
-                    if hasattr(result.content[0], 'text'):
-                        error_msg = result.content[0].text
-                logger.error(f"[Communicator] 网络搜索错误: {error_msg}")
-                raise Exception(error_msg)
+            # 调用agent_reach技能（use_skill是同步方法，不需要await）
+            result = self.use_skill(
+                skill_name="agent_reach",
+                method="web_search",
+                query=query,
+                max_results=limit
+            )
             
-            # 解析结果
-            search_results = []
-            if result and hasattr(result, 'content') and result.content:
-                for item in result.content:
-                    if hasattr(item, 'text') and item.text:
-                        try:
-                            data = json.loads(item.text)
-                            if isinstance(data, list):
-                                search_results = data
-                                break
-                            elif isinstance(data, dict):
-                                search_results.append(data)
-                        except json.JSONDecodeError:
-                            # 纯文本格式
-                            search_results.append({"title": item.text})
+            if not result or not result.get("success"):
+                error_msg = result.get("error", "搜索失败") if result else "搜索失败"
+                logger.error(f"[Communicator] agent_reach搜索失败: {error_msg}")
+                return []
             
-            logger.info(f"[Communicator] 网络搜索成功，返回 {len(search_results)} 条结果")
-            return search_results
+            search_results = result.get("data", [])
+            logger.info(f"[Communicator] agent_reach搜索成功，返回 {len(search_results)} 条结果")
+            return search_results[:limit]
+            
         except Exception as e:
-            logger.error(f"[Communicator] 网络搜索失败: {e}", exc_info=True)
-            raise
+            logger.error(f"[Communicator] agent_reach搜索失败: {e}", exc_info=True)
+            return []
     
     def _is_web_search_request(self, message: str) -> bool:
         """检测用户是否需要网络搜索（冷门梗等）"""
@@ -772,16 +773,76 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             return False
         return is_match
     
-    def _extract_search_query(self, message: str) -> str:
-        """从用户消息中提取搜索关键词"""
-        # 简单提取：去掉常见的前缀
-        prefixes = ["搜索", "查一下", "查询", "找一下", "什么是", "解释一下", "帮我查"]
-        query = message
-        for prefix in prefixes:
-            if query.startswith(prefix):
-                query = query[len(prefix):].strip()
-                break
-        return query if query else message
+    async def _detect_search_intent(self, message: str) -> Optional[Dict[str, Any]]:
+        """
+        使用LLM检测用户是否需要网络搜索，并提取搜索关键词
+        
+        Args:
+            message: 用户消息
+            
+        Returns:
+            {"need_search": bool, "query": str} 或 None
+        """
+        try:
+            intent_prompt = f"""用户说："{message}"
+
+请判断用户是否需要进行网络搜索来获取资料、信息、梗、术语等内容。
+
+判断标准：
+- 用户明确提到"搜索"、"查找"、"查一下"等词，并且是首次提出搜索需求
+- 用户需要了解某些梗、黑话、术语、流行语等网络内容
+- 用户需要获取某个主题的相关资料或背景信息
+- 用户想了解某个概念、事件、人物等
+
+**重要**：以下情况不应触发搜索：
+- 用户在询问搜索进度（"搜索结果出来了吗"、"搜到了吗"）
+- 用户在等待回复（"随便"、"你自己选"、"快点"）
+- 用户在追问或催促（"怎么样了"、"好了吗"）
+- 用户只是在描述小说情节，没有明确要求搜索
+
+如果需要搜索，提取核心搜索关键词（简洁、适合搜索引擎）。
+
+以JSON格式返回：
+{{
+    "need_search": true/false,
+    "query": "搜索关键词"（如果need_search为true）
+}}
+
+示例1：
+用户："我需要你为我搜索一下网上的梗以及足球的相关资料"
+返回：{{"need_search": true, "query": "足球梗 足球黑话 足球术语"}}
+
+示例2：
+用户："主角是个中场球员，右脚可以远射"
+返回：{{"need_search": false}}
+
+示例3：
+用户："随便，你自己随便选一些。搜索结果出来了吗"
+返回：{{"need_search": false}}
+
+现在请判断："""
+
+            logger.info(f"[{self.name}] 开始意图检测LLM调用...")
+            response = await self.call_llm(
+                [{"role": "user", "content": intent_prompt}],
+                temperature=0.3,
+                enable_retry=True
+            )
+            
+            logger.info(f"[{self.name}] 意图检测响应类型: {type(response)}, 长度: {len(str(response))}")
+            
+            # 解析JSON响应
+            result = self._parse_response(response)
+            if result.get("need_search"):
+                logger.info(f"[{self.name}] LLM判断需要搜索: {result.get('query', '')}")
+                return result
+            else:
+                logger.info(f"[{self.name}] LLM判断不需要搜索")
+                return None
+            
+        except Exception as e:
+            logger.warning(f"[{self.name}] LLM意图检测失败: {e}", exc_info=True)
+            return None
     
     def _format_web_results(self, results: List[Dict], query: str) -> str:
         """格式化网络搜索结果"""

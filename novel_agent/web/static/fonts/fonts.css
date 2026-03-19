@@ -1,0 +1,52 @@
+/**
+ * 本地化字体文件
+ *
+ * 包含：
+ * - Inter: UI字体
+ * - Noto Serif SC: 编辑器/正文字体
+ * - Remix Icon: 图标字体
+ *
+ * 优先使用本地字体，避免外部CDN依赖
+ */
+
+/* Inter 字体 */
+@font-face {
+  font-family: 'Inter';
+  src: url('Inter-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('Inter-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('Inter-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Noto Serif SC 字体 */
+@font-face {
+  font-family: 'Noto Serif SC';
+  src: url('NotoSerifSC-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Noto Serif SC';
+  src: url('NotoSerifSC-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}

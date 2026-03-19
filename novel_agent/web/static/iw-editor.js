@@ -135,8 +135,8 @@ function showInfiniteWriteChapterEditor(chapter) {
                         <button id="iw-save-changes-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
                             <i class="ri-save-line"></i> 保存修改
                         </button>
-                        <button id="iw-save-to-project-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                            <i class="ri-folder-add-line"></i> 保存到项目
+                        <button id="iw-regenerate-btn" style="padding: 10px 20px; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; border-radius: 8px; cursor: pointer; font-weight: 500;">
+                            <i class="ri-refresh-line"></i> 重新生成
                         </button>
                     </div>
                 </div>
@@ -298,16 +298,15 @@ function bindIWEditorEvents(chapter) {
         saveIWChapterChanges(true);
     });
     
-    // 保存到项目
-    document.getElementById('iw-save-to-project-btn')?.addEventListener('click', async () => {
-        await saveIWChapterChanges(false);
-        const updatedChapter = {
-            ...currentEditingIWChapter.chapter,
-            title: titleInput.value,
-            content: contentTextarea.value,
-            word_count: contentTextarea.value.replace(/\s/g, '').length
-        };
-        await saveChapterToProject(updatedChapter);
+    // 重新生成
+    document.getElementById('iw-regenerate-btn')?.addEventListener('click', async () => {
+        const chapterNumber = currentEditingIWChapter.chapter?.chapter_number;
+        if (!chapterNumber) return;
+        const confirmed = confirm(`确定要重新生成第${chapterNumber}章吗？\n\n将删除本章及之后章节并重新生成。`);
+        if (!confirmed) return;
+        currentEditingIWChapter.modified = false;
+        closeIWEditor();
+        await regenerateInfiniteWriteChapter(chapterNumber);
     });
     
     // 删除章节

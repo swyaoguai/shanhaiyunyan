@@ -1,17 +1,30 @@
-/**
+﻿/**
  * 文思Agent - 项目管理模块
  * 包含：项目加载、切换、创建、导出
  */
 
 // ===== 项目管理功能 =====
 
+function getActiveProjectId() {
+    return store.currentProject || store.currentProjectId || null;
+}
+
+function setActiveProjectId(projectId) {
+    store.currentProject = projectId;
+    store.currentProjectId = projectId;
+}
+
 async function loadProjects() {
     try {
         const data = await apiCall('/api/projects');
         store.projects = data.projects || [];
         // 后端返回的是 current_project_id，不是 current_project
-        store.currentProject = data.current_project_id || data.current_project;
+        const currentProjectId = data.current_project_id || data.current_project || null;
+        setActiveProjectId(currentProjectId);
         updateProjectSelector();
+        if (currentProjectId && typeof loadCurrentProjectData === 'function') {
+            await loadCurrentProjectData();
+        }
     } catch (e) {
         console.error('Failed to load projects:', e);
         store.projects = [];
@@ -24,7 +37,8 @@ function updateProjectSelector() {
     // 更新项目名称显示
     const projectNameEl = document.getElementById('current-project-name');
     
-    const currentProject = store.projects.find(p => p.id === store.currentProject);
+    const activeProjectId = getActiveProjectId();
+    const currentProject = store.projects.find(p => p.id === activeProjectId);
     const projectName = currentProject ? currentProject.name : (store.projects.length > 0 ? '选择项目' : '无项目');
     
     // 更新全局状态中的项目名
@@ -75,6 +89,7 @@ function toggleProjectDropdown() {
         container.appendChild(dropdown);
     }
     
+    const activeProjectId = getActiveProjectId();
     dropdown.innerHTML = `
         <div style="padding: 8px;">
             <div style="padding: 8px 12px; color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">
@@ -83,21 +98,21 @@ function toggleProjectDropdown() {
             ${store.projects.map(project => `
                 <div class="project-item" data-id="${project.id}"
                     style="padding: 12px 16px; cursor: pointer; display: flex; align-items: center; gap: 12px; border-radius: 6px; transition: background 0.15s;
-                    ${project.id === store.currentProject ? 'background: var(--accent-color);' : ''}">
-                    <i class="ri-book-3-line" style="font-size: 18px; color: ${project.id === store.currentProject ? 'white' : 'var(--accent-color)'};"></i>
+                    ${project.id === activeProjectId ? 'background: var(--accent-color);' : ''}">
+                    <i class="ri-book-3-line" style="font-size: 18px; color: ${project.id === activeProjectId ? 'white' : 'var(--accent-color)'};"></i>
                     <div style="flex: 1; overflow: hidden;">
-                        <div style="color: ${project.id === store.currentProject ? 'white' : 'var(--text-primary)'}; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                        <div style="color: ${project.id === activeProjectId ? 'white' : 'var(--text-primary)'}; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
                             ${escapeHtml(project.name)}
                         </div>
-                        <div style="color: ${project.id === store.currentProject ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}; font-size: 12px;">
+                        <div style="color: ${project.id === activeProjectId ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}; font-size: 12px;">
                             ${project.chapters_count || 0} 章 · ${project.word_count || 0} 字
                         </div>
                     </div>
-                    ${project.id === store.currentProject ? '<i class="ri-check-line" style="color: white;"></i>' : ''}
+                    ${project.id === activeProjectId ? '<i class="ri-check-line" style="color: white;"></i>' : ''}
                     <button class="delete-project-btn" data-id="${project.id}" data-name="${escapeHtml(project.name)}"
-                        style="padding: 6px 8px; background: transparent; border: none; color: ${project.id === store.currentProject ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}; cursor: pointer; border-radius: 4px; transition: all 0.15s; opacity: 0.6;"
+                        style="padding: 6px 8px; background: transparent; border: none; color: ${project.id === activeProjectId ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}; cursor: pointer; border-radius: 4px; transition: all 0.15s; opacity: 0.6;"
                         onmouseover="this.style.opacity='1'; this.style.background='rgba(239,68,68,0.2)'; this.style.color='#ef4444';"
-                        onmouseout="this.style.opacity='0.6'; this.style.background='transparent'; this.style.color='${project.id === store.currentProject ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}';"
+                        onmouseout="this.style.opacity='0.6'; this.style.background='transparent'; this.style.color='${project.id === activeProjectId ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)'}';"
                         title="删除项目">
                         <i class="ri-delete-bin-line" style="font-size: 14px;"></i>
                     </button>
@@ -119,12 +134,12 @@ function toggleProjectDropdown() {
             dropdown.classList.add('hidden');
         });
         item.addEventListener('mouseenter', () => {
-            if (item.dataset.id !== store.currentProject) {
+            if (item.dataset.id !== activeProjectId) {
                 item.style.background = 'rgba(255,255,255,0.1)';
             }
         });
         item.addEventListener('mouseleave', () => {
-            if (item.dataset.id !== store.currentProject) {
+            if (item.dataset.id !== activeProjectId) {
                 item.style.background = '';
             }
         });
@@ -161,13 +176,16 @@ function toggleProjectDropdown() {
 }
 
 async function switchProject(projectId) {
-    if (projectId === store.currentProject) return;
+    if (projectId === getActiveProjectId()) return;
     
     try {
         showToast('正在切换项目...');
         
         await apiCall(`/api/projects/${projectId}/switch`, 'POST');
-        store.currentProject = projectId;
+        setActiveProjectId(projectId);
+        if (typeof markCopilotHistoryStale === 'function') {
+            markCopilotHistoryStale(projectId);
+        }
         
         // 重新加载项目数据
         await loadCurrentProjectData();
@@ -175,13 +193,8 @@ async function switchProject(projectId) {
         updateProjectSelector();
         
         // 刷新当前视图
-        if (store.currentModule === 'write') {
-            renderNavPanel('write');
-            showEmptyEditor();
-        } else if (store.currentModule === 'world') {
-            renderNavPanel('world');
-        } else if (store.currentModule === 'database') {
-            renderNavPanel('database');
+        if (typeof switchModule === 'function') {
+            switchModule(store.currentModule || 'dashboard');
         }
         
         const project = store.projects.find(p => p.id === projectId);
@@ -194,13 +207,31 @@ async function switchProject(projectId) {
 
 async function loadCurrentProjectData() {
     try {
+        const activeProjectId = getActiveProjectId();
+        if (!activeProjectId) {
+            store.projectData = {
+                outline: [],
+                worldbuilding: [],
+                characters: [],
+                items: [],
+                eventlines: [],
+                outline_settings: [],
+                detail_settings: [],
+                chapter_settings: []
+            };
+            if (typeof updateMentionData === 'function') {
+                updateMentionData();
+            }
+            return;
+        }
+
         // 加载大纲
         const outlineData = await apiCall('/api/project-data/outline');
         store.projectData.outline = outlineData.data || [];
         
         // 加载世界观
         const worldData = await apiCall('/api/project-data/worldbuilding');
-        store.projectData.worldbuilding = worldData.data || {};
+        store.projectData.worldbuilding = Array.isArray(worldData.data) ? worldData.data : [];
         
         // 加载角色
         const charData = await apiCall('/api/project-data/characters');
@@ -209,6 +240,11 @@ async function loadCurrentProjectData() {
         // 加载物品
         const itemData = await apiCall('/api/project-data/items');
         store.projectData.items = itemData.data || [];
+
+        // 加载扩展资料库（localStorage）
+        if (typeof loadExtendedKnowledgeData === 'function') {
+            loadExtendedKnowledgeData();
+        }
         
         // 更新提及数据
         if (typeof updateMentionData === 'function') {
@@ -336,7 +372,7 @@ async function exportProject(format = 'markdown') {
         const a = document.createElement('a');
         a.href = url;
         
-        const project = store.projects.find(p => p.id === store.currentProject);
+        const project = store.projects.find(p => p.id === getActiveProjectId());
         const projectName = project?.name || 'novel';
         const ext = format === 'markdown' ? 'md' : format === 'txt' ? 'txt' : 'epub';
         a.download = `${projectName}.${ext}`;
@@ -467,12 +503,21 @@ async function deleteProject(projectId) {
     store.projects = store.projects.filter(p => p.id !== projectId);
     
     // 如果删除的是当前项目，切换到第一个可用项目
-    if (projectId === store.currentProject) {
+    if (projectId === getActiveProjectId()) {
         if (store.projects.length > 0) {
             await switchProject(store.projects[0].id);
         } else {
-            store.currentProject = null;
-            store.projectData = { outline: [], worldbuilding: {}, characters: [], items: [] };
+            setActiveProjectId(null);
+            store.projectData = {
+                outline: [],
+                worldbuilding: [],
+                characters: [],
+                items: [],
+                eventlines: [],
+                outline_settings: [],
+                detail_settings: [],
+                chapter_settings: []
+            };
             updateProjectSelector();
             if (typeof showEmptyEditor === 'function') {
                 showEmptyEditor();
@@ -495,3 +540,4 @@ window.deleteProject = deleteProject;
 window.showDeleteProjectDialog = showDeleteProjectDialog;
 
 console.log('[app-project.js] 项目管理模块已加载');
+

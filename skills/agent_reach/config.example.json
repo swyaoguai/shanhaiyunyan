@@ -1,0 +1,26 @@
+{
+    "cache_enabled": true,
+    "cache_ttl": 3600,
+    "timeout": 30,
+    "max_retries": 3,
+    "jina_reader_url": "https://r.jina.ai/",
+    "comment": "以上是基础配置，下面的高级配置按需开启",
+    "platforms": {
+        "twitter": {
+            "enabled": false,
+            "cookies": "",
+            "comment": "使用 Cookie-Editor 插件导出 Twitter Cookie"
+        },
+        "xiaohongshu": {
+            "enabled": false,
+            "cookies": "",
+            "comment": "小红书需要 Docker 运行 MCP 服务"
+        },
+        "proxy": {
+            "enabled": false,
+            "http": "",
+            "https": "",
+            "comment": "代理设置，服务器环境可能需要"
+        }
+    }
+}

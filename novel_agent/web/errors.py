@@ -50,10 +50,10 @@ class ErrorCode(Enum):
     LLM_RATE_LIMIT = 6002
     LLM_INVALID_RESPONSE = 6003
     
-    # Letta错误 (7xxx)
-    LETTA_NOT_AVAILABLE = 7000
-    LETTA_NOT_ENABLED = 7001
-    LETTA_API_ERROR = 7002
+    # Wensi错误 (7xxx)
+    WENSI_NOT_AVAILABLE = 7000
+    WENSI_NOT_ENABLED = 7001
+    WENSI_API_ERROR = 7002
     
     # 工作流错误 (8xxx)
     WORKFLOW_NOT_FOUND = 8000
@@ -92,9 +92,9 @@ ERROR_HTTP_STATUS = {
     ErrorCode.LLM_RATE_LIMIT: 429,
     ErrorCode.LLM_INVALID_RESPONSE: 502,
     
-    ErrorCode.LETTA_NOT_AVAILABLE: 503,
-    ErrorCode.LETTA_NOT_ENABLED: 400,
-    ErrorCode.LETTA_API_ERROR: 502,
+    ErrorCode.WENSI_NOT_AVAILABLE: 503,
+    ErrorCode.WENSI_NOT_ENABLED: 400,
+    ErrorCode.WENSI_API_ERROR: 502,
     
     ErrorCode.WORKFLOW_NOT_FOUND: 404,
     ErrorCode.WORKFLOW_FAILED: 500,

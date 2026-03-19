@@ -124,7 +124,7 @@ python run.py
 python run.py
 ```
 
-访问 http://localhost:8000 进入 Web UI
+默认访问 http://localhost:5656 进入 Web UI（若端口被占用，系统会自动切换并在控制台提示实际端口）
 
 ## 📁 项目结构
 
@@ -198,7 +198,7 @@ novel_agent/
 ├── constants.py            # 常量定义
 ├── project_manager.py      # 项目管理器
 ├── memory_manager.py       # 记忆管理器
-└── letta_service.py        # Letta服务（可选）
+└── wensi_service.py        # Wensi服务（可选）
 ```
 
 ## ⚙️ 配置说明

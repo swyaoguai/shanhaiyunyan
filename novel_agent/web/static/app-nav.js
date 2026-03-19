@@ -40,7 +40,16 @@ function renderNavPanel(moduleId) {
             ui.navActionAdd.style.display = 'none';
             
             // 渲染无限续写导航面板
-            renderInfiniteWriteNavPanel();
+            if (typeof renderInfiniteWriteNavPanel === 'function') {
+                renderInfiniteWriteNavPanel();
+            } else {
+                console.error('[Nav] renderInfiniteWriteNavPanel not found');
+                ui.navList.innerHTML = `
+                    <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                        无限续写导航加载失败，请刷新页面重试。
+                    </div>
+                `;
+            }
             break;
 
         case 'write':
@@ -49,7 +58,16 @@ function renderNavPanel(moduleId) {
             ui.navActionAdd.onclick = addNewChapter;
 
             // 渲染写作模块导航（协作创作章节列表）
-            renderMultiAgentWriteNavPanel();
+            if (typeof renderMultiAgentWriteNavPanel === 'function') {
+                renderMultiAgentWriteNavPanel();
+            } else {
+                console.error('[Nav] renderMultiAgentWriteNavPanel not found');
+                ui.navList.innerHTML = `
+                    <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                        协作模式导航加载失败，请刷新页面重试。
+                    </div>
+                `;
+            }
             break;
 
         case 'world':
@@ -57,6 +75,14 @@ function renderNavPanel(moduleId) {
             ui.navActionAdd.style.display = 'block';
             ui.navActionAdd.onclick = addNewSetting;
             renderKnowledgeNavPanel();
+            break;
+
+        case 'aux-memory':
+            ui.navTitle.textContent = '长期记忆';
+            ui.navActionAdd.style.display = 'none';
+            if (typeof renderAuxMemoryNavPanel === 'function') {
+                renderAuxMemoryNavPanel();
+            }
             break;
 
         case 'settings':
@@ -67,14 +93,16 @@ function renderNavPanel(moduleId) {
                 { id: 'set-global-api', icon: 'ri-global-line', text: '全局API配置' },
                 { id: 'set-knowledge-base', icon: 'ri-database-2-line', text: '知识库配置' },
                 { id: 'set-agent', icon: 'ri-brain-line', text: 'Agent配置' },
+                { id: 'set-backup', icon: 'ri-save-line', text: '备份管理' },
                 { id: 'set-prompts', icon: 'ri-file-text-line', text: '提示词管理' },
-                { id: 'set-trends', icon: 'ri-fire-line', text: '热点搜索' },
+                { id: 'set-skills', icon: 'ri-puzzle-line', text: 'Skills管理' },
                 { id: 'set-regex', icon: 'ri-code-line', text: '正则替换规则' }
             ], (item) => {
                 if (item.id === 'set-theme') loadThemeSettings();
                 if (item.id === 'set-global-api') loadGlobalAPISettings();
                 if (item.id === 'set-knowledge-base') loadKnowledgeBaseSettings();
                 if (item.id === 'set-agent') loadAgentSettings();
+                if (item.id === 'set-backup') loadBackupSettings();
                 if (item.id === 'set-prompts') {
                     // 延迟调用确保 prompt_manager.js 已加载，使用重试机制
                     let retryCount = 0;
@@ -93,7 +121,7 @@ function renderNavPanel(moduleId) {
                     };
                     setTimeout(checkAndLoad, 50);
                 }
-                if (item.id === 'set-trends') loadTrendsSettings();
+                if (item.id === 'set-skills') loadSkillsSettings();
                 if (item.id === 'set-regex') loadRegexRulesSettings();
             });
             break;
@@ -119,8 +147,10 @@ function renderNavList(items, onClick) {
     items.forEach(item => {
         const div = document.createElement('div');
         div.className = `list-item ${item.active ? 'active' : ''}`;
+        // 只在非设置页面显示图标
+        const showIcon = item.icon && !item.id?.startsWith('set-');
         div.innerHTML = `
-            <i class="${item.icon}"></i>
+            ${showIcon ? `<i class="${item.icon}"></i>` : ''}
             <span>${item.text}</span>
             ${item.count !== undefined ? `<span style="margin-left:auto; font-size:11px; opacity:0.6;">(${item.count})</span>` : ''}
         `;
@@ -268,35 +298,81 @@ let statisticsState = {
 };
 
 // 渲染统计页面
-function renderStatistics() {
+async function renderStatistics() {
     store.currentDashboardView = 'stats';
-    updateBreadcrumbs([store.currentProjectName || '我的项目', '统计']);
     
     // 初始化选中项目为当前项目
     if (!statisticsState.selectedProjectId) {
         statisticsState.selectedProjectId = store.currentProject || '';
     }
+    
+    // 获取选中项目的名称
+    const selectedProject = store.projects.find(p => p.id === statisticsState.selectedProjectId);
+    const selectedProjectName = selectedProject ? selectedProject.name : (store.currentProjectName || '我的项目');
+    
+    updateBreadcrumbs([selectedProjectName, '统计']);
+
+    // 根据选中的项目获取数据
+    let projectData = store.projectData;
+    
+    // 如果选中的不是当前项目，需要从API加载该项目的数据
+    if (statisticsState.selectedProjectId && statisticsState.selectedProjectId !== store.currentProject) {
+        try {
+            // 从API获取指定项目的数据
+            const [outlineRes, charRes, worldRes, itemRes] = await Promise.all([
+                apiCall(`/api/project-data/outline?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
+                apiCall(`/api/project-data/characters?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
+                apiCall(`/api/project-data/worldbuilding?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
+                apiCall(`/api/project-data/items?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] }))
+            ]);
+            projectData = {
+                outline: outlineRes.data || [],
+                characters: charRes.data || [],
+                worldbuilding: worldRes.data || [],
+                items: itemRes.data || [],
+                eventlines: [],
+                outline_settings: [],
+                detail_settings: []
+            };
+        } catch (e) {
+            console.error('[Statistics] 加载项目数据失败:', e);
+            projectData = store.projectData; // 失败时使用当前项目数据
+        }
+    }
 
     // 获取多Agent模式的章节数据
-    const multiAgentChapters = store.projectData.outline || [];
+    const multiAgentChapters = projectData.outline || [];
     const multiAgentWords = multiAgentChapters.reduce((sum, ch) => sum + (ch.content || '').replace(/\s/g, '').length, 0);
     const multiAgentWrittenChapters = multiAgentChapters.filter(ch => (ch.content || '').length > 0).length;
     
-    // 获取无限续写模式的章节数据
+    // 获取无限续写模式的章节数据（按项目存储）
     let infiniteWriteChapters = [];
     let infiniteWriteWords = 0;
     try {
-        const savedData = localStorage.getItem('infinite_write_data');
+        // 无限续写数据按项目ID存储
+        const storageKey = statisticsState.selectedProjectId
+            ? `infinite_write_data_${statisticsState.selectedProjectId}`
+            : 'infinite_write_data';
+        const savedData = localStorage.getItem(storageKey);
         if (savedData) {
             const data = JSON.parse(savedData);
             infiniteWriteChapters = data.chapters || [];
             infiniteWriteWords = data.totalWords || 0;
         }
+        // 如果按项目ID找不到，尝试使用旧的通用键（兼容旧数据）
+        if (infiniteWriteChapters.length === 0 && statisticsState.selectedProjectId === store.currentProject) {
+            const oldData = localStorage.getItem('infinite_write_data');
+            if (oldData) {
+                const data = JSON.parse(oldData);
+                infiniteWriteChapters = data.chapters || [];
+                infiniteWriteWords = data.totalWords || 0;
+            }
+        }
     } catch (e) {
         console.error('[Statistics] 解析无限续写数据失败:', e);
     }
     
-    // 根据数据源过滤
+    // 根据选中的模式过滤章节数据
     let chapters = [];
     let totalWords = 0;
     let chapterCount = 0;
@@ -317,7 +393,7 @@ function renderStatistics() {
         })));
     }
     
-    // 计算统计数据
+    // 根据模式计算统计数据
     if (statisticsState.dataSource === 'all') {
         totalWords = multiAgentWords + infiniteWriteWords;
         chapterCount = multiAgentChapters.length + infiniteWriteChapters.length;
@@ -334,12 +410,12 @@ function renderStatistics() {
     
     const avgWordsPerChapter = writtenChapters > 0 ? Math.round(totalWords / writtenChapters) : 0;
     
-    const characterCount = (store.projectData.characters || []).length;
-    const worldCount = (store.projectData.worldbuilding || []).length;
-    const itemCount = (store.projectData.items || []).length;
-    const eventCount = (store.projectData.eventlines || []).length;
-    const outlineSettingCount = (store.projectData.outline_settings || []).length;
-    const detailSettingCount = (store.projectData.detail_settings || []).length;
+    const characterCount = (projectData.characters || []).length;
+    const worldCount = (projectData.worldbuilding || []).length;
+    const itemCount = (projectData.items || []).length;
+    const eventCount = (projectData.eventlines || []).length;
+    const outlineSettingCount = (projectData.outline_settings || []).length;
+    const detailSettingCount = (projectData.detail_settings || []).length;
     
     // 计算每章字数
     const chapterWordsData = chapters.map((ch, i) => ({
@@ -483,28 +559,31 @@ function renderStatistics() {
                     项目统计分析
                 </h2>
                 
-                <!-- 数据源筛选 -->
+                <!-- 项目筛选 -->
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    <span style="font-size: 13px; color: var(--text-secondary);">数据源:</span>
-                    <select id="stats-data-source" style="padding: 8px 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-size: 13px; cursor: pointer;">
-                        <option value="all" ${statisticsState.dataSource === 'all' ? 'selected' : ''}>全部模式</option>
-                        <option value="multi-agent" ${statisticsState.dataSource === 'multi-agent' ? 'selected' : ''}>协作创作</option>
-                        <option value="infinite-write" ${statisticsState.dataSource === 'infinite-write' ? 'selected' : ''}>无限续写</option>
+                    <span style="font-size: 13px; color: var(--text-secondary);">选择项目:</span>
+                    <select id="stats-project-select" style="padding: 8px 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-size: 13px; cursor: pointer; min-width: 150px;">
+                        ${store.projects.map(p => `
+                            <option value="${p.id}" ${p.id === statisticsState.selectedProjectId ? 'selected' : ''}>
+                                ${escapeHtml(p.name)}
+                            </option>
+                        `).join('')}
                     </select>
                 </div>
             </div>
             
-            <!-- 模式概览卡片 -->
+            <!-- 模式切换按钮 -->
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;">
-                <div style="background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.1)); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 12px; padding: 20px;">
+                <div id="stats-mode-multi-agent" class="stats-mode-card" style="background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.1)); border: 2px solid ${statisticsState.dataSource === 'multi-agent' || statisticsState.dataSource === 'all' ? '#8b5cf6' : 'rgba(139, 92, 246, 0.3)'}; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.2s; ${statisticsState.dataSource === 'multi-agent' ? 'box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);' : ''}">
                     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
                         <div style="width: 40px; height: 40px; background: rgba(139, 92, 246, 0.2); border-radius: 10px; display: flex; align-items: center; justify-content: center;">
                             <i class="ri-quill-pen-line" style="font-size: 20px; color: #8b5cf6;"></i>
                         </div>
-                        <div>
+                        <div style="flex: 1;">
                             <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">协作创作模式</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">多Agent协作写作</div>
                         </div>
+                        ${statisticsState.dataSource === 'multi-agent' ? '<i class="ri-checkbox-circle-fill" style="font-size: 20px; color: #8b5cf6;"></i>' : '<i class="ri-checkbox-blank-circle-line" style="font-size: 20px; color: var(--text-secondary); opacity: 0.5;"></i>'}
                     </div>
                     <div style="display: flex; gap: 24px;">
                         <div>
@@ -518,15 +597,16 @@ function renderStatistics() {
                     </div>
                 </div>
                 
-                <div style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(251, 146, 60, 0.1)); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 12px; padding: 20px;">
+                <div id="stats-mode-infinite-write" class="stats-mode-card" style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(251, 146, 60, 0.1)); border: 2px solid ${statisticsState.dataSource === 'infinite-write' || statisticsState.dataSource === 'all' ? '#f59e0b' : 'rgba(245, 158, 11, 0.3)'}; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.2s; ${statisticsState.dataSource === 'infinite-write' ? 'box-shadow: 0 0 20px rgba(245, 158, 11, 0.3);' : ''}">
                     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
                         <div style="width: 40px; height: 40px; background: rgba(245, 158, 11, 0.2); border-radius: 10px; display: flex; align-items: center; justify-content: center;">
                             <i class="ri-infinity-line" style="font-size: 20px; color: #f59e0b;"></i>
                         </div>
-                        <div>
+                        <div style="flex: 1;">
                             <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">无限续写模式</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">灵感驱动创作</div>
                         </div>
+                        ${statisticsState.dataSource === 'infinite-write' ? '<i class="ri-checkbox-circle-fill" style="font-size: 20px; color: #f59e0b;"></i>' : '<i class="ri-checkbox-blank-circle-line" style="font-size: 20px; color: var(--text-secondary); opacity: 0.5;"></i>'}
                     </div>
                     <div style="display: flex; gap: 24px;">
                         <div>
@@ -539,6 +619,22 @@ function renderStatistics() {
                         </div>
                     </div>
                 </div>
+            </div>
+            
+            <!-- 当前显示模式提示 -->
+            <div style="margin-bottom: 20px; padding: 12px 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; display: flex; align-items: center; justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-filter-3-line" style="color: var(--accent-color);"></i>
+                    <span style="font-size: 13px; color: var(--text-secondary);">当前显示:</span>
+                    <span style="font-size: 13px; color: var(--text-primary); font-weight: 500;">
+                        ${statisticsState.dataSource === 'all' ? '全部模式' : statisticsState.dataSource === 'multi-agent' ? '协作创作模式' : '无限续写模式'}
+                    </span>
+                </div>
+                ${statisticsState.dataSource !== 'all' ? `
+                <button id="stats-show-all-btn" style="padding: 6px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px;">
+                    <i class="ri-apps-line"></i> 显示全部
+                </button>
+                ` : ''}
             </div>
             
             <!-- 核心指标卡片 -->
@@ -619,10 +715,45 @@ function renderStatistics() {
         </div>
     `;
     
-    // 绑定数据源切换事件
-    document.getElementById('stats-data-source')?.addEventListener('change', (e) => {
-        statisticsState.dataSource = e.target.value;
+    // 绑定项目切换事件
+    document.getElementById('stats-project-select')?.addEventListener('change', (e) => {
+        statisticsState.selectedProjectId = e.target.value;
         renderStatistics();
+    });
+    
+    // 绑定模式切换事件
+    document.getElementById('stats-mode-multi-agent')?.addEventListener('click', () => {
+        if (statisticsState.dataSource === 'multi-agent') {
+            statisticsState.dataSource = 'all'; // 再次点击取消选中，显示全部
+        } else {
+            statisticsState.dataSource = 'multi-agent';
+        }
+        renderStatistics();
+    });
+    
+    document.getElementById('stats-mode-infinite-write')?.addEventListener('click', () => {
+        if (statisticsState.dataSource === 'infinite-write') {
+            statisticsState.dataSource = 'all'; // 再次点击取消选中，显示全部
+        } else {
+            statisticsState.dataSource = 'infinite-write';
+        }
+        renderStatistics();
+    });
+    
+    // 显示全部按钮
+    document.getElementById('stats-show-all-btn')?.addEventListener('click', () => {
+        statisticsState.dataSource = 'all';
+        renderStatistics();
+    });
+    
+    // 添加悬停效果
+    document.querySelectorAll('.stats-mode-card').forEach(card => {
+        card.addEventListener('mouseenter', () => {
+            card.style.transform = 'translateY(-2px)';
+        });
+        card.addEventListener('mouseleave', () => {
+            card.style.transform = 'translateY(0)';
+        });
     });
 }
 
@@ -632,7 +763,17 @@ function showEmptyEditor() {
         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary);">
             <div style="text-align: center;">
                 <i class="ri-file-text-line" style="font-size: 48px; opacity: 0.3;"></i>
-                <p style="margin-top: 16px;">从左侧选择一个章节开始写作</p>
+                <p style="margin-top: 16px;">从左侧选择章节，或先导入已完成小说</p>
+                <div style="margin-top: 16px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                    <button onclick="showCollaborativeImportDialog && showCollaborativeImportDialog()"
+                        style="padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(34,197,94,0.15); color: #22c55e; cursor: pointer;">
+                        <i class="ri-upload-cloud-2-line"></i> 导入小说
+                    </button>
+                    <button onclick="showAddChapterDialog && showAddChapterDialog()"
+                        style="padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.08); color: var(--text-primary); cursor: pointer;">
+                        <i class="ri-add-line"></i> 新建章节
+                    </button>
+                </div>
             </div>
         </div>
     `;
@@ -674,7 +815,7 @@ function renderAboutPage() {
                     </div>
                     <div>
                         <div style="font-size: 18px; font-weight: 600; color: var(--text-primary);">原来是佳睿</div>
-                        <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">独立开发者 · AI应用探索者</div>
+                        <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">AI应用探索者</div>
                     </div>
                 </div>
             </div>
@@ -698,23 +839,42 @@ function renderAboutPage() {
                     UID: 30232040
                 </div>
             </div>
-            
-            <!-- 项目信息 -->
-            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 16px; padding: 24px;">
+
+            <!-- QQ群卡片 -->
+            <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 16px; padding: 24px; margin-bottom: 24px;">
                 <h3 style="color: var(--text-primary); margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                    <i class="ri-code-box-line" style="color: #10b981;"></i>
-                    项目说明
+                    <i class="ri-qq-line" style="color: #10b981;"></i>
+                    加入交流群
+                </h3>
+                <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                    加入QQ群，与其他创作者交流心得，获取最新动态！
+                </p>
+                <div style="display: flex; align-items: center; gap: 16px;">
+                    <a href="https://qm.qq.com/q/E25rrnPONy" target="_blank" rel="noopener noreferrer"
+                       style="display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; background: #10b981; color: white; border-radius: 8px; text-decoration: none; font-weight: 500; transition: all 0.2s;">
+                        <i class="ri-group-line"></i>
+                        点击加入QQ群
+                        <i class="ri-external-link-line"></i>
+                    </a>
+                    <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">
+                        群号：760758525
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 免责声明 -->
+            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 16px; padding: 24px;">
+                <h3 style="color: var(--text-primary); margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-alert-line" style="color: #ef4444;"></i>
+                    免责声明
                 </h3>
                 <p style="color: var(--text-secondary); font-size: 14px; line-height: 1.8;">
-                    文思Agent 是一款基于大语言模型的智能小说创作工具。支持无限续写、多Agent协作创作、
-                    知识库管理等功能，助力创作者高效产出优质内容。
+                    本软件仅供个人学习和研究使用，严禁用于生成任何违反法律法规、违背公序良俗的内容。
+                    <br>
+                    使用者需对使用本软件产生的所有内容及后果承担全部责任。
+                    <br>
+                    本软件是免费软件，请勿付费购买，谨防上当受骗！
                 </p>
-                <div style="display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap;">
-                    <span style="padding: 6px 12px; background: rgba(139, 92, 246, 0.1); border-radius: 6px; font-size: 12px; color: #8b5cf6;">Python</span>
-                    <span style="padding: 6px 12px; background: rgba(16, 185, 129, 0.1); border-radius: 6px; font-size: 12px; color: #10b981;">FastAPI</span>
-                    <span style="padding: 6px 12px; background: rgba(245, 158, 11, 0.1); border-radius: 6px; font-size: 12px; color: #f59e0b;">LLM</span>
-                    <span style="padding: 6px 12px; background: rgba(59, 130, 246, 0.1); border-radius: 6px; font-size: 12px; color: #3b82f6;">RAG</span>
-                </div>
             </div>
         </div>
     `;
@@ -738,6 +898,7 @@ function renderFeedbackPage() {
                 <ul style="color: var(--text-secondary); font-size: 14px; margin-top: 12px; padding-left: 20px; line-height: 2;">
                     <li>在B站视频下方留言评论</li>
                     <li>通过B站私信联系我</li>
+                    <li>联系QQ：973389590</li>
                 </ul>
             </div>
             
@@ -751,6 +912,10 @@ function renderFeedbackPage() {
                     <li>关注我的B站账号获取更新通知</li>
                     <li>向朋友推荐这个工具</li>
                 </ul>
+                <div style="margin-top: 20px; text-align: center;">
+                    <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 12px;">或者请作者喝杯咖啡 ☕</p>
+                    <img src="/static/赞赏码6.jpg" alt="赞赏码" style="max-width: 200px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                </div>
             </div>
         </div>
     `;
@@ -774,14 +939,11 @@ function renderVersionPage() {
                     <div style="color: var(--text-secondary);">当前版本</div>
                     <div style="color: var(--text-primary); font-weight: 500;">v${version}</div>
                     
-                    <div style="color: var(--text-secondary);">构建日期</div>
+                    <div style="color: var(--text-secondary);">更新日期</div>
                     <div style="color: var(--text-primary);">${buildDate}</div>
                     
                     <div style="color: var(--text-secondary);">运行环境</div>
                     <div style="color: var(--text-primary);">Python 3.10+ / Windows</div>
-                    
-                    <div style="color: var(--text-secondary);">许可证</div>
-                    <div style="color: var(--text-primary);">MIT License</div>
                 </div>
             </div>
             

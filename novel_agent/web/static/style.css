@@ -85,6 +85,7 @@ body {
     grid-template-columns: var(--res-bar-w) var(--nav-panel-w) 1fr auto;
     height: 100vh;
     width: 100vw;
+    position: relative;
     transition: grid-template-columns 0.3s ease;
 }
 
@@ -350,6 +351,54 @@ body.has-bg-image .nav-panel {
     z-index: 100;
 }
 
+.edge-toggle-copilot {
+    position: absolute !important;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+    z-index: 120;
+    width: 36px;
+    height: 92px;
+    min-width: 36px !important;
+    min-height: 92px !important;
+    border-radius: 10px 0 0 10px !important;
+    border-right: none !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    padding: 0;
+}
+
+.edge-toggle-copilot i {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.copilot-side-toggle-open {
+    position: absolute !important;
+    left: -36px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 40;
+    width: 36px;
+    height: 92px;
+    min-width: 36px !important;
+    min-height: 92px !important;
+    border-radius: 10px 0 0 10px !important;
+    border-right: none !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    padding: 0;
+}
+
+.copilot-side-toggle-open i {
+    font-size: 20px;
+    line-height: 1;
+}
+
 /* 确保图标按钮在所有主题下可见 */
 .icon-btn {
     background: rgba(128, 128, 128, 0.1) !important;
@@ -375,6 +424,24 @@ body.has-bg-image .nav-panel {
     margin: 0 auto;
     padding: 40px 60px;
     min-height: 100%;
+    transition: max-width 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* 动态布局适配：左侧栏收起 */
+.workbench.sidebar-collapsed .editor-container {
+    max-width: 1100px;
+}
+
+/* 动态布局适配：右侧Copilot收起 */
+.workbench:has(.copilot-panel.collapsed) .editor-container {
+    max-width: 1100px;
+}
+
+/* 动态布局适配：两侧都收起（沉浸模式） */
+.workbench.sidebar-collapsed:has(.copilot-panel.collapsed) .editor-container,
+.workbench.focus-mode .editor-container {
+    max-width: 1500px;
+    padding: 40px 8%;
 }
 
 input.title-input {
@@ -433,22 +500,49 @@ body.has-bg-image .copilot-panel {
 }
 
 .copilot-header {
-    height: var(--header-h);
+    min-height: var(--header-h);
+    height: auto;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0 12px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;
+    position: relative;
 }
 
-.copilot-header span {
+.copilot-title-group {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.copilot-title-group>span {
     font-weight: 600;
     color: var(--text-primary);
 }
 
-/* 新建会话按钮样式 */
-.new-chat-btn {
+.copilot-session-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.copilot-session-meta span {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 210px;
+}
+
+/* Copilot 头部按钮样式 */
+.new-chat-btn,
+.session-list-btn,
+.close-copilot {
     background: transparent;
     border: none;
     color: var(--text-secondary);
@@ -456,21 +550,132 @@ body.has-bg-image .copilot-panel {
     padding: 6px;
     border-radius: 6px;
     transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
-.new-chat-btn:hover {
+.new-chat-btn:hover,
+.session-list-btn:hover,
+.close-copilot:hover {
     background: rgba(255, 255, 255, 0.1);
     color: var(--accent-color);
 }
 
-.new-chat-btn i {
+.new-chat-btn i,
+.session-list-btn i,
+.close-copilot i {
     font-size: 16px;
-    padding: 0 16px;
+    line-height: 1;
+}
+
+.close-copilot i {
+    font-size: 18px;
+}
+
+.copilot-session-menu {
+    position: absolute;
+    top: 56px;
+    right: 12px;
+    width: min(320px, calc(100% - 24px));
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-panel);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    z-index: 30;
+    padding: 8px;
+}
+
+.copilot-session-empty {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 8px;
+}
+
+.copilot-session-item {
+    width: 100%;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 8px;
     display: flex;
+    align-items: stretch;
+    gap: 6px;
+    margin-bottom: 6px;
+    padding: 6px;
+}
+
+.copilot-session-item:last-child {
+    margin-bottom: 0;
+}
+
+.copilot-session-item:hover {
+    border-color: rgba(99, 102, 241, 0.45);
+    background: rgba(99, 102, 241, 0.12);
+}
+
+.copilot-session-item.active {
+    border-color: rgba(99, 102, 241, 0.75);
+    background: rgba(99, 102, 241, 0.18);
+}
+
+.copilot-session-switch {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 2px 4px;
+    min-width: 0;
+}
+
+.copilot-session-delete {
+    width: 30px;
+    min-width: 30px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--border-color);
+    justify-content: center;
+}
+
+.copilot-session-delete:hover {
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.12);
+}
+
+.copilot-session-delete i {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.copilot-session-item-id {
+    font-size: 12px;
     font-weight: 600;
+    color: var(--text-primary);
+}
+
+.copilot-session-item-time {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.copilot-session-item-preview {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .copilot-body {
@@ -494,6 +699,116 @@ body.has-bg-image .copilot-panel {
     max-width: 90%;
 }
 
+.msg.status {
+    opacity: 0.82;
+    font-size: 12px;
+}
+
+.msg .msg-content {
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+.msg.ai .msg-content {
+    white-space: normal;
+}
+
+.msg-content p {
+    margin: 0 0 8px;
+}
+
+.msg-content p:last-child {
+    margin-bottom: 0;
+}
+
+.msg-content h2,
+.msg-content h3,
+.msg-content h4,
+.msg-content h5 {
+    margin: 0 0 8px;
+    color: var(--text-primary);
+    line-height: 1.35;
+}
+
+.msg-content h2 {
+    font-size: 16px;
+}
+
+.msg-content h3 {
+    font-size: 15px;
+}
+
+.msg-content h4,
+.msg-content h5 {
+    font-size: 14px;
+}
+
+.msg-content ul,
+.msg-content ol {
+    margin: 0 0 8px;
+    padding-left: 18px;
+}
+
+.msg-content li {
+    margin: 4px 0;
+}
+
+.msg-content hr {
+    border: none;
+    border-top: 1px solid rgba(148, 163, 184, 0.35);
+    margin: 10px 0;
+}
+
+.msg-content code {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, 0.18);
+    color: #e2e8f0;
+}
+
+.msg-content pre {
+    margin: 8px 0;
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    overflow-x: auto;
+}
+
+.msg-content pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    display: block;
+    white-space: pre;
+}
+
+.msg-code-lang {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.msg-chip-row {
+    margin: 0 0 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.msg-chip {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    background: rgba(99, 102, 241, 0.14);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
 .msg.ai {
     background: rgba(255, 255, 255, 0.05);
     align-self: flex-start;
@@ -505,6 +820,64 @@ body.has-bg-image .copilot-panel {
     color: white;
     align-self: flex-end;
     border-bottom-right-radius: 2px;
+}
+
+/* 流式输出打字光标 */
+.msg.ai.streaming .msg-content::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    background: var(--accent-color, #6366f1);
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink-cursor 0.8s steps(2) infinite;
+}
+
+@keyframes blink-cursor {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+/* Markdown 渲染中的链接样式 */
+.msg.ai .msg-content a {
+    color: var(--accent-color, #6366f1);
+    text-decoration: underline;
+    text-decoration-color: rgba(99, 102, 241, 0.3);
+}
+
+.msg.ai .msg-content a:hover {
+    text-decoration-color: var(--accent-color, #6366f1);
+}
+
+/* 表格样式 */
+.msg.ai .msg-content table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 12px;
+    width: 100%;
+}
+
+.msg.ai .msg-content th,
+.msg.ai .msg-content td {
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    padding: 4px 8px;
+    text-align: left;
+}
+
+.msg.ai .msg-content th {
+    background: rgba(148, 163, 184, 0.1);
+    font-weight: 600;
+}
+
+/* blockquote 样式 */
+.msg.ai .msg-content blockquote {
+    border-left: 3px solid var(--accent-color, #6366f1);
+    margin: 8px 0;
+    padding: 4px 12px;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.05);
+    border-radius: 0 4px 4px 0;
 }
 
 .copilot-input {
@@ -521,45 +894,75 @@ body.has-bg-image .copilot-panel {
     position: relative;
 }
 
-/* 输入框顶部拖动条 */
+/* 输入框顶部拖动条 - 增强版 */
 .copilot-input-resize-handle {
     position: absolute;
-    top: -6px;
+    top: -8px;
     left: 16px;
     right: 16px;
-    height: 16px;
-    cursor: ns-resize;
+    height: 20px;
+    cursor: ns-resize !important;
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 10;
-    border-radius: 4px;
+    z-index: 100;
+    border-radius: 6px;
     transition: background 0.2s;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .copilot-input-resize-handle:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.15);
+    cursor: ns-resize !important;
 }
 
 .copilot-input-resize-handle::before {
     content: '';
-    width: 60px;
-    height: 5px;
+    width: 80px;
+    height: 6px;
     background: var(--border-color);
     border-radius: 3px;
     transition: all 0.2s;
+    pointer-events: none;
 }
 
 .copilot-input-resize-handle:hover::before {
     background: var(--accent-color);
-    width: 80px;
-    box-shadow: 0 0 8px var(--accent-color);
+    width: 100px;
+    height: 7px;
+    box-shadow: 0 0 12px var(--accent-color);
+}
+
+.copilot-input-resize-handle.dragging {
+    cursor: ns-resize !important;
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.2);
 }
 
 .copilot-input-resize-handle.dragging::before {
     background: var(--accent-color);
-    width: 100px;
-    box-shadow: 0 0 12px var(--accent-color);
+    width: 120px;
+    height: 8px;
+    box-shadow: 0 0 16px var(--accent-color);
+}
+
+/* 拖动时显示提示 */
+.copilot-input-resize-handle::after {
+    content: '↕ 拖动调整';
+    position: absolute;
+    top: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: var(--accent-color);
+    opacity: 0;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.copilot-input-resize-handle:hover::after {
+    opacity: 1;
 }
 
 .copilot-input-wrapper {
@@ -567,7 +970,7 @@ body.has-bg-image .copilot-panel {
     gap: 8px;
     align-items: flex-end;
     flex: 1;
-    min-height: 60px;
+    min-height: 80px;
 }
 
 .copilot-input textarea {
@@ -575,15 +978,15 @@ body.has-bg-image .copilot-panel {
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid var(--border-color);
     border-radius: 8px;
-    padding: 10px 12px;
+    padding: 12px 14px;
     color: var(--text-primary);
     resize: none;
-    min-height: 60px;
-    max-height: 400px;
-    height: 80px;
+    min-height: 80px;
+    max-height: 500px;
+    height: 120px;
     outline: none;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 14px;
+    line-height: 1.6;
     transition: border-color 0.2s, height 0.1s;
     overflow-y: auto;
 }
@@ -839,54 +1242,86 @@ body.resizing-input * {
     position: relative;
     overflow: hidden;
     /* 允许内部滚动正常工作 */
-    min-width: 280px;
-    max-width: 600px;
+    min-width: 320px;
+    max-width: 800px;
     transition: width 0.05s ease-out;
 }
 
 /* Copilot 左侧拖动边框 - 增强版 */
 .copilot-drag-handle {
     position: absolute;
-    left: -3px;
+    left: -4px;
     top: 0;
     bottom: 0;
-    width: 8px;
-    cursor: ew-resize;
+    width: 12px;
+    cursor: ew-resize !important;
     background: transparent;
     transition: background 0.2s;
-    z-index: 100;
+    z-index: 200;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.copilot-drag-handle:hover {
+    cursor: ew-resize !important;
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.08);
 }
 
 .copilot-drag-handle::before {
     content: '';
     position: absolute;
-    left: 3px;
+    left: 4px;
     top: 50%;
     transform: translateY(-50%);
-    width: 3px;
-    height: 40px;
+    width: 4px;
+    height: 50px;
     background: var(--border-color);
     border-radius: 2px;
-    opacity: 0;
+    opacity: 0.5;
     transition: all 0.2s;
+    pointer-events: none;
 }
 
 .copilot-drag-handle:hover::before {
     opacity: 1;
     background: var(--accent-color);
-    height: 60px;
-    box-shadow: 0 0 8px var(--accent-color);
+    height: 80px;
+    box-shadow: 0 0 12px var(--accent-color);
 }
 
 .copilot-drag-handle.dragging {
-    background: rgba(var(--accent-rgb, 99, 102, 241), 0.1);
+    cursor: ew-resize !important;
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.15);
 }
 
 .copilot-drag-handle.dragging::before {
     opacity: 1;
     background: var(--accent-color);
-    height: 80px;
-    box-shadow: 0 0 12px var(--accent-color);
+    height: 100px;
+    box-shadow: 0 0 16px var(--accent-color);
+}
+
+/* 拖动时显示提示 */
+.copilot-drag-handle::after {
+    content: '↔ 拖动调整';
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--accent-color);
+    opacity: 0;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+    pointer-events: none;
+    background: var(--bg-panel);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+}
+
+.copilot-drag-handle:hover::after {
+    opacity: 1;
 }
 
 /* 拖动时全局样式 */
@@ -940,36 +1375,148 @@ body.resizing-copilot * {
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     z-index: 100;
-    max-height: 300px;
+    max-height: min(65vh, 560px);
     overflow-y: auto;
+    overflow-x: hidden;
+    padding: 8px;
+    box-sizing: border-box;
+}
+
+.project-dropdown * {
+    box-sizing: border-box;
 }
 
 .project-item {
-    padding: 12px 14px;
-    cursor: pointer;
+    padding: 10px;
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 10px;
-    transition: background 0.2s;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    margin-bottom: 8px;
+    transition: border-color 0.2s, background 0.2s;
 }
 
 .project-item:hover {
-    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(99, 102, 241, 0.45);
+    background: rgba(99, 102, 241, 0.08);
 }
 
 .project-item.active {
-    background: rgba(99, 102, 241, 0.2);
-    border-left: 3px solid var(--accent-color);
+    border-color: rgba(99, 102, 241, 0.75);
+    background: rgba(99, 102, 241, 0.16);
 }
 
 .project-item-name {
     flex: 1;
     font-weight: 500;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .project-item-desc {
     font-size: 11px;
     color: var(--text-secondary);
+}
+
+.project-dropdown-header {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 6px 4px 8px;
+}
+
+.project-item-main {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.project-item-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: rgba(99, 102, 241, 0.14);
+    color: var(--accent-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.project-item-content {
+    min-width: 0;
+    flex: 1;
+}
+
+.project-item-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.project-item-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(99, 102, 241, 0.5);
+    color: #c7d2fe;
+    background: rgba(99, 102, 241, 0.16);
+    flex-shrink: 0;
+}
+
+.project-item-actions {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    overflow: hidden;
+}
+
+.project-item-actions .project-switch-btn {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(99, 102, 241, 0.45);
+}
+
+.project-switch-btn,
+.project-action-btn {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    font-size: 12px;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.project-switch-btn:hover,
+.project-action-btn:hover {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(99, 102, 241, 0.55);
+}
+
+.project-action-btn.danger:hover {
+    background: rgba(239, 68, 68, 0.18);
+    border-color: rgba(239, 68, 68, 0.55);
+    color: #fecaca;
+}
+
+.project-list-empty {
+    color: var(--text-secondary);
+    font-size: 12px;
+    padding: 12px 8px;
 }
 
 .project-add {
@@ -981,8 +1528,190 @@ body.resizing-copilot * {
     align-items: center;
     gap: 8px;
     font-size: 13px;
+    border-radius: 8px;
+    margin-top: 4px;
 }
 
 .project-add:hover {
     background: rgba(99, 102, 241, 0.1);
+}
+
+/* ===== 动画效果 ===== */
+
+/* 旋转动画 - 用于加载指示器 */
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* 脉冲动画 - 用于状态指示器 */
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 0.6;
+        transform: scale(1.1);
+    }
+}
+
+/* 淡入动画 */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* 滑入动画 */
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 加载中图标旋转 */
+.ri-loader-4-line {
+    display: inline-block;
+}
+
+/* 错误状态样式 */
+.error-state {
+    color: #ef4444;
+    animation: shake 0.5s ease-in-out;
+}
+
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-5px); }
+    75% { transform: translateX(5px); }
+}
+
+/* 成功状态样式 */
+.success-state {
+    color: #22c55e;
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+/* 警告状态样式 */
+.warning-state {
+    color: #f59e0b;
+}
+
+/* 运行中状态指示器 */
+.status-running {
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* 按钮禁用状态 */
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+button:disabled:hover {
+    transform: none;
+}
+
+/* ===== 下拉框样式优化 ===== */
+
+/* 通用下拉框样式 */
+select {
+    background-color: var(--bg-panel) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 32px 8px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    transition: all 0.2s ease;
+}
+
+select:hover {
+    border-color: var(--accent-color);
+    background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+select:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+/* 下拉选项样式 - 确保文字清晰可见 */
+select option {
+    background-color: #1e1e2e !important;
+    color: #e0e0e0 !important;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+select option:hover,
+select option:focus {
+    background-color: var(--accent-color) !important;
+    color: white !important;
+}
+
+select option:checked {
+    background-color: var(--accent-color) !important;
+    color: white !important;
+}
+
+/* 禁用状态 */
+select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+select:disabled option {
+    color: #666 !important;
+}
+
+/* 特定页面的下拉框样式覆盖 */
+.token-stats-filters select,
+.stats-filters select,
+#stats-data-source,
+#filter-model,
+#filter-agent {
+    min-width: 140px;
+    background-color: rgba(30, 30, 46, 0.95) !important;
+    color: #f0f0f0 !important;
+    font-weight: 500;
+}
+
+.token-stats-filters select option,
+.stats-filters select option,
+#stats-data-source option,
+#filter-model option,
+#filter-agent option {
+    background-color: #252536 !important;
+    color: #f0f0f0 !important;
+    padding: 12px;
+}
+
+/* 下拉框分组标签 */
+select optgroup {
+    background-color: #1a1a2e !important;
+    color: var(--accent-color) !important;
+    font-weight: 600;
+    padding: 8px;
 }

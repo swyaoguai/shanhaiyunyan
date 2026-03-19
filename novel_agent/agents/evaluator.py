@@ -19,42 +19,8 @@ class EvaluatorAgent(BaseAgent):
         )
     
     def _get_default_prompt(self) -> str:
-        return """你是一位严格的小说质量评估专家。你的任务是检测小说中的各种问题并给出评分。
-
-## 评估维度
-1. **剧情一致性** (0-100分)
-   - 情节是否连贯
-   - 有无剧情漏洞
-   - 伏笔是否合理
-
-2. **角色一致性** (0-100分)
-   - 角色行为是否符合设定
-   - 有无OOC(Out of Character)
-   - 角色发展是否合理
-
-3. **文字质量** (0-100分)
-   - 语法错误
-   - 表达流畅度
-   - 文采水平
-
-4. **节奏把控** (0-100分)
-   - 情节推进速度
-   - 详略得当程度
-   - 高潮设置
-
-5. **代入感** (0-100分)
-   - 场景描写
-   - 情感共鸣
-   - 阅读体验
-
-## 输出格式
-JSON格式，包含：
-- passed: 是否通过(总分>=70为通过)
-- total_score: 总分(各维度平均)
-- scores: 各维度分数
-- issues: 发现的问题列表
-- suggestions: 改进建议
-- highlights: 亮点描述"""
+        from .enhanced_prompts import EVALUATOR_PROMPT
+        return EVALUATOR_PROMPT
     
     async def execute(
         self, 

@@ -13,6 +13,7 @@ import hashlib
 import urllib.request
 import subprocess
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -70,10 +71,26 @@ def clean_before_build():
 def clean_build_artifacts():
     """清理旧的构建产物"""
     print("\n[清理] 清理旧的构建产物...")
-    
+
+    def _safe_rmtree(path: Path, retries: int = 3, delay: float = 1.0) -> bool:
+        """Windows下安全删除目录，处理文件占用"""
+        for i in range(retries):
+            try:
+                shutil.rmtree(path)
+                return True
+            except PermissionError:
+                if i < retries - 1:
+                    print(f"[Warning] 文件被占用，{delay}秒后重试删除: {path}")
+                    time.sleep(delay)
+                else:
+                    print(f"[X] 删除失败，请先关闭正在运行的EXE: {path}")
+                    return False
+        return False
+
     # 清理dist目录
     if DIST_DIR.exists():
-        shutil.rmtree(DIST_DIR)
+        if not _safe_rmtree(DIST_DIR):
+            return False
         print(f"[OK] 删除 dist 目录")
     
     # 清理build目录中的PyInstaller临时文件（保留Node.js缓存）
@@ -117,6 +134,25 @@ def run_pyinstaller():
     prompts_dir = ROOT_DIR / "novel_agent" / "prompts"
     data_dir = ROOT_DIR / "novel_agent" / "data"
     
+    # 确保data目录存在并有基本配置
+    if not data_dir.exists():
+        data_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[创建] data目录: {data_dir}")
+    
+    # 确保trends_config.json存在
+    trends_config_file = data_dir / "trends_config.json"
+    if not trends_config_file.exists():
+        default_config = {
+            "enabled": True,
+            "auto_refresh": False,
+            "refresh_interval": 300,
+            "default_platforms": ["toutiao", "douyin"],
+            "show_in_infinite_write": True,
+            "show_in_multi_agent": True
+        }
+        trends_config_file.write_text(json.dumps(default_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[创建] trends_config.json")
+    
     # 创建dist目录
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     
@@ -128,21 +164,38 @@ def run_pyinstaller():
         "--clean",
         # 使用单文件模式
         "--onefile",
-        # 暂时保留控制台方便调试，生产环境可改为 --noconsole
-        # "--noconsole",
+        # 无控制台窗口 - 生产环境使用
+        "--noconsole",
         # 添加静态资源
         "--add-data", f"{static_dir};novel_agent/web/static",
         "--add-data", f"{templates_dir};novel_agent/web/templates",
         "--add-data", f"{prompts_dir};novel_agent/prompts",
         "--add-data", f"{data_dir};novel_agent/data",
+        # 隐藏导入
+        "--hidden-import", "uvicorn.logging",
+        "--hidden-import", "uvicorn.loops",
+        "--hidden-import", "uvicorn.loops.auto",
+        "--hidden-import", "uvicorn.protocols",
+        "--hidden-import", "uvicorn.protocols.http",
+        "--hidden-import", "uvicorn.protocols.http.auto",
+        "--hidden-import", "uvicorn.protocols.websockets",
+        "--hidden-import", "uvicorn.protocols.websockets.auto",
+        "--hidden-import", "uvicorn.lifespan",
+        "--hidden-import", "uvicorn.lifespan.on",
+        "--hidden-import", "pydantic_core",
+        "--hidden-import", "pydantic_core._pydantic_core",
+        "--collect-all", "pydantic_core",
+        "--collect-all", "pydantic",
         # 图标（如果存在）
     ]
     
     # 检查是否有图标文件
-    icon_path = ROOT_DIR / "logo.png"
     ico_path = ROOT_DIR / "logo.ico"
     if ico_path.exists():
         cmd.extend(["--icon", str(ico_path)])
+        print(f"[图标] 使用 logo.ico")
+    else:
+        print(f"[警告] 未找到 logo.ico，将使用默认图标")
     
     # 添加入口文件
     cmd.append(str(ROOT_DIR / "run.py"))
@@ -162,6 +215,7 @@ def run_pyinstaller():
     print(f"[OK] PyInstaller 构建完成")
     print(f"     生成文件: {exe_path}")
     print(f"     文件大小: {exe_path.stat().st_size / (1024 * 1024):.1f} MB")
+
     
     return True
 
@@ -185,7 +239,6 @@ def create_portable_structure():
     # 复制配置文件
     resources = [
         (".env.example", ".env.example"),
-        ("mcp_config.json", "mcp_config.json"),
     ]
     
     for src, dst in resources:
@@ -270,27 +323,61 @@ REM 设置环境变量
 set PATH=%~dp0nodejs;%PATH%
 set NODE_PATH=%~dp0nodejs\\node_modules
 
-REM 检查.env文件
-if not exist "%~dp0.env" (
-    if exist "%~dp0.env.example" (
-        copy "%~dp0.env.example" "%~dp0.env" > nul
-        echo.
-        echo [提示] 已创建 .env 配置文件，请编辑后重新启动。
-        echo.
-        notepad "%~dp0.env"
-        pause
-        exit /b
-    )
-)
-
-REM 启动应用
 echo.
 echo ========================================
 echo   {DISPLAY_NAME} v{APP_VERSION}
 echo ========================================
 echo.
-echo 正在启动服务...
-echo 浏览器将自动打开...
+
+REM 检查运行环境和写入权限
+echo [1/3] 检查运行环境...
+if not exist "%~dp0data" mkdir "%~dp0data" 2>nul
+echo test > "%~dp0data\\.write_test" 2>nul
+if errorlevel 1 (
+    echo.
+    echo [错误] 当前目录没有写入权限！
+    echo.
+    echo 可能的原因：
+    echo   - 程序位于受保护的目录（如 C:\\Program Files）
+    echo   - 目录权限不足
+    echo.
+    echo 建议：
+    echo   - 将程序移动到有写入权限的目录
+    echo     （如桌面、文档文件夹或 D:\\ 盘）
+    echo   - 或以管理员身份运行（不推荐）
+    echo.
+    pause
+    exit /b 1
+)
+del "%~dp0data\\.write_test" 2>nul
+echo    [OK] 写入权限检查通过
+
+REM 检查.env文件
+echo [2/3] 检查配置文件...
+if not exist "%~dp0.env" (
+    if exist "%~dp0.env.example" (
+        copy "%~dp0.env.example" "%~dp0.env" > nul
+        echo    [提示] 已创建 .env 配置文件
+        echo.
+        echo 请编辑 .env 文件配置您的API密钥，然后重新启动。
+        echo.
+        notepad "%~dp0.env"
+        pause
+        exit /b
+    ) else (
+        echo    [警告] 未找到配置文件，将使用默认配置
+    )
+) else (
+    echo    [OK] 配置文件已存在
+)
+
+REM 启动应用
+echo [3/3] 启动服务...
+echo.
+echo 正在启动 {DISPLAY_NAME}...
+echo 浏览器将自动打开 http://localhost:5656
+echo.
+echo 提示：关闭此窗口将停止服务
 echo.
 "{APP_NAME}.exe"
 
@@ -309,35 +396,90 @@ pause
     # 创建README
     readme_content = f'''# {DISPLAY_NAME} v{APP_VERSION}
 
-## 使用说明
+## 快速开始
 
-1. 首次使用请编辑 `.env` 文件，配置您的API密钥
-2. 双击 `启动{DISPLAY_NAME}.bat` 启动程序
-3. 在浏览器访问 http://localhost:5656
+1. **解压到合适的位置**
+   - ✅ 推荐：桌面、文档文件夹、D盘等用户目录
+   - ❌ 避免：C:\\Program Files、系统目录等受保护位置
+
+2. **配置API密钥**
+   - 首次运行会自动创建 `.env` 配置文件
+   - 编辑 `.env` 文件，填入您的API密钥
+
+3. **启动程序**
+   - 双击 `启动{DISPLAY_NAME}.bat`
+   - 浏览器会自动打开 http://localhost:5656
 
 ## 系统要求
 
 - Windows 10/11 64位
 - 无需安装其他依赖（Node.js已内置）
+- 需要有写入权限的目录
 
 ## 配置说明
 
-### .env 文件
-- OPENAI_API_KEY: OpenAI API密钥（或兼容API的密钥）
-- OPENAI_API_BASE: API地址
-- OPENAI_MODEL: 使用的模型名称
+### .env 文件配置项
 
-### mcp_config.json
-MCP服务配置，一般无需修改
+```env
+# API配置
+OPENAI_API_KEY=your-api-key-here
+OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4
 
-## 数据目录
+# 服务器配置（可选）
+SERVER_HOST=0.0.0.0
+SERVER_PORT=5656
+```
 
-- data/projects: 项目数据
-- data/stats: Token统计
+## 目录结构
+
+```
+{APP_NAME}_v{APP_VERSION}_Portable/
+├── {APP_NAME}.exe          # 主程序
+├── 启动{DISPLAY_NAME}.bat   # 启动器（推荐）
+├── Start.bat               # 启动器（英文）
+├── .env                    # 配置文件
+├── data/                   # 数据目录
+│   ├── projects/          # 项目数据
+│   └── stats/             # Token统计
+└── nodejs/                # Node.js运行时
+```
+
+## 常见问题
+
+### 1. 提示"无法写入数据目录"
+
+**原因**：程序位于受保护的目录（如 C:\\Program Files）
+
+**解决方法**：
+- 将整个文件夹移动到桌面或文档文件夹
+- 或移动到 D:\\ 盘等非系统盘
+
+### 2. 端口被占用
+
+程序会自动寻找可用端口（5656-5665），如果都被占用会提示错误。
+
+**解决方法**：
+- 关闭占用端口的其他程序
+- 或在 .env 中修改 SERVER_PORT
+
+### 3. 浏览器没有自动打开
+
+**解决方法**：
+- 手动打开浏览器访问 http://localhost:5656
+- 检查启动窗口中显示的实际端口号
+
+## 数据安全
+
+- 所有数据保存在 `data/` 目录
+- 备份时只需复制整个程序文件夹
+- API密钥保存在 `.env` 文件中，请妥善保管
 
 ## 问题反馈
 
-如遇问题请联系开发者
+如遇问题请联系开发者或查看日志文件：
+- agent.log：主程序日志
+- startup_error.txt：启动错误日志（如果存在）
 '''
     
     readme_path = PORTABLE_DIR / "README.md"
@@ -361,7 +503,6 @@ def generate_hash_file():
     important_files = [
         f"{APP_NAME}.exe",
         ".env.example",
-        "mcp_config.json",
     ]
     
     for filename in important_files:

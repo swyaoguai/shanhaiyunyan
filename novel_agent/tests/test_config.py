@@ -105,13 +105,31 @@ class TestConfigReload:
         测试4: 验证reload()处理.env文件不存在的情况
         应该返回False并记录错误日志
         """
-        # Mock Path.cwd()返回一个不存在.env的目录
+        # 同时模拟项目根目录与cwd下均不存在.env
         with patch('novel_agent.config.Path') as mock_path:
-            mock_cwd = MagicMock()
-            mock_env_file = MagicMock()
-            mock_env_file.exists.return_value = False
-            mock_cwd.__truediv__.return_value = mock_env_file
-            mock_path.cwd.return_value = mock_cwd
+            root_env = MagicMock()
+            root_env.exists.return_value = False
+
+            fallback_env = MagicMock()
+            fallback_env.exists.return_value = False
+
+            root_parent = MagicMock()
+            root_parent.__truediv__.return_value = root_env
+
+            root_dir = MagicMock()
+            root_dir.parent = root_parent
+
+            resolved_file = MagicMock()
+            resolved_file.parent = root_dir
+
+            path_instance = MagicMock()
+            path_instance.resolve.return_value = resolved_file
+
+            cwd_path = MagicMock()
+            cwd_path.__truediv__.return_value = fallback_env
+
+            mock_path.return_value = path_instance
+            mock_path.cwd.return_value = cwd_path
 
             # 执行reload
             result = Config.reload()

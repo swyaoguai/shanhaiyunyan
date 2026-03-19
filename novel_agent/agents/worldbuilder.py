@@ -17,27 +17,8 @@ class WorldbuilderAgent(BaseAgent):
         )
     
     def _get_default_prompt(self) -> str:
-        return """你是一位专业的小说世界观架构师。你的任务是根据用户的需求，构建完整、自洽的小说世界观。
-
-## 你的能力
-1. 力量体系设计：根据小说类型设计合理的力量等级和修炼体系
-2. 地理环境构建：创造有特色的地点、国家、势力分布
-3. 历史背景编织：构建世界历史和重要事件
-4. 规则法则制定：设定世界运行的核心规则
-5. 文化习俗设计：不同种族/势力的文化特色
-
-## 输出格式
-请以结构化的JSON格式输出世界观设定，包含以下字段：
-- world_name: 世界名称
-- world_type: 世界类型(玄幻/科幻/都市等)
-- power_system: 力量体系详细设定
-- geography: 地理环境描述
-- history: 重要历史事件
-- factions: 主要势力介绍
-- rules: 世界核心规则
-- culture: 文化习俗特色
-
-确保所有设定相互呼应，逻辑自洽。"""
+        from .enhanced_prompts import WORLDBUILDER_PROMPT
+        return WORLDBUILDER_PROMPT
     
     async def execute(
         self, 
@@ -57,6 +38,12 @@ class WorldbuilderAgent(BaseAgent):
         novel_type = input_data.get("novel_type", "玄幻")
         theme = input_data.get("theme", "")
         requirements = input_data.get("requirements", "")
+
+        # 进度：读取需求/确认风格
+        try:
+            await self.notify_progress("正在读取需求并确认风格...", 10)
+        except Exception:
+            pass
         
         prompt = f"""请为以下小说构建世界观：
 
@@ -73,6 +60,12 @@ class WorldbuilderAgent(BaseAgent):
 
         messages = [{"role": "user", "content": prompt}]
         
+        # 进度：开始生成世界观骨架
+        try:
+            await self.notify_progress("正在生成世界观骨架（力量体系/地理/历史）...", 40)
+        except Exception:
+            pass
+
         response = await self.call_llm(messages)
         
         # 尝试解析JSON
@@ -90,6 +83,13 @@ class WorldbuilderAgent(BaseAgent):
         except (json.JSONDecodeError, ValueError, IndexError):
             # 解析失败则返回原始文本
             world_data = {"raw_content": response}
+
+        # 进度：补齐钩子与叙事约束 -> 完成
+        try:
+            await self.notify_progress("正在补齐剧情钩子与叙事约束...", 90)
+            await self.notify_progress("世界观构建完成", 100)
+        except Exception:
+            pass
         
         return {
             "success": True,
