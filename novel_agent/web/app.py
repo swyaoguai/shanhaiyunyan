@@ -31,6 +31,7 @@ from .routes import register_routes
 from .routes.pages import set_templates
 from .middleware import RateLimitMiddleware, RateLimitConfig
 from ..utils.log_sanitizer import setup_sanitizing_logging
+from .config_validator import validate_startup_config, print_startup_info
 
 # 日志记录器
 logger = logging.getLogger(__name__)
@@ -124,6 +125,14 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    # 验证配置
+    try:
+        validate_startup_config()
+        print_startup_info()
+    except Exception as e:
+        logger.error(f"配置验证失败: {e}")
+        raise
+
     config.init()
 
     # 启动后台缓存清理任务

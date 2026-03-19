@@ -8,11 +8,16 @@
   [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
   [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
+  [![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)](./CHANGELOG.md)
 </div>
 
 ---
 
 采用 Coordinator-Worker 架构模式，提供完整的小说创作工作流。
+
+> **📢 v1.1.0 重大更新**
+> 架构全面重构，模块化路由系统，新增 Skill 系统。
+> 从 v1.0 升级请查看 [迁移指南](./MIGRATION_GUIDE.md) | [更新日志](./CHANGELOG.md)
 
 ## ✨ 功能特点
 
@@ -224,6 +229,31 @@ novel_agent/
 | `SILICONFLOW_API_KEY` | 硅基流动API密钥 |
 | `SILICONFLOW_BASE_URL` | API地址 |
 | `SILICONFLOW_EMBEDDING_MODEL` | 向量化模型（默认BAAI/bge-m3） |
+
+### Skill 配置
+
+v1.1 新增 Skill 系统，支持扩展功能：
+
+```bash
+# 配置 Skill（以 trends_search 为例）
+cd skills/trends_search
+cp config.example.json config.json
+# 编辑 config.json 填入 API 密钥
+```
+
+可用 Skills：
+- `agent_reach`: 网络搜索功能
+- `trends_search`: 热点趋势搜索
+
+详见 [Skill 系统文档](./docs/Skill系统集成方案.md)
+
+## 📚 文档
+
+- [API 文档](./docs/API.md) - REST API 接口说明
+- [迁移指南](./MIGRATION_GUIDE.md) - v1.0 → v1.1 升级指南
+- [更新日志](./CHANGELOG.md) - 版本更新记录
+- [MCP 迁移](./docs/MCP迁移到Skill完整方案.md) - MCP 到 Skill 迁移
+- [架构文档](./docs/) - 详细技术文档
 
 ## 🎮 使用指南
 
