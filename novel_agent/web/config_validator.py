@@ -108,19 +108,19 @@ class ConfigValidator:
         from ..config import config
 
         # 检查 API Key
-        if not config.api_key:
+        if not config.llm.api_key:
             self.errors.append(
                 "LLM API Key 未配置。请设置环境变量 OPENAI_API_KEY 或在配置文件中设置。"
             )
 
         # 检查 API Base URL
-        if not config.api_base:
+        if not config.llm.api_base:
             self.warnings.append(
                 "API Base URL 未配置，将使用默认值。"
             )
 
         # 检查模型名称
-        if not config.model:
+        if not config.llm.model:
             self.warnings.append(
                 "模型名称未配置，将使用默认模型。"
             )
@@ -162,7 +162,7 @@ class ConfigValidator:
         from ..config import config
 
         # 获取配置的端口
-        port = getattr(config, 'port', 5656)
+        port = config.server.port
 
         # 检查端口是否被占用
         try:
@@ -213,11 +213,21 @@ def print_startup_info():
     from ..config import config
     import sys
 
-    print("\n" + "="*60)
-    print("🚀 小说创作智能体系统")
-    print("="*60)
-    print(f"版本: v1.1.0")
-    print(f"Python: {sys.version.split()[0]}")
-    print(f"端口: {getattr(config, 'port', 5656)}")
-    print(f"输出目录: {config.paths.output_dir}")
-    print("="*60 + "\n")
+    try:
+        print("\n" + "="*60)
+        print("🚀 小说创作智能体系统")
+        print("="*60)
+        print(f"版本: v1.1.0")
+        print(f"Python: {sys.version.split()[0]}")
+        print(f"端口: {config.server.port}")
+        print(f"输出目录: {config.paths.output_dir}")
+        print("="*60 + "\n")
+    except UnicodeEncodeError:
+        # Windows 控制台编码问题的回退方案
+        print("\n" + "="*60)
+        print("Novel Agent System v1.1.0")
+        print("="*60)
+        print(f"Python: {sys.version.split()[0]}")
+        print(f"Port: {config.server.port}")
+        print(f"Output: {config.paths.output_dir}")
+        print("="*60 + "\n")
