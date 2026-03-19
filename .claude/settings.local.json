@@ -11,7 +11,10 @@
       "Bash(git rm:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find . -name *.spec -type f)",
+      "Bash(grep -r \"^import\\\\|^from\" novel_agent/web/routes/*.py)",
+      "Bash(tee build.log)"
     ]
   }
 }

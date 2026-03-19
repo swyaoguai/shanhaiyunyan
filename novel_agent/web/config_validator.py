@@ -105,13 +105,9 @@ class ConfigValidator:
 
     def _validate_llm_config(self):
         """验证 LLM 配置"""
-        from ..config import config
-
-        # 检查 API Key
-        if not config.llm.api_key:
-            self.errors.append(
-                "LLM API Key 未配置。请设置环境变量 OPENAI_API_KEY 或在配置文件中设置。"
-            )
+        # 不验证 API Key，因为用户需要在 Web UI 中配置
+        # API Key 可以在程序启动后通过设置页面配置
+        pass
 
         # 检查 API Base URL
         if not config.llm.api_base:

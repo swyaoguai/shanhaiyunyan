@@ -18,13 +18,13 @@ from pathlib import Path
 from datetime import datetime
 
 # 项目配置
-APP_NAME = "NovelAgent"
+APP_NAME = "文思Agent"
 DISPLAY_NAME = "文思Agent"
 APP_VERSION = "1.1.0"
 ROOT_DIR = Path(__file__).parent
 BUILD_DIR = ROOT_DIR / "build"
 DIST_DIR = ROOT_DIR / "dist"
-PORTABLE_DIR = DIST_DIR / f"{APP_NAME}_v{APP_VERSION}_Portable"
+PORTABLE_DIR = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable"
 
 # Node.js Portable版本下载地址（Windows x64）
 NODEJS_URL = "https://nodejs.org/dist/v20.10.0/node-v20.10.0-win-x64.zip"
@@ -159,7 +159,7 @@ def run_pyinstaller():
     # PyInstaller 命令 - 使用单文件模式
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--name", APP_NAME,
+        "--name", DISPLAY_NAME,
         "--noconfirm",
         "--clean",
         # 使用单文件模式
@@ -207,7 +207,7 @@ def run_pyinstaller():
         return False
     
     # 验证exe是否生成
-    exe_path = DIST_DIR / f"{APP_NAME}.exe"
+    exe_path = DIST_DIR / f"{DISPLAY_NAME}.exe"
     if not exe_path.exists():
         print(f"[X] 未找到生成的exe文件: {exe_path}")
         return False
@@ -230,15 +230,16 @@ def create_portable_structure():
     PORTABLE_DIR.mkdir(parents=True)
     
     # 复制exe文件
-    exe_src = DIST_DIR / f"{APP_NAME}.exe"
-    exe_dst = PORTABLE_DIR / f"{APP_NAME}.exe"
+    exe_src = DIST_DIR / f"{DISPLAY_NAME}.exe"
+    exe_dst = PORTABLE_DIR / f"{DISPLAY_NAME}.exe"
     if exe_src.exists():
         shutil.copy2(exe_src, exe_dst)
         print(f"[OK] 复制 {APP_NAME}.exe")
     
-    # 复制配置文件
+    # 复制配置文件和文档
     resources = [
         (".env.example", ".env.example"),
+        ("使用说明.md", "使用说明.md"),
     ]
     
     for src, dst in resources:
@@ -249,6 +250,8 @@ def create_portable_structure():
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_path, dst_path)
             print(f"[OK] 复制 {src}")
+        else:
+            print(f"[警告] 未找到 {src}")
     
     # 创建data目录结构
     data_dir = PORTABLE_DIR / "data"
@@ -379,7 +382,7 @@ echo 浏览器将自动打开 http://localhost:5656
 echo.
 echo 提示：关闭此窗口将停止服务
 echo.
-"{APP_NAME}.exe"
+"{DISPLAY_NAME}.exe"
 
 pause
 '''
@@ -434,16 +437,27 @@ SERVER_PORT=5656
 ## 目录结构
 
 ```
-{APP_NAME}_v{APP_VERSION}_Portable/
-├── {APP_NAME}.exe          # 主程序
+{DISPLAY_NAME}_v{APP_VERSION}_Portable/
+├── {DISPLAY_NAME}.exe          # 主程序
 ├── 启动{DISPLAY_NAME}.bat   # 启动器（推荐）
 ├── Start.bat               # 启动器（英文）
+├── 使用说明.md              # 完整使用说明文档
 ├── .env                    # 配置文件
 ├── data/                   # 数据目录
 │   ├── projects/          # 项目数据
 │   └── stats/             # Token统计
 └── nodejs/                # Node.js运行时
 ```
+
+## 详细文档
+
+请查看 `使用说明.md` 获取完整的使用说明，包括：
+- 详细的功能介绍
+- 配置说明
+- Agent系统详解
+- 高级功能使用
+- 常见问题解答
+- 最佳实践建议
 
 ## 常见问题
 
@@ -501,8 +515,9 @@ def generate_hash_file():
     
     # 计算所有重要文件的哈希
     important_files = [
-        f"{APP_NAME}.exe",
+        f"{DISPLAY_NAME}.exe",
         ".env.example",
+        "使用说明.md",
     ]
     
     for filename in important_files:
@@ -546,7 +561,7 @@ def create_zip():
     """创建发布压缩包"""
     print("\n[打包] 创建发布压缩包...")
     
-    zip_name = f"{APP_NAME}_v{APP_VERSION}_Portable.zip"
+    zip_name = f"{DISPLAY_NAME}_v{APP_VERSION}_.zip"
     zip_path = DIST_DIR / zip_name
     
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -577,8 +592,8 @@ def print_summary():
     print("构建完成摘要")
     print("=" * 60)
     
-    exe_path = PORTABLE_DIR / f"{APP_NAME}.exe"
-    zip_path = DIST_DIR / f"{APP_NAME}_v{APP_VERSION}_Portable.zip"
+    exe_path = PORTABLE_DIR / f"{DISPLAY_NAME}.exe"
+    zip_path = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_.zip"
     
     if exe_path.exists():
         print(f"\n单文件exe:")
