@@ -20,7 +20,7 @@ from datetime import datetime
 # 项目配置
 APP_NAME = "NovelAgent"
 DISPLAY_NAME = "文思Agent"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 ROOT_DIR = Path(__file__).parent
 BUILD_DIR = ROOT_DIR / "build"
 DIST_DIR = ROOT_DIR / "dist"
