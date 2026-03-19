@@ -355,18 +355,12 @@ if errorlevel 1 (
 del "%~dp0data\\.write_test" 2>nul
 echo    [OK] 写入权限检查通过
 
-REM 检查.env文件
+REM 检查.env文件（静默创建，不强制编辑）
 echo [2/3] 检查配置文件...
 if not exist "%~dp0.env" (
     if exist "%~dp0.env.example" (
         copy "%~dp0.env.example" "%~dp0.env" > nul
         echo    [提示] 已创建 .env 配置文件
-        echo.
-        echo 请编辑 .env 文件配置您的API密钥，然后重新启动。
-        echo.
-        notepad "%~dp0.env"
-        pause
-        exit /b
     ) else (
         echo    [警告] 未找到配置文件，将使用默认配置
     )
@@ -380,7 +374,9 @@ echo.
 echo 正在启动 {DISPLAY_NAME}...
 echo 浏览器将自动打开 http://localhost:5656
 echo.
-echo 提示：关闭此窗口将停止服务
+echo 提示：
+echo   - 首次使用请在Web界面的"设置"页面配置API密钥
+echo   - 关闭此窗口将停止服务
 echo.
 "{DISPLAY_NAME}.exe"
 
@@ -405,13 +401,14 @@ pause
    - ✅ 推荐：桌面、文档文件夹、D盘等用户目录
    - ❌ 避免：C:\\Program Files、系统目录等受保护位置
 
-2. **配置API密钥**
-   - 首次运行会自动创建 `.env` 配置文件
-   - 编辑 `.env` 文件，填入您的API密钥
-
-3. **启动程序**
+2. **启动程序**
    - 双击 `启动{DISPLAY_NAME}.bat`
    - 浏览器会自动打开 http://localhost:5656
+
+3. **配置API密钥**
+   - 在Web界面点击"设置"
+   - 填入您的API密钥
+   - 保存配置即可使用
 
 ## 系统要求
 
@@ -421,7 +418,16 @@ pause
 
 ## 配置说明
 
-### .env 文件配置项
+### 方式1：Web界面配置（推荐）
+
+1. 启动程序后，在浏览器中打开 http://localhost:5656
+2. 点击"设置"标签
+3. 在"LLM配置"部分填入您的API密钥
+4. 点击"保存配置"
+
+### 方式2：.env 文件配置（可选）
+
+如果您熟悉配置文件，也可以直接编辑 `.env` 文件：
 
 ```env
 # API配置
@@ -433,6 +439,8 @@ OPENAI_MODEL=gpt-4
 SERVER_HOST=0.0.0.0
 SERVER_PORT=5656
 ```
+
+**注意**：修改 .env 文件后需要重启程序。
 
 ## 目录结构
 
