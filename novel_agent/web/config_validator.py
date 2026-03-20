@@ -109,18 +109,6 @@ class ConfigValidator:
         # API Key 可以在程序启动后通过设置页面配置
         pass
 
-        # 检查 API Base URL
-        if not config.llm.api_base:
-            self.warnings.append(
-                "API Base URL 未配置，将使用默认值。"
-            )
-
-        # 检查模型名称
-        if not config.llm.model:
-            self.warnings.append(
-                "模型名称未配置，将使用默认模型。"
-            )
-
     def _validate_skills(self):
         """验证 Skill 配置"""
         skills_dir = Path(__file__).parent.parent.parent / "skills"
