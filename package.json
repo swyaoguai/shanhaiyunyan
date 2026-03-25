@@ -1,0 +1,12 @@
+{
+  "name": "novel-agent-frontend-tests",
+  "private": true,
+  "scripts": {
+    "test:frontend": "vitest run --pool threads --maxWorkers 1 frontend-tests",
+    "test:frontend:watch": "vitest --pool threads --maxWorkers 1 frontend-tests"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "vitest": "^3.2.4"
+  }
+}
