@@ -38,6 +38,8 @@ const store = {
     copilotVisible: false,
     copilotSessionId: 'copilot',
     focusMode: false,
+    copilotWorkflow: null,
+    lastWorkflowFocusedRunId: '',
     settings: {
         bgUrl: '',
         bgOpacity: 0.85,
@@ -75,7 +77,8 @@ const ui = {
     copilotSessionMode: null,
     copilotSessionAgent: null,
     copilotSessionListBtn: null,
-    copilotSessionMenu: null
+    copilotSessionMenu: null,
+    copilotWorkflowPanel: null
 };
 
 // 初始化UI引用
@@ -105,6 +108,8 @@ function initUIReferences() {
     ui.copilotSessionAgent = document.getElementById('copilot-session-agent');
     ui.copilotSessionListBtn = document.getElementById('copilot-session-list-btn');
     ui.copilotSessionMenu = document.getElementById('copilot-session-menu');
+    ui.copilotWorkflowPanel = document.getElementById('copilot-workflow-panel');
+    bindCopilotWorkflowPanel();
 }
 
 // 初始化
@@ -120,6 +125,7 @@ async function init() {
     await checkGlobalAPIConfig(); // 检查全局API配置
     switchModule('dashboard');
     await restoreCopilotHistory();
+    await restoreCopilotWorkflowStatus();
     syncCopilotToggleButton();
     
     // 初始化Copilot增强功能
@@ -201,6 +207,7 @@ function bindEvents() {
         if (ui.projectDropdown && !ui.projectDropdown.classList.contains('hidden')) {
             if (!e.target.closest('.project-selector')) {
                 ui.projectDropdown.classList.add('hidden');
+                ui.projectCurrent?.setAttribute('aria-expanded', 'false');
             }
         }
         if (ui.copilotSessionMenu && !ui.copilotSessionMenu.classList.contains('hidden')) {
@@ -249,6 +256,12 @@ function switchModule(moduleId) {
     // 根据模块渲染工作区
     if (moduleId === 'dashboard') {
         renderDashboard();
+    } else if (moduleId === 'short-story') {
+        if (typeof renderShortStoryInterface === 'function') {
+            renderShortStoryInterface();
+        } else {
+            console.error('[switchModule] renderShortStoryInterface not found');
+        }
     } else if (moduleId === 'novel-to-script') {
         if (typeof renderNovelToScriptInterface === 'function') {
             renderNovelToScriptInterface();
@@ -368,6 +381,7 @@ function getCopilotWelcomeHtml() {
     return `你好！我是你的写作助手。试试：
         <ul style="margin: 8px 0; padding-left: 20px;">
             <li>输入 <code>@</code> 引用角色、章节或设定</li>
+            <li>输入 <code>/</code> 查看显式命令，例如 <code>/create</code></li>
             <li>直接提问或发指令</li>
         </ul>`;
 }
@@ -379,6 +393,321 @@ function renderCopilotWelcomeMessage() {
     welcomeMsg.className = 'msg ai';
     welcomeMsg.innerHTML = getCopilotWelcomeHtml();
     ui.copilotMsgs.appendChild(welcomeMsg);
+}
+
+function getWorkflowStatusLabel(status) {
+    const value = String(status || '').trim().toLowerCase();
+    const labels = {
+        running: '执行中',
+        completed: '已完成',
+        failed: '执行失败',
+        paused: '已暂停',
+        cancelled: '已取消',
+        starting: '准备中'
+    };
+    return labels[value] || (value || '待机');
+}
+
+function getWorkflowFileStatusLabel(status) {
+    return String(status || '').trim() === 'updated' ? '已更新' : '已创建';
+}
+
+function normalizeWorkflowFiles(files) {
+    if (!Array.isArray(files)) return [];
+    return files
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+            path: String(item.path || '').trim(),
+            label: String(item.label || item.name || '').trim(),
+            kind: String(item.kind || 'file').trim(),
+            status: String(item.status || 'created').trim()
+        }))
+        .filter((item) => item.path);
+}
+
+function normalizeCopilotWorkflow(workflow) {
+    if (!workflow || typeof workflow !== 'object') return null;
+    return {
+        run_id: String(workflow.run_id || '').trim(),
+        status: String(workflow.status || '').trim() || 'idle',
+        command: String(workflow.command || '').trim(),
+        current_agent: String(workflow.current_agent || '').trim(),
+        target_agent: String(workflow.target_agent || '').trim(),
+        stage: String(workflow.stage || '').trim(),
+        last_progress: String(workflow.last_progress || '').trim(),
+        last_error: String(workflow.last_error || '').trim(),
+        output_dir: String(workflow.output_dir || '').trim(),
+        focus_module: String(workflow.focus_module || '').trim(),
+        focus_chapter: Number(workflow.focus_chapter || 0) || 0,
+        created_files: normalizeWorkflowFiles(workflow.created_files),
+        updated_files: normalizeWorkflowFiles(workflow.updated_files)
+    };
+}
+
+function shouldShowWorkflowPanel(workflow) {
+    if (!workflow) return false;
+    // 只在工作流正在执行时显示面板（running, starting状态）
+    const status = String(workflow.status || '').trim().toLowerCase();
+    if (status === 'running' || status === 'starting') return true;
+    // 如果有错误，显示面板
+    if (workflow.last_error) return true;
+    // 其他情况（completed, failed, paused, cancelled等）都不显示
+    return false;
+}
+
+function renderWorkflowFileList(title, files) {
+    const safeTitle = window.escapeHtml ? window.escapeHtml(title) : title;
+    const rows = files.slice(0, 8).map((item) => {
+        const label = window.escapeHtml ? window.escapeHtml(item.label || item.path) : (item.label || item.path);
+        const kind = window.escapeHtml ? window.escapeHtml(item.kind || 'file') : (item.kind || 'file');
+        const status = getWorkflowFileStatusLabel(item.status);
+        const path = window.escapeHtml ? window.escapeHtml(item.path) : item.path;
+        return `
+            <div class="copilot-workflow-file">
+                <button type="button" class="copilot-workflow-file-main-btn" data-workflow-path="${path}" title="预览文件">
+                    <div class="copilot-workflow-file-main">
+                        <span class="copilot-workflow-file-kind">${kind}</span>
+                        <span class="copilot-workflow-file-label">${label}</span>
+                    </div>
+                    <span class="copilot-workflow-file-status">${status}</span>
+                </button>
+                <button type="button" class="copilot-workflow-file-action" data-workflow-download="${path}" title="下载文件">
+                    <i class="ri-download-line"></i>
+                </button>
+            </div>
+        `;
+    }).join('');
+    return `
+        <div class="copilot-workflow-files">
+            <div class="copilot-workflow-files-title">${safeTitle}</div>
+            <div class="copilot-workflow-file-list">${rows}</div>
+        </div>
+    `;
+}
+
+function updateCopilotWorkflowPanel(workflow) {
+    if (!ui.copilotWorkflowPanel) return;
+    const normalized = normalizeCopilotWorkflow(workflow);
+    store.copilotWorkflow = normalized;
+    if (!normalized || !shouldShowWorkflowPanel(normalized)) {
+        ui.copilotWorkflowPanel.innerHTML = '';
+        ui.copilotWorkflowPanel.classList.add('hidden');
+        return;
+    }
+
+    const createdFiles = normalized.created_files;
+    const updatedFiles = normalized.updated_files;
+    const agentName = normalized.current_agent || normalized.target_agent || '待机';
+    const stageName = normalized.stage || '未开始';
+    const commandName = normalized.command || '自然语言';
+    const progress = normalized.last_progress;
+    const error = normalized.last_error;
+    const outputDir = normalized.output_dir;
+    const safeAgent = window.escapeHtml ? window.escapeHtml(agentName) : agentName;
+    const safeStage = window.escapeHtml ? window.escapeHtml(stageName) : stageName;
+    const safeCommand = window.escapeHtml ? window.escapeHtml(commandName) : commandName;
+    const safeRunId = window.escapeHtml ? window.escapeHtml(normalized.run_id || '') : (normalized.run_id || '');
+    const safeProgress = window.escapeHtml ? window.escapeHtml(progress) : progress;
+    const safeError = window.escapeHtml ? window.escapeHtml(error) : error;
+    const safeOutputDir = window.escapeHtml ? window.escapeHtml(outputDir) : outputDir;
+
+    ui.copilotWorkflowPanel.innerHTML = `
+        <div class="copilot-workflow-header">
+            <div class="copilot-workflow-title">
+                <strong>真实执行状态</strong>
+                <span class="copilot-workflow-run">${safeRunId ? `run_id: ${safeRunId}` : '当前会话暂无运行ID'}</span>
+            </div>
+            <span class="copilot-workflow-badge" data-status="${window.escapeHtml ? window.escapeHtml(normalized.status) : normalized.status}">${getWorkflowStatusLabel(normalized.status)}</span>
+        </div>
+        <div class="copilot-workflow-grid">
+            <div class="copilot-workflow-meta">
+                <span>当前Agent</span>
+                <span>${safeAgent}</span>
+            </div>
+            <div class="copilot-workflow-meta">
+                <span>当前阶段</span>
+                <span>${safeStage}</span>
+            </div>
+            <div class="copilot-workflow-meta">
+                <span>触发命令</span>
+                <span>${safeCommand}</span>
+            </div>
+            <div class="copilot-workflow-meta">
+                <span>输出目录</span>
+                <span>${safeOutputDir || '未写入'}</span>
+            </div>
+        </div>
+        ${safeProgress ? `<div class="copilot-workflow-progress">${safeProgress}</div>` : ''}
+        ${safeError ? `<div class="copilot-workflow-error">${safeError}</div>` : ''}
+        ${createdFiles.length ? renderWorkflowFileList('新建文件', createdFiles) : ''}
+        ${updatedFiles.length ? renderWorkflowFileList('更新文件', updatedFiles) : ''}
+    `;
+    ui.copilotWorkflowPanel.classList.remove('hidden');
+    maybeFocusWorkflowTarget(normalized);
+}
+
+async function restoreCopilotWorkflowStatus() {
+    try {
+        const sessionId = getCurrentCopilotSessionId();
+        const res = await apiCall(`/api/chat/workflow-status?session_id=${encodeURIComponent(sessionId)}`, 'GET');
+        updateCopilotWorkflowPanel(res && res.workflow);
+    } catch (e) {
+        updateCopilotWorkflowPanel(null);
+    }
+}
+
+function bindCopilotWorkflowPanel() {
+    if (!ui.copilotWorkflowPanel || ui.copilotWorkflowPanel.dataset.bound === '1') return;
+    ui.copilotWorkflowPanel.dataset.bound = '1';
+    ui.copilotWorkflowPanel.addEventListener('click', async (event) => {
+        const previewBtn = event.target.closest('.copilot-workflow-file-main-btn');
+        if (previewBtn) {
+            const filePath = String(previewBtn.dataset.workflowPath || '').trim();
+            if (filePath) {
+                await previewWorkflowFile(filePath);
+            }
+            return;
+        }
+        
+        // 新增：查看详情按钮
+        const viewBtn = event.target.closest('[data-workflow-view]');
+        if (viewBtn) {
+            const filePath = String(viewBtn.dataset.workflowView || '').trim();
+            const fileKind = String(viewBtn.dataset.workflowKind || '').trim();
+            if (filePath && fileKind) {
+                navigateToFileLocation(fileKind);
+            }
+            return;
+        }
+        
+        const downloadBtn = event.target.closest('[data-workflow-download]');
+        if (downloadBtn) {
+            const filePath = String(downloadBtn.dataset.workflowDownload || '').trim();
+            if (!filePath) return;
+            const sessionId = getCurrentCopilotSessionId();
+            const url = `/api/chat/workflow-file?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`;
+            window.open(url, '_blank');
+        }
+    });
+}
+
+// 新增：导航到文件对应位置
+function navigateToFileLocation(fileKind) {
+    const kindModuleMap = {
+        'worldbuilding': 'world',
+        'characters': 'world',
+        'items': 'world',
+        'outline': 'write',
+        'chapter': 'write'
+    };
+    
+    const targetModule = kindModuleMap[fileKind];
+    if (!targetModule) return;
+    
+    switchModule(targetModule);
+    
+    // 根据类型打开对应分类
+    if (fileKind === 'worldbuilding') {
+        const worldCategory = store.knowledgeCategories.find(c => c.key === 'worldbuilding');
+        if (worldCategory && typeof loadDatabase === 'function') {
+            setTimeout(() => loadDatabase(worldCategory.id), 100);
+        }
+    } else if (fileKind === 'characters') {
+        const charCategory = store.knowledgeCategories.find(c => c.key === 'characters');
+        if (charCategory && typeof loadDatabase === 'function') {
+            setTimeout(() => loadDatabase(charCategory.id), 100);
+        }
+    } else if (fileKind === 'items') {
+        const itemCategory = store.knowledgeCategories.find(c => c.key === 'items');
+        if (itemCategory && typeof loadDatabase === 'function') {
+            setTimeout(() => loadDatabase(itemCategory.id), 100);
+        }
+    }
+    
+    showToast(`已跳转到${fileKind === 'worldbuilding' ? '世界设定' : fileKind === 'characters' ? '角色档案' : fileKind === 'items' ? '道具物品' : fileKind === 'outline' ? '大纲' : '章节'}`, 'success');
+}
+
+async function previewWorkflowFile(filePath) {
+    const modal = document.getElementById('modal-container');
+    if (!modal || !filePath) return;
+    const sessionId = getCurrentCopilotSessionId();
+    try {
+        const res = await apiCall(`/api/chat/workflow-file-preview?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`, 'GET');
+        const filename = String(res && res.filename || filePath).trim();
+        const language = String(res && res.language || 'text').trim();
+        const content = String(res && res.content || '').trim();
+        const truncated = Boolean(res && res.truncated);
+        const rendered = language === 'markdown'
+            ? renderMarkdown(content)
+            : `<pre style="margin: 0; white-space: pre-wrap; word-break: break-word;"><code>${escapeHtml(content)}</code></pre>`;
+        modal.classList.remove('hidden');
+        modal.innerHTML = `
+            <div class="copilot-preview-overlay">
+                <div class="copilot-preview-dialog">
+                    <div class="copilot-preview-header">
+                        <div class="copilot-preview-title">
+                            <strong>${escapeHtml(filename)}</strong>
+                            <span>${escapeHtml(filePath)}</span>
+                        </div>
+                        <div class="copilot-preview-actions">
+                            <button type="button" class="copilot-preview-download" data-preview-download="${escapeHtml(filePath)}" title="下载文件">
+                                <i class="ri-download-line"></i>
+                            </button>
+                            <button type="button" class="copilot-preview-close" title="关闭预览">
+                                <i class="ri-close-line"></i>
+                            </button>
+                        </div>
+                    </div>
+                    ${truncated ? '<div class="copilot-preview-tip">文件较大，当前只展示前 120000 个字符。</div>' : ''}
+                    <div class="copilot-preview-body msg-content">${rendered}</div>
+                </div>
+            </div>
+        `;
+        modal.querySelector('.copilot-preview-close')?.addEventListener('click', () => {
+            modal.classList.add('hidden');
+            modal.innerHTML = '';
+        });
+        modal.querySelector('.copilot-preview-download')?.addEventListener('click', () => {
+            const url = `/api/chat/workflow-file?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`;
+            window.open(url, '_blank');
+        });
+        modal.querySelector('.copilot-preview-overlay')?.addEventListener('click', (evt) => {
+            if (evt.target === evt.currentTarget) {
+                modal.classList.add('hidden');
+                modal.innerHTML = '';
+            }
+        });
+    } catch (e) {
+        showToast(`预览失败: ${e.message}`, 'error');
+    }
+}
+
+function maybeFocusWorkflowTarget(workflow) {
+    if (!workflow || typeof workflow !== 'object') return;
+    const runId = String(workflow.run_id || '').trim();
+    const focusModule = String(workflow.focus_module || '').trim();
+    const focusChapter = Number(workflow.focus_chapter || 0) || 0;
+    const status = String(workflow.status || '').trim();
+    if (!runId || !focusModule || focusChapter <= 0) return;
+    if (!['running', 'paused', 'cancelled', 'failed'].includes(status)) return;
+    if (store.lastWorkflowFocusedRunId === runId) return;
+    const switchModuleFn = typeof window.switchModule === 'function' ? window.switchModule : switchModule;
+    const loadProjectDataFn = typeof window.loadCurrentProjectData === 'function' ? window.loadCurrentProjectData : null;
+    const openChapterEditorFn = typeof window.openChapterEditor === 'function' ? window.openChapterEditor : null;
+    if (focusModule === 'write' && typeof openChapterEditorFn === 'function') {
+        store.lastWorkflowFocusedRunId = runId;
+        switchModuleFn('write');
+        if (typeof loadProjectDataFn === 'function') {
+            Promise.resolve(loadProjectDataFn()).finally(() => {
+                if (Array.isArray(store.projectData.outline) && store.projectData.outline[focusChapter - 1]) {
+                    openChapterEditorFn(focusChapter - 1);
+                    showToast(`已定位到第${focusChapter}章`, 'success');
+                }
+            });
+        } else if (Array.isArray(store.projectData.outline) && store.projectData.outline[focusChapter - 1]) {
+            openChapterEditorFn(focusChapter - 1);
+        }
+    }
 }
 
 function toCopilotRole(role) {
@@ -451,6 +780,7 @@ function renderCopilotSessionMenu(sessions) {
             setCurrentCopilotSessionId(sessionId);
             hideCopilotSessionMenu();
             await restoreCopilotHistory();
+            await restoreCopilotWorkflowStatus();
             setCopilotSessionHeader('默认模型', '准备就绪');
         });
     });
@@ -477,10 +807,12 @@ async function deleteCopilotSession(sessionId) {
             if (sessions.length > 0) {
                 setCurrentCopilotSessionId(String(sessions[0].session_id || '').trim() || 'copilot');
                 await restoreCopilotHistory();
+                await restoreCopilotWorkflowStatus();
             } else {
                 const newSessionId = await createCopilotSession();
                 setCurrentCopilotSessionId(newSessionId);
                 renderCopilotWelcomeMessage();
+                updateCopilotWorkflowPanel(null);
             }
             setCopilotSessionHeader('默认模型', '准备就绪');
         }
@@ -557,6 +889,9 @@ function updateCopilotSessionHeaderFromRouting(routing) {
     const agentLabels = {
         'Communicator': '沟通助手',
         'Coordinator': '创作协调器',
+        'Worldbuilder': '世界观构建',
+        'Outliner': '大纲规划',
+        'ChapterWriter': '章节写手',
         'ContinuousWriter': '无限续写',
         'Polisher': '润色助手',
         'Router': '智能路由',
@@ -592,8 +927,12 @@ async function clearCopilotChat() {
         input.value = '';
         input.dataset.mentions = '[]';
     }
+    if (typeof window.hideCopilotAutocomplete === 'function') {
+        window.hideCopilotAutocomplete();
+    }
 
     setCopilotSessionHeader('默认模型', '准备就绪');
+    updateCopilotWorkflowPanel(null);
 
     showToast('已创建新会话，历史会话可在列表中切换');
 }
@@ -657,6 +996,9 @@ async function sendCopilotMessage() {
     const text = ui.copilotInput.value.trim();
     if (!text) return;
 
+    if (typeof window.hideCopilotAutocomplete === 'function') {
+        window.hideCopilotAutocomplete();
+    }
     appendMessage(text, 'user');
     ui.copilotInput.value = '';
     const sid = getCurrentCopilotSessionId();
@@ -679,6 +1021,7 @@ async function sendCopilotMessage() {
                 session_id: sid
             });
             updateCopilotSessionHeaderFromRouting(res && res.routing);
+            updateCopilotWorkflowPanel(res && res.workflow);
             appendMessage(res.reply || '收到', 'ai');
             return;
         }
@@ -709,6 +1052,8 @@ async function sendCopilotMessage() {
                         fullText += evt.content;
                         contentEl.innerHTML = renderMarkdown(fullText);
                         scrollCopilotToBottom();
+                    } else if (evt.type === 'workflow') {
+                        updateCopilotWorkflowPanel(evt.workflow);
                     } else if (evt.type === 'done') {
                         // 最终完整回复
                         if (evt.reply) {
@@ -718,11 +1063,28 @@ async function sendCopilotMessage() {
                         if (evt.routing) {
                             updateCopilotSessionHeaderFromRouting(evt.routing);
                         }
+                        if (evt.workflow) {
+                            updateCopilotWorkflowPanel(evt.workflow);
+                            
+                            // ===== 新增：自动保存工作流文件 =====
+                            if (typeof handleWorkflowAutoSave === 'function') {
+                                try {
+                                    await handleWorkflowAutoSave(evt.workflow);
+                                } catch (autoSaveError) {
+                                    console.error('[Copilot] 自动保存失败', autoSaveError);
+                                    // 不影响主流程，只记录错误
+                                }
+                            }
+                            // ===== 自动保存结束 =====
+                        }
                         // 移除打字光标
                         aiDiv.classList.remove('streaming');
                     } else if (evt.type === 'error') {
                         fullText = evt.message || '处理请求时出错';
                         contentEl.innerHTML = renderMarkdown(fullText);
+                        if (evt.workflow) {
+                            updateCopilotWorkflowPanel(evt.workflow);
+                        }
                         aiDiv.classList.remove('streaming');
                     }
                 } catch (parseErr) {
@@ -804,5 +1166,7 @@ window.appendMessage = appendMessage;
 window.renderMarkdown = renderMarkdown;
 window.createStreamMessage = createStreamMessage;
 window.scrollCopilotToBottom = scrollCopilotToBottom;
+window.updateCopilotWorkflowPanel = updateCopilotWorkflowPanel;
+window.restoreCopilotWorkflowStatus = restoreCopilotWorkflowStatus;
 
 console.log('[app-core.js] 核心模块已加载');

@@ -10,7 +10,7 @@
     <!-- 本地化字体和图标 - 避免外部CDN依赖 -->
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1.0">
     <link rel="stylesheet" href="/static/icons/remixicon.css?v=3.5.1">
-    <link rel="stylesheet" href="/static/style.css?v=3.15">
+    <link rel="stylesheet" href="/static/style.css?v=3.19">
 </head>
 
 <body>
@@ -26,37 +26,40 @@
             </div>
 
             <div class="res-group">
-                <div class="res-item active" data-module="dashboard" title="仪表盘">
+                <button type="button" class="res-item active" data-module="dashboard" title="仪表盘" aria-label="打开仪表盘">
                     <i class="ri-dashboard-line"></i>
-                </div>
-                <div class="res-item" data-module="infinite-write" title="无限续写">
+                </button>
+                <button type="button" class="res-item" data-module="infinite-write" title="无限续写" aria-label="打开无限续写">
                     <i class="ri-infinity-line"></i>
-                </div>
-                <div class="res-item" data-module="novel-to-script" title="小说转剧本">
+                </button>
+                <button type="button" class="res-item" data-module="short-story" title="短篇创作" aria-label="打开短篇创作">
+                    <i class="ri-draft-line"></i>
+                </button>
+                <button type="button" class="res-item" data-module="novel-to-script" title="小说转剧本" aria-label="打开小说转剧本">
                     <i class="ri-movie-2-line"></i>
-                </div>
-                <div class="res-item" data-module="write" title="协作创作">
+                </button>
+                <button type="button" class="res-item" data-module="write" title="协作创作" aria-label="打开协作创作">
                     <i class="ri-quill-pen-line"></i>
-                </div>
-                <div class="res-item" data-module="world" title="资料库">
+                </button>
+                <button type="button" class="res-item" data-module="world" title="资料库" aria-label="打开资料库">
                     <i class="ri-book-mark-line"></i>
-                </div>
-                <div class="res-item" data-module="aux-memory" title="长期记忆中心">
+                </button>
+                <button type="button" class="res-item" data-module="aux-memory" title="长期记忆中心" aria-label="打开长期记忆中心">
                     <i class="ri-brain-line"></i>
-                </div>
+                </button>
             </div>
 
             <div class="res-group bottom">
                 <!-- 侧边栏收缩按钮 -->
-                <div class="res-item" id="sidebar-toggle-btn" title="收缩/展开侧边栏">
+                <button type="button" class="res-item" id="sidebar-toggle-btn" title="收缩/展开侧边栏" aria-label="收缩或展开侧边栏">
                     <i class="ri-side-bar-line"></i>
-                </div>
-                <div class="res-item" data-module="settings" title="设置">
+                </button>
+                <button type="button" class="res-item" data-module="settings" title="设置" aria-label="打开设置">
                     <i class="ri-settings-4-line"></i>
-                </div>
-                <div class="res-item" data-module="about" title="关于">
+                </button>
+                <button type="button" class="res-item" data-module="about" title="关于" aria-label="打开关于">
                     <i class="ri-information-line"></i>
-                </div>
+                </button>
             </div>
         </aside>
 
@@ -64,25 +67,27 @@
         <nav class="nav-panel" id="nav-panel">
             <!-- 项目选择器 -->
             <div class="project-selector">
-                <div class="project-current" id="project-current">
+                <button type="button" class="project-current" id="project-current" aria-haspopup="true" aria-expanded="false">
                     <i class="ri-book-2-line"></i>
                     <span id="current-project-name">加载中...</span>
                     <i class="ri-arrow-down-s-line"></i>
-                </div>
+                </button>
                 <div class="project-dropdown hidden" id="project-dropdown">
                     <div id="project-list">
                         <!-- 动态生成 -->
                     </div>
-                    <div class="project-add" id="project-add">
+                    <button type="button" class="project-add" id="project-add">
                         <i class="ri-add-line"></i> 新建小说项目
-                    </div>
+                    </button>
                 </div>
             </div>
 
             <div class="nav-header">
                 <h3 id="nav-title">仪表盘</h3>
                 <div class="nav-actions">
-                    <i class="ri-add-line" id="nav-action-add"></i>
+                    <button type="button" class="icon-btn nav-action-btn" id="nav-action-add" title="添加内容" aria-label="添加内容">
+                        <i class="ri-add-line"></i>
+                    </button>
                 </div>
             </div>
 
@@ -134,6 +139,7 @@
                         class="ri-chat-new-line"></i></button>
             </div>
             <div class="copilot-session-menu hidden" id="copilot-session-menu"></div>
+            <div class="copilot-workflow-panel hidden" id="copilot-workflow-panel" role="status" aria-live="polite"></div>
             <div class="copilot-body scrollbar-custom" id="copilot-messages">
                 <div class="msg ai">你好！我是文思创作助手。试试：
                     • 输入 <b>@</b> 引用角色、章节或设定
@@ -146,7 +152,7 @@
                 </div>
                 <div class="copilot-input-resize-handle" id="copilot-resize-handle" title="拖动调整输入框高度"></div>
                 <div class="copilot-input-wrapper">
-                    <textarea id="copilot-input-text" placeholder="输入内容，@ 可引用角色/章节..." rows="2"></textarea>
+                    <textarea id="copilot-input-text" placeholder="输入内容，@ 可引用角色/章节，输入 / 查看命令；直接中文会按自然语言理解..." rows="2"></textarea>
                     <button id="copilot-send-btn" title="发送"><i class="ri-send-plane-fill"></i></button>
                 </div>
             </div>
@@ -163,7 +169,7 @@
     <div id="modal-container" class="hidden"></div>
 
     <!-- Toast -->
-    <div id="toast" class="toast hidden">操作成功</div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite">操作成功</div>
 
     <!-- 按正确顺序加载模块化脚本 -->
     <!-- 0. Markdown 渲染库 -->
@@ -181,18 +187,31 @@
     <!-- 5.1 辅助记忆中心（依赖 core, nav） -->
     <script src="/static/app-aux-memory.js?v=1.2"></script>
     <!-- 6. 章节管理（依赖 core, nav） -->
-    <script src="/static/app-chapters.js?v=1.0"></script>
+    <script src="/static/app-chapters.js?v=1.2"></script>
     <!-- 7. 设置模块（依赖 core, theme） -->
-    <script src="/static/app-settings.js?v=1.5"></script>
+    <script src="/static/settings/app-settings-helpers.js?v=1.0"></script>
+    <script src="/static/settings/app-settings-api.js?v=1.0"></script>
+    <script src="/static/settings/app-settings-renderers.js?v=1.0"></script>
+    <script src="/static/settings/app-settings-events.js?v=1.0"></script>
+    <script src="/static/app-settings.js?v=2.0"></script>
     <!-- 7.1 备份与资料库管理（依赖 core, settings） -->
     <script src="/static/app-backup-resources.js?v=1.0"></script>
     <!-- 8. Copilot增强（依赖 core） -->
-    <script src="/static/app-copilot.js?v=1.1"></script>
+    <script src="/static/app-copilot.js?v=1.2"></script>
+    <!-- 8.1 工作流自动保存模块（依赖 core, copilot） -->
+    <script src="/static/app-workflow-auto-save.js?v=1.0"></script>
     <!-- 9. 项目管理（依赖 core） -->
     <script src="/static/app-project.js?v=1.5"></script>
     <!-- 10. 连续写作功能 -->
-    <script src="/static/continuous_write.js?v=1.8"></script>
-    <!-- 10.1 小说转剧本独立工作台 -->
+    <script src="/static/continuous_write.js?v=2.1"></script>
+    <!-- 10.1 短篇创作固定面板 -->
+    <script src="/static/short-story/short-story-state.js?v=1.6"></script>
+    <script src="/static/short-story/short-story-formatters.js?v=1.5"></script>
+    <script src="/static/short-story/short-story-api.js?v=1.3"></script>
+    <script src="/static/short-story/short-story-render.js?v=2.0"></script>
+    <script src="/static/short-story/short-story-events.js?v=1.4"></script>
+    <script src="/static/app-short-story.js?v=2.0"></script>
+    <!-- 10.2 小说转剧本独立工作台 -->
     <script src="/static/novel-to-script/novel-to-script-state.js?v=1.0"></script>
     <script src="/static/novel-to-script/novel-to-script-api.js?v=1.0"></script>
     <script src="/static/novel-to-script/novel-to-script-render.js?v=1.0"></script>
@@ -205,7 +224,7 @@
     <!-- 12. Token统计 -->
     <script src="/static/app-token-stats.js?v=1.0"></script>
     <!-- 13. 热点/热梗搜索 -->
-    <script src="/static/app-trends.js?v=1.4"></script>
+    <script src="/static/app-trends.js?v=1.5"></script>
 
     <!-- 13. 初始化应用 -->
     <script>
