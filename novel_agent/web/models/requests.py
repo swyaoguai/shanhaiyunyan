@@ -135,6 +135,54 @@ class ProjectStateBatchSetRequest(BaseModel):
     states: Dict[str, Any] = Field(default_factory=dict)
 
 
+class NovelToScriptSourceChapterRequest(BaseModel):
+    chapter_number: int = 1
+    title: str = ""
+    content: str = ""
+    word_count: Optional[int] = None
+
+
+class NovelToScriptConfigRequest(BaseModel):
+    script_style: str = "scene_block_webnovel_script"
+    convert_mode: str = "auto"
+    scene_density: str = "medium"
+    dialogue_ratio: str = "medium"
+    keep_voice_style: bool = True
+    human_name_strategy: str = "keep_original"
+
+
+class NovelToScriptConvertRequest(BaseModel):
+    source_type: str = "paste"
+    source_filename: str = ""
+    source_text: str = ""
+    source_chapters: List[NovelToScriptSourceChapterRequest] = Field(default_factory=list)
+    config: NovelToScriptConfigRequest = Field(default_factory=NovelToScriptConfigRequest)
+    api_config_id: str = ""
+    model: str = ""
+    title: str = ""
+
+
+class NovelToScriptStateRequest(BaseModel):
+    data: Any = None
+
+
+class NovelToScriptExportRequest(BaseModel):
+    title: str = ""
+    result: Dict[str, Any] = Field(default_factory=dict)
+
+
+class NovelToScriptBatchReconvertRequest(BaseModel):
+    source_type: str = "paste"
+    source_filename: str = ""
+    source_text: str = ""
+    source_chapters: List[NovelToScriptSourceChapterRequest] = Field(default_factory=list)
+    config: NovelToScriptConfigRequest = Field(default_factory=NovelToScriptConfigRequest)
+    api_config_id: str = ""
+    model: str = ""
+    batch_number: int = 1
+    existing_batches: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class KnowledgeBaseConfigRequest(BaseModel):
     siliconflow_api_key: str = ""
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"

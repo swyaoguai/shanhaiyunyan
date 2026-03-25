@@ -249,6 +249,12 @@ function switchModule(moduleId) {
     // 根据模块渲染工作区
     if (moduleId === 'dashboard') {
         renderDashboard();
+    } else if (moduleId === 'novel-to-script') {
+        if (typeof renderNovelToScriptInterface === 'function') {
+            renderNovelToScriptInterface();
+        } else {
+            console.error('[switchModule] renderNovelToScriptInterface not found');
+        }
     } else if (moduleId === 'infinite-write') {
         // 无限续写模块
         if (typeof renderInfiniteWriteInterface === 'function') {
