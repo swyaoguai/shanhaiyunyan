@@ -52,6 +52,21 @@ function renderNavPanel(moduleId) {
             }
             break;
 
+        case 'novel-to-script':
+            ui.navTitle.textContent = '小说转剧本';
+            ui.navActionAdd.style.display = 'none';
+            if (typeof renderNovelToScriptNavPanel === 'function') {
+                renderNovelToScriptNavPanel();
+            } else {
+                console.error('[Nav] renderNovelToScriptNavPanel not found');
+                ui.navList.innerHTML = `
+                    <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                        小说转剧本导航加载失败，请刷新页面重试。
+                    </div>
+                `;
+            }
+            break;
+
         case 'write':
             ui.navTitle.textContent = '协作创作';
             ui.navActionAdd.style.display = 'block';

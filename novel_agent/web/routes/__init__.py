@@ -23,6 +23,7 @@ from .prompts import router as prompts_router
 from .token_stats import router as token_stats_router
 from .trends import router as trends_router
 from .aux_memory import router as aux_memory_router
+from .novel_to_script import router as novel_to_script_router
 from .skills import router as skills_router
 from ..api.backup import router as backup_router
 from ..api.resources import router as resources_router
@@ -57,6 +58,7 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
         (token_stats_router, "Token统计"),
         (trends_router, "热点搜索"),
         (aux_memory_router, "辅助记忆"),
+        (novel_to_script_router, "小说转剧本"),
         (skills_router, "Skills管理"),
         (backup_router, "备份管理"),
         (resources_router, "资料库管理"),
@@ -69,4 +71,3 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
             app.include_router(router, prefix=f"/api/{API_VERSION}", tags=[tag])
         # 向后兼容（无版本前缀）
         app.include_router(router, prefix="/api", tags=[tag])
-

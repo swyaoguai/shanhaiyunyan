@@ -10,7 +10,7 @@
     <!-- 本地化字体和图标 - 避免外部CDN依赖 -->
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1.0">
     <link rel="stylesheet" href="/static/icons/remixicon.css?v=3.5.1">
-    <link rel="stylesheet" href="/static/style.css?v=3.14">
+    <link rel="stylesheet" href="/static/style.css?v=3.15">
 </head>
 
 <body>
@@ -31,6 +31,9 @@
                 </div>
                 <div class="res-item" data-module="infinite-write" title="无限续写">
                     <i class="ri-infinity-line"></i>
+                </div>
+                <div class="res-item" data-module="novel-to-script" title="小说转剧本">
+                    <i class="ri-movie-2-line"></i>
                 </div>
                 <div class="res-item" data-module="write" title="协作创作">
                     <i class="ri-quill-pen-line"></i>
@@ -170,7 +173,7 @@
     <!-- 2. 主题设置（依赖 utils） -->
     <script src="/static/app-theme.js?v=1.1"></script>
     <!-- 3. 核心状态和初始化（依赖 utils, theme） -->
-    <script src="/static/app-core.js?v=1.15"></script>
+    <script src="/static/app-core.js?v=1.16"></script>
     <!-- 4. 导航渲染（依赖 core） -->
     <script src="/static/app-nav.js?v=1.1"></script>
     <!-- 5. 资料库管理（依赖 core, nav） -->
@@ -189,6 +192,12 @@
     <script src="/static/app-project.js?v=1.5"></script>
     <!-- 10. 连续写作功能 -->
     <script src="/static/continuous_write.js?v=1.8"></script>
+    <!-- 10.1 小说转剧本独立工作台 -->
+    <script src="/static/novel-to-script/novel-to-script-state.js?v=1.0"></script>
+    <script src="/static/novel-to-script/novel-to-script-api.js?v=1.0"></script>
+    <script src="/static/novel-to-script/novel-to-script-render.js?v=1.0"></script>
+    <script src="/static/novel-to-script/novel-to-script-events.js?v=1.0"></script>
+    <script src="/static/app-novel-to-script.js?v=1.0"></script>
     <!-- 10.1 无限续写章节编辑器 -->
     <script src="/static/iw-editor.js?v=1.0"></script>
     <!-- 11. 提示词管理 -->
