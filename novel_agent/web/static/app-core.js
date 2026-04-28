@@ -386,6 +386,13 @@ function switchModule(moduleId) {
         if (typeof renderAboutPage === 'function') {
             renderAboutPage();
         }
+    } else if (normalizedModuleId === 'wiki') {
+        // Wiki知识系统
+        if (typeof WikiModule !== 'undefined' && typeof WikiModule.render === 'function') {
+            WikiModule.render();
+        } else {
+            console.error('[switchModule] WikiModule not found');
+        }
     }
 }
 

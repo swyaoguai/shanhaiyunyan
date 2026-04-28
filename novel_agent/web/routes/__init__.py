@@ -26,6 +26,7 @@ from .aux_memory import router as aux_memory_router
 from .short_story import router as short_story_router
 from .novel_to_script import router as novel_to_script_router
 from .skills import router as skills_router
+from .wiki import router as wiki_router
 from ..api.backup import router as backup_router
 from ..api.resources import router as resources_router
 from ..api.auto_backup import router as auto_backup_router
@@ -66,6 +67,7 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
         (short_story_router, "短篇创作"),
         (novel_to_script_router, "小说转剧本"),
         (skills_router, "Skills管理"),
+        (wiki_router, "Wiki知识系统"),
         (backup_router, "备份管理"),
         (resources_router, "资料库管理"),
         (auto_backup_router, "自动备份"),
