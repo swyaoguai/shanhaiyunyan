@@ -13,6 +13,7 @@ from unittest.mock import patch, MagicMock, mock_open
 from fastapi.testclient import TestClient
 
 from novel_agent.web.app import create_app
+from novel_agent.web.dependencies import get_coordinator, get_router_agent
 
 
 # ==================== Fixtures ====================
@@ -30,6 +31,30 @@ SAMPLE_CONFIG_REQUEST = {
     "api_key": "sk-test-key-12345",
     "model": "gpt-4"
 }
+
+
+def test_save_settings_syncs_router_coordinator_reference():
+    app = create_app()
+
+    with TestClient(app) as local_client:
+        old_coordinator = get_coordinator()
+        old_router = get_router_agent()
+
+        assert old_coordinator is not None
+        assert old_router is not None
+        assert old_router.coordinator is old_coordinator
+
+        response = local_client.post("/api/settings", json=SAMPLE_CONFIG_REQUEST)
+
+        assert response.status_code == 200
+
+        new_coordinator = get_coordinator()
+        new_router = get_router_agent()
+
+        assert new_coordinator is not None
+        assert new_coordinator is not old_coordinator
+        assert new_router is old_router
+        assert new_router.coordinator is new_coordinator
 
 
 # ==================== Test 1: Permission Denied on .env Write ====================

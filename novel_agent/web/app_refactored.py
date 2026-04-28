@@ -25,6 +25,7 @@ from ..agents import RouterAgent
 from .dependencies import set_coordinator, set_router_agent
 from .routes import register_routes
 from .routes.pages import set_templates
+from .websocket import setup_websocket_routes
 
 # 日志记录器
 logger = logging.getLogger(__name__)
@@ -103,7 +104,13 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
         if has_api_key:
             kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
             router_agent.set_knowledge_base(kb)
-            logger.info("[Router] ✓ 知识库已配置（使用真实向量存储）")
+
+            from .dependencies import get_coordinator
+            coordinator = get_coordinator()
+            if coordinator and hasattr(coordinator, "set_knowledge_base"):
+                coordinator.set_knowledge_base(kb)
+
+            logger.info("[Router] ✓ 知识库已配置，并已同步到协调器子Agent（使用真实向量存储）")
         else:
             logger.info("[Router] 未配置向量化API Key，跳过知识库功能")
             
@@ -191,6 +198,7 @@ def create_app() -> FastAPI:
     
     # 注册所有路由
     register_routes(app)
+    setup_websocket_routes(app)
     
     return app
 

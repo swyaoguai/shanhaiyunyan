@@ -1,0 +1,253 @@
+{
+  "base_url": "http://127.0.0.1:65208",
+  "timeout_seconds": 180,
+  "project_count_before": 3,
+  "project_count_after": 5,
+  "created_projects": [
+    "213b9744",
+    "5cdee869"
+  ],
+  "switch_results": [
+    {
+      "success": true,
+      "project_id": "213b9744",
+      "project_name": "E2E压力A",
+      "runtime_synced": true,
+      "refresh_result": {
+        "previous_project_id": "proj-test",
+        "current_project_id": "213b9744",
+        "chat_cache_cleared": 0,
+        "session_cache_cleared": 0,
+        "continuous_writer_cache_cleared": 0,
+        "coordinator_switched": true
+      }
+    },
+    {
+      "success": true,
+      "project_id": "5cdee869",
+      "project_name": "E2E压力B",
+      "runtime_synced": true,
+      "refresh_result": {
+        "previous_project_id": "213b9744",
+        "current_project_id": "5cdee869",
+        "chat_cache_cleared": 0,
+        "session_cache_cleared": 0,
+        "continuous_writer_cache_cleared": 0,
+        "coordinator_switched": true
+      }
+    }
+  ],
+  "create_payload": {
+    "novel_type": "玄幻",
+    "theme": "复仇成长",
+    "protagonist": "林渡",
+    "plot_idea": "宗门覆灭后的复仇与重建",
+    "volume_count": 1,
+    "chapters_per_volume": 1,
+    "session_id": "realapi_1775842400"
+  },
+  "create_result": {
+    "completed": true,
+    "timed_out": false,
+    "error": "",
+    "duration_seconds": 21.96
+  },
+  "sse_chunk_count": 7,
+  "sse_preview": [
+    {
+      "content": "## 创作启动\n已切换到正式多Agent协作执行链。\n\n",
+      "current_agent": "Coordinator",
+      "stage": "starting",
+      "status": "running",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "content": "正在调度任务: 生成世界观\n\n",
+      "current_agent": "Coordinator",
+      "stage": "project_dispatch",
+      "status": "running",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "content": "Worldbuilder 正在执行: 生成世界观\n\n",
+      "current_agent": "Worldbuilder",
+      "stage": "build_world",
+      "status": "running",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "content": "正在读取需求并确认风格...\n\n",
+      "current_agent": "Worldbuilder",
+      "stage": "",
+      "status": "running",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "content": "正在生成世界观骨架（力量体系/地理/历史）...\n\n",
+      "current_agent": "Worldbuilder",
+      "stage": "",
+      "status": "running",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "content": "Worldbuilder 执行失败: 🌐 网络连接失败\n\nAPI地址：https://ai-proxy-gateway-0zq8tap5.replit.app/v1\n\n❌ 可能原因：\n  • 本地网络断开或不稳定\n  • 代理服务器未启动\n\n",
+      "current_agent": "Worldbuilder",
+      "stage": "build_world",
+      "status": "failed",
+      "output_dir": "C:\\Users\\wen\\Desktop\\AGENT\\data\\projects\\5cdee869"
+    },
+    {
+      "stage": "failed",
+      "message": "创建小说失败: 🌐 网络连接失败\n\nAPI地址：https://ai-proxy-gateway-0zq8tap5.replit.app/v1\n\n❌ 可能原因：\n  • 本地网络断开或不稳定\n  • 代理服务器未启动或配置错误\n  • API服务器暂时不可用\n  • 防火墙阻止了连接\n\n💡 解决方案：\n  1. 检查网络连接（尝试访问其他网站）\n  2. 确认代理服务器已启动（如使用代理）\n  3. 检查API地址是否正确\n  4. 尝试关闭VPN或防火墙后重试",
+      "error": "🌐 网络连接失败\n\nAPI地址：https://ai-proxy-gateway-0zq8tap5.replit.app/v1\n\n❌ 可能原因：\n  • 本地网络断开或不稳定\n  • 代理服务器未启动或配置错误\n  • API服务器暂时不可用\n  • 防火墙阻止了连接\n\n💡 解决方案：\n  1. 检查网络连接（尝试访问其他网站）\n  2. 确认代理服务器已启动（如使用代理）\n  3. 检查API地址是否正确\n  4. 尝试关闭VPN或防火墙后重试"
+    }
+  ],
+  "ws_messages": [
+    {
+      "type": "connected",
+      "payload_keys": [
+        "client_id",
+        "message"
+      ]
+    },
+    {
+      "type": "stage_change",
+      "payload_keys": [
+        "type",
+        "stage",
+        "agent",
+        "task_type",
+        "title",
+        "message"
+      ]
+    },
+    {
+      "type": "stage_change",
+      "payload_keys": [
+        "type",
+        "stage",
+        "agent",
+        "task_type",
+        "title",
+        "message"
+      ]
+    },
+    {
+      "type": "progress",
+      "payload_keys": [
+        "type",
+        "agent",
+        "message",
+        "progress",
+        "data"
+      ]
+    },
+    {
+      "type": "progress",
+      "payload_keys": [
+        "type",
+        "agent",
+        "message",
+        "progress",
+        "data"
+      ]
+    },
+    {
+      "type": "notification",
+      "payload_keys": [
+        "message"
+      ]
+    },
+    {
+      "type": "stage_change",
+      "payload_keys": [
+        "type",
+        "stage",
+        "agent",
+        "task_type",
+        "title",
+        "error",
+        "message"
+      ]
+    },
+    {
+      "type": "stage_change",
+      "payload_keys": [
+        "type",
+        "stage",
+        "agent",
+        "task_type",
+        "title",
+        "error",
+        "message"
+      ]
+    }
+  ],
+  "status_samples": [
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    },
+    {
+      "status": "idle",
+      "current_agent": ""
+    }
+  ],
+  "final_workflow": {
+    "run_id": "",
+    "session_id": "realapi_1775842400",
+    "project_id": "5cdee869",
+    "command": "",
+    "status": "idle",
+    "target_agent": "",
+    "current_agent": "",
+    "stage": "",
+    "last_progress": "",
+    "last_error": "",
+    "output_dir": "",
+    "focus_module": "",
+    "focus_chapter": 0,
+    "started_at": "",
+    "updated_at": "",
+    "created_files": [],
+    "updated_files": [],
+    "reused_files": []
+  },
+  "final_reply": "当前创作状态：`idle`\n当前章节进度：2"
+}

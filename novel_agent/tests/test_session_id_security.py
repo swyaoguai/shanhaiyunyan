@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from novel_agent.agents.chat_session_store import ChatSessionStore, ChatSessionState
-from novel_agent.agents.session_store import SessionStore, SessionState
+from novel_agent.agents.session_store import SessionStore, SessionState, SessionStoreLoadError
 from novel_agent.web.app import create_app
 
 
@@ -139,3 +140,97 @@ def test_chat_sessions_list_create_delete_roundtrip(tmp_path: Path, monkeypatch)
         list_after_delete = client.get("/api/chat/sessions")
         assert list_after_delete.status_code == 200
         assert all(s["session_id"] != created_id for s in list_after_delete.json()["sessions"])
+
+
+def test_session_store_load_returns_detached_copy(tmp_path: Path):
+    store = SessionStore(storage_dir=tmp_path / "sessions")
+    state = SessionState(
+        session_id="session1",
+        project_id="project1",
+        chapters=[{"chapter_number": 1, "title": "原始标题", "content": "正文", "summary": "摘要", "word_count": 2}],
+        dead_characters=["沈夜"],
+    )
+
+    assert store.save(state) is True
+
+    loaded = store.load("session1", "project1")
+    assert loaded is not None
+    loaded.chapters[0]["title"] = "被污染"
+    loaded.dead_characters.append("新角色")
+
+    reloaded = store.load("session1", "project1")
+    assert reloaded is not None
+    assert reloaded.chapters[0]["title"] == "原始标题"
+    assert reloaded.dead_characters == ["沈夜"]
+
+
+def test_session_store_save_does_not_fake_commit_on_atomic_write_failure(tmp_path: Path, monkeypatch):
+    from novel_agent.agents import session_store as session_store_module
+
+    store = SessionStore(storage_dir=tmp_path / "sessions")
+    state = SessionState(session_id="session1", project_id="project1")
+    old_updated_at = state.updated_at
+    old_version = state.version
+
+    def _raise_io_error(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(session_store_module, "atomic_write_json", _raise_io_error)
+
+    assert store.save(state) is False
+    assert state.updated_at == old_updated_at
+    assert state.version == old_version
+    assert store._cache == {}
+    assert store.load("session1", "project1") is None
+
+
+def test_session_store_delete_and_clear_project_cache_keep_lock_identity(tmp_path: Path):
+    store = SessionStore(storage_dir=tmp_path / "sessions")
+    lock = store._get_lock("session1", "project1")
+    async_lock = store._get_async_lock("session1", "project1")
+
+    assert store.save(SessionState(session_id="session1", project_id="project1")) is True
+    assert store.delete("session1", "project1") is True
+    assert store._get_lock("session1", "project1") is lock
+    assert store._get_async_lock("session1", "project1") is async_lock
+
+    assert store.save(SessionState(session_id="session1", project_id="project1")) is True
+    assert store.clear_project_cache("project1") == 1
+    assert store._get_lock("session1", "project1") is lock
+    assert store._get_async_lock("session1", "project1") is async_lock
+
+
+def test_session_store_create_or_restore_raises_on_corrupt_session_file(tmp_path: Path):
+    store = SessionStore(storage_dir=tmp_path / "sessions")
+    path = store._get_session_path("session1", "project1")
+    path.write_text("{bad json", encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(SessionStoreLoadError):
+        store.create_or_restore("session1", "project1", story_beginning="新的开头")
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_session_store_invalidates_stale_cache_across_store_instances(tmp_path: Path):
+    storage_dir = tmp_path / "sessions"
+    store_a = SessionStore(storage_dir=storage_dir)
+    store_b = SessionStore(storage_dir=storage_dir)
+
+    state = SessionState(session_id="session1", project_id="project1", story_beginning="旧开头")
+    assert store_a.save(state) is True
+
+    cached = store_b.load("session1", "project1")
+    assert cached is not None
+    assert cached.story_beginning == "旧开头"
+
+    updated = store_a.load("session1", "project1")
+    assert updated is not None
+    updated.story_beginning = "新开头"
+    updated.dead_characters.append("阿九")
+    assert store_a.save(updated) is True
+
+    refreshed = store_b.load("session1", "project1")
+    assert refreshed is not None
+    assert refreshed.story_beginning == "新开头"
+    assert refreshed.dead_characters == ["阿九"]

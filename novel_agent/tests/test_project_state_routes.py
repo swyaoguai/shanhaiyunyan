@@ -74,6 +74,21 @@ def test_project_state_crud(client_with_project: TestClient):
     assert get_after_delete.json()["data"] is None
 
 
+def test_project_state_chat_auto_save_toggle_crud(client_with_project: TestClient):
+    payload = {"enabled": True}
+
+    save_resp = client_with_project.post(
+        "/api/project-state/copilot_chat_auto_save",
+        json={"data": payload},
+    )
+    assert save_resp.status_code == 200
+    assert save_resp.json()["success"] is True
+
+    get_resp = client_with_project.get("/api/project-state/copilot_chat_auto_save")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["data"] == payload
+
+
 def test_project_state_batch_set_and_get(client_with_project: TestClient):
     states = {
         "knowledge_data_eventlines": [{"id": "1", "name": "事件A"}],

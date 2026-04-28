@@ -10,6 +10,8 @@ anyio>=4.0.0
 jinja2>=3.0.0
 aiofiles>=23.0.0
 python-multipart>=0.0.6
+requests>=2.31.0
+beautifulsoup4>=4.12.0
 
 # RAG & Knowledge Base
 numpy>=1.24.0
@@ -23,6 +25,9 @@ httpx>=0.25.0
 
 # MCP SDK
 mcp>=1.0.0
+
+# Web search (DuckDuckGo)
+ddgs>=9.0.0
 
 # Optional: For better local embeddings, install:
 # pip install sentence-transformers

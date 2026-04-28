@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 from ..constants import WRITING_CONFIG, CONTEXT_PRIORITY, MESSAGE_BUS_CONFIG
+from ..utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class ContextManager:
         
         # 压缩缓存（避免重复压缩）
         self._compression_cache: Dict[str, str] = {}
+        self._MAX_COMPRESSION_CACHE_SIZE = 200
         
         # 上下文优先级配置（使用常量）
         self.priority_weights = {
@@ -232,7 +234,9 @@ class ContextManager:
         # 检查缓存
         cache_key = self._get_cache_key(content, method, max_length)
         if cache_key in self._compression_cache:
-            return self._compression_cache[cache_key]
+            val = self._compression_cache.pop(cache_key)
+            self._compression_cache[cache_key] = val
+            return val
         
         if method == "reversible":
             result = self._compress_reversible(content, max_length)
@@ -242,7 +246,7 @@ class ContextManager:
             result = self._compress_simple(content, max_length)
         
         # 缓存结果
-        self._compression_cache[cache_key] = result
+        self._set_compression_cache(cache_key, result)
         return result
     
     async def compress_context_smart(
@@ -277,7 +281,8 @@ class ContextManager:
         # 检查缓存
         cache_key = self._get_cache_key(content, "smart", max_length)
         if cache_key in self._compression_cache:
-            cached = self._compression_cache[cache_key]
+            cached = self._compression_cache.pop(cache_key)
+            self._compression_cache[cache_key] = cached
             return CompressionResult(
                 original_text=content,
                 compressed_text=cached,
@@ -291,7 +296,7 @@ class ContextManager:
         if self.llm_summarizer:
             try:
                 compressed = await self._llm_compress(content, max_length, preserve_keys)
-                self._compression_cache[cache_key] = compressed
+                self._set_compression_cache(cache_key, compressed)
                 
                 return CompressionResult(
                     original_text=content,
@@ -306,7 +311,7 @@ class ContextManager:
         
         # 降级到提取关键信息
         compressed = self._compress_extract(content, max_length)
-        self._compression_cache[cache_key] = compressed
+        self._set_compression_cache(cache_key, compressed)
         
         return CompressionResult(
             original_text=content,
@@ -512,11 +517,15 @@ class ContextManager:
             "history": self.history[-MESSAGE_BUS_CONFIG.HISTORY_LIMIT:]  # 只保留最近N条历史
         }
         
-        context_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-    
+        atomic_write_json(context_file, data)
+
+    def _set_compression_cache(self, key: str, value: str) -> None:
+        if len(self._compression_cache) >= self._MAX_COMPRESSION_CACHE_SIZE:
+            oldest = next(iter(self._compression_cache), None)
+            if oldest is not None:
+                del self._compression_cache[oldest]
+        self._compression_cache[key] = value
+
     def export_all(self) -> Dict[str, Any]:
         """导出所有上下文"""
         return {

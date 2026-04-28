@@ -1,0 +1,85 @@
+[
+  {
+    "name": "create_chat_session_burst",
+    "runs": 20,
+    "total_seconds": 0.0008,
+    "avg_ms": 0.039,
+    "p50_ms": 0.034,
+    "p95_ms": 0.046,
+    "min_ms": 0.03,
+    "max_ms": 0.102,
+    "extra": {
+      "unique_session_ids": 20,
+      "requested": 20
+    }
+  },
+  {
+    "name": "same_session_chat_sequential",
+    "runs": 50,
+    "total_seconds": 0.0038,
+    "avg_ms": 0.076,
+    "p50_ms": 0.056,
+    "p95_ms": 0.085,
+    "min_ms": 0.053,
+    "max_ms": 0.894,
+    "extra": {
+      "saved_states": 50
+    }
+  },
+  {
+    "name": "same_session_chat_concurrent",
+    "runs": 20,
+    "total_seconds": 0.0015,
+    "avg_ms": 0.075,
+    "p50_ms": 0.065,
+    "p95_ms": 0.133,
+    "min_ms": 0.056,
+    "max_ms": 0.167,
+    "extra": {
+      "saved_states": 20
+    }
+  },
+  {
+    "name": "multi_session_chat_concurrent",
+    "runs": 20,
+    "total_seconds": 0.0016,
+    "avg_ms": 0.082,
+    "p50_ms": 0.067,
+    "p95_ms": 0.136,
+    "min_ms": 0.06,
+    "max_ms": 0.202,
+    "extra": {
+      "unique_sessions": 20,
+      "saved_states": 20
+    }
+  },
+  {
+    "name": "multi_session_mixed_ops",
+    "runs": 30,
+    "total_seconds": 0.0013,
+    "avg_ms": 0.045,
+    "p50_ms": 0.032,
+    "p95_ms": 0.074,
+    "min_ms": 0.026,
+    "max_ms": 0.107,
+    "extra": {
+      "workers": 12,
+      "resets": 6,
+      "saved_states": 24
+    }
+  },
+  {
+    "name": "formal_create_route_smoke",
+    "runs": 10,
+    "total_seconds": 1.2382,
+    "avg_ms": 123.822,
+    "p50_ms": 123.893,
+    "p95_ms": 128.867,
+    "min_ms": 117.455,
+    "max_ms": 128.867,
+    "extra": {
+      "avg_sse_chunks": 3.0,
+      "task_pool_source": "contract_confirmation"
+    }
+  }
+]

@@ -22,7 +22,7 @@ function showCollaborativeImportDialog() {
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 14px; width: 560px; max-width: 100%; padding: 24px;">
                 <h3 style="margin: 0 0 16px 0; color: var(--text-primary); font-size: 18px; display: flex; align-items: center; gap: 8px;">
                     <i class="ri-upload-cloud-2-line"></i>
-                    导入小说到协作模式
+                    导入小说到多Agent模式
                 </h3>
                 <p style="margin: 0 0 14px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7;">
                     支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>。导入后会立即自动整理协作记忆。
@@ -124,7 +124,7 @@ function showAddChapterDialog() {
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">章节标题</label>
                     <input type="text" id="new-chapter-title" placeholder="例如：初入江湖、命运之夜..."
-                        value="第${nextChapterNum}章"
+                        value=""
                         style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
                 </div>
                 
@@ -207,7 +207,7 @@ function deleteChapter(index) {
     const chapter = store.projectData.outline[index];
     if (!chapter) return;
 
-    if (confirm(`确定要删除「第${index + 1}章 ${chapter.title}」吗？\n\n此操作不可恢复！`)) {
+    if (confirm(`确定要删除「${formatChapterDisplay(index + 1, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
         store.projectData.outline.splice(index, 1);
         saveOutlineData();
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
@@ -222,15 +222,13 @@ function deleteChapter(index) {
     }
 }
 
-// 多Agent写作模式热点状态
-let multiAgentShowTrends = true;
 
 function openChapterEditor(index) {
     const chapter = store.projectData.outline[index];
     if (!chapter) return;
 
     currentEditingChapterIndex = index;
-    updateBreadcrumbs(['写作', `第${index + 1}章 ${chapter.title}`]);
+    updateBreadcrumbs(['写作', formatChapterDisplay(index + 1, chapter.title)]);
 
     const wordCount = (chapter.content || '').replace(/\s/g, '').length;
 
@@ -245,9 +243,6 @@ function openChapterEditor(index) {
                         <span id="word-count">${wordCount} 字</span>
                         <span id="save-status" style="color: #10b981;">已保存</span>
                     </div>
-                    <button id="toggle-trends-btn" style="padding: 8px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-weight: 500;" title="热点灵感">
-                        <i class="ri-fire-fill"></i>
-                    </button>
                     <button id="ai-continue-btn" style="padding: 8px 16px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">
                         <i class="ri-magic-line"></i> AI续写
                     </button>
@@ -262,12 +257,6 @@ function openChapterEditor(index) {
                     style="flex: 1; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; color: var(--text-primary); font-size: 16px; line-height: 1.8; resize: none; outline: none;">${chapter.content || ''}</textarea>
             </div>
             
-            <!-- 热点灵感侧边栏 -->
-            <div id="multi-agent-trends-sidebar" style="${multiAgentShowTrends ? '' : 'display: none;'} width: 320px; flex-shrink: 0; overflow: hidden;">
-                <div id="multi-agent-trends-panel" style="height: 100%;">
-                    <!-- 热点面板将在这里渲染 -->
-                </div>
-            </div>
         </div>
     `;
 
@@ -374,127 +363,6 @@ function openChapterEditor(index) {
         showToast('章节已保存');
     });
     
-    // 热点面板开关按钮
-    const toggleTrendsBtn = document.getElementById('toggle-trends-btn');
-    if (toggleTrendsBtn) {
-        toggleTrendsBtn.addEventListener('click', () => {
-            multiAgentShowTrends = !multiAgentShowTrends;
-            const sidebar = document.getElementById('multi-agent-trends-sidebar');
-            if (sidebar) {
-                sidebar.style.display = multiAgentShowTrends ? '' : 'none';
-            }
-            toggleTrendsBtn.style.background = multiAgentShowTrends
-                ? 'rgba(239, 68, 68, 0.15)'
-                : 'rgba(255,255,255,0.1)';
-            toggleTrendsBtn.style.borderColor = multiAgentShowTrends
-                ? 'rgba(239, 68, 68, 0.4)'
-                : 'var(--border-color)';
-            toggleTrendsBtn.style.color = multiAgentShowTrends
-                ? '#ef4444'
-                : 'var(--text-secondary)';
-            
-            // 保存设置
-            if (typeof saveTrendsVisibility === 'function') {
-                const infiniteWriteShow = typeof trendsState !== 'undefined'
-                    ? trendsState.config?.showInInfiniteWrite ?? true
-                    : true;
-                saveTrendsVisibility(infiniteWriteShow, multiAgentShowTrends);
-            }
-        });
-    }
-    
-    // 初始化热点面板
-    initMultiAgentTrends();
-}
-
-// ===== 初始化多Agent写作热点面板 =====
-async function initMultiAgentTrends() {
-    // 加载热点配置
-    if (typeof loadTrendsConfig === 'function') {
-        await loadTrendsConfig();
-    }
-    
-    // 检查是否在多Agent模式显示热点
-    if (typeof trendsState !== 'undefined' && trendsState.config) {
-        multiAgentShowTrends = trendsState.config.showInMultiAgent !== false;
-    }
-    
-    // 更新侧边栏显示状态
-    const sidebar = document.getElementById('multi-agent-trends-sidebar');
-    if (sidebar) {
-        sidebar.style.display = multiAgentShowTrends ? '' : 'none';
-    }
-    
-    // 更新按钮状态
-    const toggleBtn = document.getElementById('toggle-trends-btn');
-    if (toggleBtn) {
-        toggleBtn.style.background = multiAgentShowTrends
-            ? 'rgba(239, 68, 68, 0.15)'
-            : 'rgba(255,255,255,0.1)';
-        toggleBtn.style.borderColor = multiAgentShowTrends
-            ? 'rgba(239, 68, 68, 0.4)'
-            : 'var(--border-color)';
-        toggleBtn.style.color = multiAgentShowTrends
-            ? '#ef4444'
-            : 'var(--text-secondary)';
-    }
-    
-    // 渲染热点面板
-    if (multiAgentShowTrends && typeof renderTrendsPanel === 'function') {
-        renderTrendsPanel('multi-agent-trends-panel', {
-            compact: false,
-            showToggle: false,
-            maxItems: 15,
-            onSelect: (title, item) => {
-                useHotTrendForChapter(title, item);
-            }
-        });
-    }
-}
-
-// ===== 使用热点作为章节灵感 =====
-function useHotTrendForChapter(title, item) {
-    const contentInput = document.getElementById('chapter-content-input');
-    if (contentInput) {
-        const currentContent = contentInput.value;
-        const cursorPos = contentInput.selectionStart;
-        
-        // 在光标位置插入热点内容
-        const insertText = `【热点灵感：${title}】`;
-        const newContent = currentContent.substring(0, cursorPos) + insertText + currentContent.substring(cursorPos);
-        
-        contentInput.value = newContent;
-        contentInput.focus();
-        
-        // 设置光标位置到插入文本之后
-        const newPos = cursorPos + insertText.length;
-        contentInput.setSelectionRange(newPos, newPos);
-        
-        // 更新字数
-        const wordCountEl = document.getElementById('word-count');
-        if (wordCountEl) {
-            const count = newContent.replace(/\s/g, '').length;
-            wordCountEl.textContent = `${count} 字`;
-        }
-        
-        // 触发自动保存
-        const saveStatusEl = document.getElementById('save-status');
-        if (saveStatusEl) {
-            saveStatusEl.textContent = '保存中...';
-            saveStatusEl.style.color = 'var(--accent-color)';
-        }
-        
-        clearTimeout(autoSaveTimer);
-        autoSaveTimer = setTimeout(() => {
-            saveCurrentChapter();
-            if (saveStatusEl) {
-                saveStatusEl.textContent = '已保存';
-                saveStatusEl.style.color = '#10b981';
-            }
-        }, 1000);
-        
-        showToast('热点灵感已插入 ✨');
-    }
 }
 
 function saveCurrentChapter() {
@@ -534,7 +402,5 @@ window.deleteChapter = deleteChapter;
 window.openChapterEditor = openChapterEditor;
 window.saveCurrentChapter = saveCurrentChapter;
 window.saveOutlineData = saveOutlineData;
-window.initMultiAgentTrends = initMultiAgentTrends;
-window.useHotTrendForChapter = useHotTrendForChapter;
 
 console.log('[app-chapters.js] 章节管理模块已加载');

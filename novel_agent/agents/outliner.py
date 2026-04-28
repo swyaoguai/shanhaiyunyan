@@ -5,7 +5,7 @@
 """
 
 from typing import Dict, Any, Optional, List
-from .base_agent import BaseAgent
+from .base_agent import AgentCapability, BaseAgent
 from ..constants import WRITING_CONFIG
 
 
@@ -21,6 +21,22 @@ class OutlinerAgent(BaseAgent):
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import OUTLINER_PROMPT
         return OUTLINER_PROMPT
+
+    def get_capabilities(self) -> AgentCapability:
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=["story_outlining", "story_planning"],
+            accept_task_types=["build_outline"],
+            required_inputs=["world", "protagonist"],
+            produced_outputs=["outline"],
+            priority=91,
+            max_concurrency=1,
+            metadata={
+                "stage": "planning",
+                "prompt_file": self.prompt_file or "",
+                "agent_class": self.__class__.__name__,
+            },
+        )
     
     async def execute(
         self, 
@@ -65,6 +81,11 @@ class OutlinerAgent(BaseAgent):
 - 分为 {volume_count} 卷
 - 每卷约 {chapters_per_volume} 章
 - 设计清晰的主线冲突和角色成长线
+
+## 重要说明
+“剧情构思”字段中可能已经拼接了沟通助手与用户的完整讨论摘要。
+你必须优先遵守这些讨论中已经确定的剧情方向、风格要求、人物关系、爽点偏好、禁忌与特殊约束，
+不能因为世界观或默认套路而把这些既定要求覆盖掉。
 
 请先输出总纲（JSON格式），包含标题、主题、主要冲突、结局走向："""
 

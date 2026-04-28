@@ -9,6 +9,8 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from ..utils.atomic_write import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,7 +81,7 @@ class WorldManager:
         self.events.append(event)
         self._save_world()
     
-    def get_world_context(self) -> str:
+    def get_world_context(self, compact: bool = True) -> str:
         """
         获取世界观上下文(用于注入到Agent)
         
@@ -89,6 +91,27 @@ class WorldManager:
         if not self.world:
             return "暂无世界观设定"
         
+        if compact:
+            rules = self.world.rules[:3] if self.world.rules else []
+            factions = self.world.factions[:2] if self.world.factions else []
+            lines = [
+                f"【世界】{self.world.name}",
+                f"- 类型：{self.world.world_type}",
+            ]
+            if self.world.power_system:
+                lines.append(f"- 力量体系：{self._compact_value(self.world.power_system)}")
+            if self.world.geography:
+                lines.append(f"- 地理环境：{self._compact_value(self.world.geography)}")
+            if factions:
+                faction_text = "；".join(
+                    f"{str(item.get('name') or '势力').strip()}：{str(item.get('description') or '').strip()}"
+                    for item in factions if isinstance(item, dict)
+                )
+                lines.append(f"- 主要势力：{faction_text}")
+            if rules:
+                lines.append(f"- 核心规则：{'；'.join(str(rule).strip() for rule in rules if str(rule).strip())}")
+            return "\n".join(lines)
+
         context = f"""【世界名称】{self.world.name}
 
 【世界类型】{self.world.world_type}
@@ -109,6 +132,16 @@ class WorldManager:
 {json.dumps(self.world.culture, ensure_ascii=False, indent=2) if self.world.culture else "未设定"}
 """
         return context
+
+    @staticmethod
+    def _compact_value(value: Any, max_len: int = 80) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+        else:
+            text = json.dumps(value, ensure_ascii=False)
+        return text[:max_len] + ("..." if len(text) > max_len else "")
     
     def _format_factions(self) -> str:
         """格式化势力信息"""
@@ -165,17 +198,80 @@ class WorldManager:
         if world_file.exists():
             try:
                 data = json.loads(world_file.read_text(encoding="utf-8"))
-                # 兼容两种数据格式
-                if "world" in data:
-                    self.world = WorldSetting(**data["world"])
-                elif "name" in data or "world_type" in data:
-                    # 直接是WorldSetting格式
-                    self.world = WorldSetting(**data)
-                self.locations = data.get("locations", {})
-                self.items = data.get("items", {})
-                self.events = data.get("events", [])
+                self._apply_world_payload(data)
             except Exception as e:
                 logger.warning(f"Failed to load world: {e}")
+
+    @staticmethod
+    def _coerce_world_setting(raw: Any) -> Optional[WorldSetting]:
+        """标准化世界观主结构。"""
+        if not isinstance(raw, dict):
+            return None
+
+        if "name" not in raw and "world_name" not in raw and "world_type" not in raw:
+            return None
+
+        return WorldSetting(
+            name=str(raw.get("name") or raw.get("world_name") or "未命名世界").strip() or "未命名世界",
+            world_type=str(raw.get("world_type") or "通用").strip() or "通用",
+            power_system=raw.get("power_system") if isinstance(raw.get("power_system"), dict) else {},
+            geography=raw.get("geography") if isinstance(raw.get("geography"), dict) else {},
+            history=raw.get("history") if isinstance(raw.get("history"), list) else [],
+            factions=raw.get("factions") if isinstance(raw.get("factions"), list) else [],
+            rules=[str(rule).strip() for rule in raw.get("rules", []) if str(rule).strip()] if isinstance(raw.get("rules"), list) else [],
+            culture=raw.get("culture") if isinstance(raw.get("culture"), dict) else {},
+            technology_level=str(raw.get("technology_level") or "").strip(),
+            magic_system=str(raw.get("magic_system") or "").strip(),
+            timeline=str(raw.get("timeline") or "").strip(),
+        )
+
+    @staticmethod
+    def _build_world_from_rows(rows: List[Any]) -> Optional[WorldSetting]:
+        """将前端保存的条目式世界设定转换为兼容结构。"""
+        normalized_rules: List[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("title") or "").strip()
+            description = str(row.get("description") or row.get("content") or "").strip()
+            text = "：".join(part for part in [name, description] if part)
+            if text:
+                normalized_rules.append(text)
+
+        if not normalized_rules:
+            return None
+
+        return WorldSetting(
+            name="项目世界观",
+            world_type="条目式设定",
+            rules=normalized_rules,
+        )
+
+    def _apply_world_payload(self, data: Any) -> None:
+        """兼容多种世界观存储结构。"""
+        self.world = None
+        self.locations = {}
+        self.items = {}
+        self.events = []
+
+        if isinstance(data, list):
+            self.world = self._build_world_from_rows(data)
+            return
+
+        if not isinstance(data, dict):
+            raise ValueError("Unsupported world payload format")
+
+        world_data = data.get("world", data)
+        if isinstance(world_data, list):
+            self.world = self._build_world_from_rows(world_data)
+        else:
+            self.world = self._coerce_world_setting(world_data)
+            if self.world is None and world_data:
+                logger.warning(f"[WorldManager] 无法识别的世界观数据结构，已跳过: keys={list(world_data.keys()) if isinstance(world_data, dict) else type(world_data)}")
+
+        self.locations = data.get("locations", {}) if isinstance(data.get("locations"), dict) else {}
+        self.items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        self.events = data.get("events", []) if isinstance(data.get("events"), list) else []
     
     def _save_world(self) -> None:
         """保存世界观到文件"""
@@ -193,10 +289,7 @@ class WorldManager:
             "events": self.events
         }
         
-        world_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        atomic_write_json(world_file, data)
     
     def export_for_llm(self) -> Dict[str, Any]:
         """导出为LLM可用的格式"""

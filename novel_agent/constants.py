@@ -184,7 +184,7 @@ WRITING_CONFIG = WritingConfig()
 @dataclass(frozen=True)
 class RateLimitDefaults:
     """速率限制默认值"""
-    REQUESTS_PER_MINUTE: int = 60
+    REQUESTS_PER_MINUTE: int = 200
     REQUESTS_PER_HOUR: int = 1000
     BURST_LIMIT: int = 10
     COOLDOWN_SECONDS: int = 60       # 冷却时间（秒）

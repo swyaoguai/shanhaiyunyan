@@ -9,8 +9,9 @@
 - 模型切换连贯：支持换模型后保持一致性
 """
 
+import re
 from typing import Dict, Any, Optional, List
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentCapability
 from .knowledge_mixin import KnowledgeBaseMixin
 from ..constants import WRITING_CONFIG, AGENT_TEMPERATURE, AGENT_TOKEN_CONFIG
 
@@ -40,6 +41,21 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import CHAPTER_WRITER_PROMPT
         return CHAPTER_WRITER_PROMPT
+
+    def get_capabilities(self) -> AgentCapability:
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=["write_chapter", "draft_chapter"],
+            accept_task_types=["write_chapter"],
+            required_inputs=["chapter_number", "chapter_title", "chapter_outline"],
+            produced_outputs=["content", "word_count", "dead_characters"],
+            priority=95,
+            max_concurrency=1,
+            metadata={
+                "stage": "chapter_writing",
+                "supports_kb": True,
+            },
+        )
     
     async def execute(
         self,
@@ -64,6 +80,7 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
         # 从上下文提取相关信息
         world = context.get("world", {}) if context else {}
         characters = context.get("characters", []) if context else []
+        eventlines = context.get("eventlines", "") if context else ""
         previous_summary = context.get("previous_summary", "") if context else ""
         style = context.get("style", "") if context else ""
         aux_memory = context.get("aux_memory", {}) if context else {}
@@ -118,6 +135,9 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
 ## 相关角色
 {characters if characters else "根据大纲自行把握"}
+
+## 事件线参考
+{eventlines if eventlines else "暂无事件线"}
 
 ## 前情提要
 {previous_summary if previous_summary else "这是开篇章节"}
@@ -182,7 +202,7 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             "chapter_number": chapter_number,
             "chapter_title": chapter_title,
             "content": response,
-            "word_count": total_chars,
+            "word_count": nonspace_chars,  # 问题12修复：使用去空白字符数作为 word_count
             "stats": {"chars": total_chars, "nonspace_chars": nonspace_chars},
             "dead_characters": self.get_dead_characters()
         }
@@ -315,11 +335,25 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
         return results
     
     def _summarize_chapter(self, content: str, max_length: int = WRITING_CONFIG.CHAPTER_SUMMARY_MAX_LENGTH) -> str:
-        """简单摘要章节内容"""
-        # 简单实现：取前N个字符
-        if len(content) <= max_length:
-            return content
-        return content[:max_length] + "..."
+        """问题13修复：按段落提取关键内容，而非纯截断。"""
+        if not content or not content.strip():
+            return ""
+        clean = re.sub(r"\s+", "", content)
+        if len(clean) <= max_length:
+            return content.strip()
+        paragraphs = [p.strip() for p in content.split("\n") if p.strip()]
+        summary_parts: List[str] = []
+        current_len = 0
+        for para in paragraphs:
+            para_clean_len = len(re.sub(r"\s+", "", para))
+            if current_len + para_clean_len > max_length:
+                remaining = max_length - current_len
+                if remaining > 20:
+                    summary_parts.append(para[:remaining])
+                break
+            summary_parts.append(para)
+            current_len += para_clean_len
+        return "\n".join(summary_parts) if summary_parts else clean[:max_length]
 
 
 # 模块职责说明：负责根据大纲生成具体的章节内容，支持批量生成和摘要功能。

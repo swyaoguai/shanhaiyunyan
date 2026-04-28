@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,13 @@ class PlotThreadStateMachine:
     _INLINE_COMPLETE_RE = re.compile(r"\[(?:complete_thread|结束支线)\]", re.IGNORECASE)
     _INLINE_RETURN_BY_RE = re.compile(r"\[return_by:(\d{1,4})\]", re.IGNORECASE)
 
-    def __init__(self, state: Optional[Dict[str, Any]] = None):
+    def __init__(self, project_dir: Optional[Path] = None, state: Optional[Dict[str, Any]] = None):
+        # Backward-compat: if project_dir is a dict, treat it as state
+        if isinstance(project_dir, dict):
+            state = project_dir
+            project_dir = None
+        self.project_dir = project_dir
+        self.state_key: str = "plot_thread_state"
         self.state: Dict[str, Any] = self._normalize_state(state)
         self._ensure_thread(
             self.MAIN_THREAD_ID,
@@ -593,4 +600,65 @@ class PlotThreadStateMachine:
         if number <= 0:
             return None
         return number
+
+    # --- Persistence methods (coordinator-compatible) ---
+
+    def load_plot_thread_state(self) -> None:
+        """Load persisted plot thread state for the current project."""
+        if self.project_dir is None:
+            logger.warning("[PlotThread] project_dir not set, skipping load")
+            return
+        try:
+            from ..project_manager import get_project_manager
+            pm = get_project_manager()
+            payload = pm.load_project_state(self.state_key, default=None)
+            self.load(payload if isinstance(payload, dict) else None)
+        except Exception as exc:
+            logger.warning(f"[PlotThread] failed to load state: {exc}")
+
+    def save_plot_thread_state(self) -> None:
+        """Persist plot thread state for the current project."""
+        if self.project_dir is None:
+            logger.warning("[PlotThread] project_dir not set, skipping save")
+            return
+        try:
+            from ..project_manager import get_project_manager
+            pm = get_project_manager()
+            pm.save_project_state(self.state_key, self.snapshot())
+        except Exception as exc:
+            logger.warning(f"[PlotThread] failed to save state: {exc}")
+
+    def sync_with_outline_external(
+        self,
+        outline_data: Optional[Dict[str, Any]],
+        total_chapters: int,
+        reset: bool,
+    ) -> Dict[str, Any]:
+        """Sync thread definitions from outline and persist (coordinator-compatible wrapper)."""
+        result = self.sync_with_outline(outline_data, total_chapters, reset)
+        self.save_plot_thread_state()
+        return result
+
+    async def plan_for_chapter(self, chapter_num: int, chapter_outline: Any) -> Dict[str, Any]:
+        """Plan active thread before writing a chapter (async wrapper)."""
+        context = self.plan_chapter(chapter_num, chapter_outline)
+        self.save_plot_thread_state()
+        return context
+
+    async def complete_for_chapter(
+        self,
+        chapter_num: int,
+        chapter_outline: Any,
+        chapter_content: str,
+        evaluation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply post-chapter transitions and persist state (async wrapper)."""
+        result = self.complete_chapter(
+            chapter_number=chapter_num,
+            chapter_outline=chapter_outline,
+            chapter_content=chapter_content,
+            evaluation=evaluation,
+        )
+        self.save_plot_thread_state()
+        return result
 

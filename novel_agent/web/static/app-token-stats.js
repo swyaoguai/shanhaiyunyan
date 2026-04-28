@@ -50,7 +50,7 @@ const tokenStatsState = {
 // 加载筛选选项
 async function loadTokenStatsFilters() {
     try {
-        const res = await fetch('/api/token-stats/filters');
+        const res = await fetch(normalizeApiUrl('/api/v1/token-stats/filters'));
         const data = await res.json();
         tokenStatsState.availableModels = data.models || [];
         tokenStatsState.availableAgents = data.agents || [];

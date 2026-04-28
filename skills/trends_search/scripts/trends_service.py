@@ -4,12 +4,16 @@
 """
 import logging
 import requests
-from bs4 import BeautifulSoup
 from typing import List, Dict, Any, Optional
 import json
 import re
 import time
 import random
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
+    BeautifulSoup = None
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,15 @@ class TrendsSearchService:
         })
         self.timeout = 15
         self.max_retries = 2
+
+    def _build_soup(self, html: str, platform_name: str):
+        """按需构建 HTML 解析器，缺少依赖时返回明确错误。"""
+        if BeautifulSoup is None:
+            raise RuntimeError(
+                f"{platform_name} 依赖 beautifulsoup4，当前环境未安装；"
+                "JSON 平台（如 toutiao/douyin）仍可正常使用"
+            )
+        return BeautifulSoup(html, "html.parser")
     
     def _make_request(self, url: str, method: str = 'GET', headers: Optional[Dict] = None, **kwargs) -> Optional[requests.Response]:
         """统一的请求方法"""
@@ -167,7 +180,7 @@ class TrendsSearchService:
             if not response:
                 return {"success": False, "error": "请求失败"}
             
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = self._build_soup(response.text, "百度热搜")
             items = soup.select('.category-wrap_iQLoo .c-single-text-ellipsis')
             
             results = []
@@ -314,7 +327,7 @@ class TrendsSearchService:
             if not response:
                 return {"success": False, "error": "请求失败"}
             
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = self._build_soup(response.text, "IT之家热榜")
             items = soup.select('.hot-list ul li a')
             
             results = []
@@ -340,7 +353,7 @@ class TrendsSearchService:
             if not response:
                 return {"success": False, "error": "请求失败"}
             
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = self._build_soup(response.text, "澎湃新闻热榜")
             items = soup.select('.news_li h2 a')
             
             results = []
@@ -366,7 +379,7 @@ class TrendsSearchService:
             if not response:
                 return {"success": False, "error": "请求失败"}
             
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = self._build_soup(response.text, "今日热榜")
             items = soup.select('.cc-dc .cc-dc-content .cc-dc-content-item')
             
             results = []

@@ -6,6 +6,9 @@ Skills管理API路由模块
 
 import json
 import logging
+import importlib.util
+import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter
@@ -28,6 +31,12 @@ class SkillConfigRequest(BaseModel):
 class SkillsConfigRequest(BaseModel):
     """批量Skills配置请求"""
     skills: Dict[str, bool]  # skill_name -> enabled
+
+
+class SkillInvokeRequest(BaseModel):
+    """Skill 调用请求"""
+    method: str
+    args: Dict[str, Any] = {}
 
 
 def _get_skills_config_path() -> Path:
@@ -67,6 +76,75 @@ def _save_skills_config(config: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"[Skills] 保存配置失败: {e}")
         return False
+
+
+def _get_skill_trigger_examples(skill_name: str) -> List[str]:
+    """返回 Skill 的典型触发示例。"""
+    examples_map = {}
+    return list(examples_map.get(skill_name, []))
+
+
+def _get_skill_trigger_hint(skill_name: str) -> str:
+    """返回 Skill 的简短触发说明。"""
+    hints = {}
+    return hints.get(skill_name, "")
+
+
+def _load_skill_service(skill_name: str) -> Any:
+    """动态加载 Skill 服务实例。"""
+    skill_dir_name = skill_name.replace("-", "_")
+    skill_path = Path(__file__).parent.parent.parent.parent / "skills" / skill_dir_name / "scripts"
+
+    if not skill_path.exists():
+        raise FileNotFoundError(f"Skill '{skill_name}' not found")
+
+    service_file = None
+    for file_path in skill_path.glob("*_service.py"):
+        service_file = file_path
+        break
+
+    if not service_file:
+        raise FileNotFoundError(f"Skill '{skill_name}' service not found")
+
+    module_name = f"{skill_dir_name}_web_skill_service"
+    if module_name in sys.modules:
+        module = sys.modules[module_name]
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, service_file)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load module spec for {skill_name}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+
+    if not hasattr(module, "get_service"):
+        raise AttributeError(f"Skill '{skill_name}' has no get_service function")
+
+    return module.get_service()
+
+
+def _invoke_skill_method(skill_name: str, method: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """调用指定 Skill 的公开方法。"""
+    config = _load_skills_config()
+    enabled_skills = config.get("enabled_skills", {})
+    if not enabled_skills.get(skill_name, False):
+        return {"success": False, "error": f"Skill '{skill_name}' is not enabled"}
+
+    if not method or method.startswith("_") or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
+        return {"success": False, "error": "非法的方法名"}
+
+    try:
+        service = _load_skill_service(skill_name)
+        if not hasattr(service, method):
+            return {"success": False, "error": f"Method '{method}' not found in skill '{skill_name}'"}
+
+        result = getattr(service, method)(**(args or {}))
+        if isinstance(result, dict):
+            return result
+        return {"success": True, "data": result}
+    except Exception as e:
+        logger.error(f"[Skills] 调用 Skill 失败 {skill_name}.{method}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
 
 def _discover_skills() -> List[Dict[str, Any]]:
@@ -111,7 +189,9 @@ def _discover_skills() -> List[Dict[str, Any]]:
                 "display_name": description or skill_name,
                 "description": description,
                 "path": str(skill_path),
-                "available": has_service
+                "available": has_service,
+                "trigger_hint": _get_skill_trigger_hint(skill_name),
+                "trigger_examples": _get_skill_trigger_examples(skill_name),
             })
         except Exception as e:
             logger.warning(f"[Skills] 读取Skill信息失败 ({skill_name}): {e}")
@@ -189,6 +269,10 @@ async def get_skill_info(skill_name: str):
         # 加载配置
         config = _load_skills_config()
         enabled = config.get("enabled_skills", {}).get(skill_name, False)
+        capabilities = None
+        capability_result = _invoke_skill_method(skill_name, "get_capabilities")
+        if capability_result.get("success"):
+            capabilities = capability_result
         
         return JSONResponse({
             "success": True,
@@ -197,7 +281,10 @@ async def get_skill_info(skill_name: str):
                 "description": content,
                 "methods": methods,
                 "enabled": enabled,
-                "path": str(skill_path)
+                "path": str(skill_path),
+                "trigger_hint": _get_skill_trigger_hint(skill_name),
+                "trigger_examples": _get_skill_trigger_examples(skill_name),
+                "capabilities": capabilities,
             }
         })
     except Exception as e:
@@ -206,6 +293,14 @@ async def get_skill_info(skill_name: str):
             "success": False,
             "error": str(e)
         })
+
+
+@router.post("/skills/{skill_name}/invoke")
+async def invoke_skill(skill_name: str, request: SkillInvokeRequest):
+    """通过 Web API 调用指定 Skill 的方法。"""
+    result = _invoke_skill_method(skill_name, request.method, request.args)
+    status_code = 200 if result.get("success") else 400
+    return JSONResponse(result, status_code=status_code)
 
 
 @router.post("/skills/toggle")

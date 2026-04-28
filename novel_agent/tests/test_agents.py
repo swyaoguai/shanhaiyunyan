@@ -10,6 +10,7 @@ from typing import Dict, Any
 
 # 导入被测试的模块
 from novel_agent.agents.base_agent import BaseAgent
+from novel_agent.agents.message_bus import MessageBus
 from novel_agent.agents.worldbuilder import WorldbuilderAgent
 from novel_agent.agents.outliner import OutlinerAgent
 from novel_agent.agents.chapter_writer import ChapterWriterAgent
@@ -77,6 +78,61 @@ class ConcreteAgent(BaseAgent):
         return {"result": response}
 
 
+class StreamingConcreteAgent(BaseAgent):
+    """用于测试总线流式任务事件的Agent实现。"""
+
+    def _get_default_prompt(self) -> str:
+        return "You are a streaming test agent."
+
+    async def execute(self, input_data: Dict[str, Any], context=None) -> Dict[str, Any]:
+        await self.notify_progress("starting", progress=10, data={"step": "start"})
+        response = await self.call_llm([
+            {"role": "user", "content": str(input_data)}
+        ])
+        await self.notify_progress("finished_generation", progress=90, data={"step": "llm_done"})
+        return {"result": response, "context": context or {}}
+
+
+class _FakeStreamChunk:
+    def __init__(self, content: str):
+        delta = MagicMock()
+        delta.content = content
+        choice = MagicMock()
+        choice.delta = delta
+        self.choices = [choice]
+
+
+class _FakeAsyncStreamResponse:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        self._iter = iter(self._chunks)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class _FailingAsyncStreamResponse(_FakeAsyncStreamResponse):
+    def __init__(self, chunks, error):
+        super().__init__(chunks)
+        self._error = error
+        self._raised = False
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            if not self._raised:
+                self._raised = True
+                raise self._error
+            raise StopAsyncIteration
+
+
 class TestBaseAgent:
     """BaseAgent测试"""
     
@@ -128,6 +184,69 @@ class TestBaseAgent:
             
             assert response == "Test LLM response content"
             mock_create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_call_llm_falls_back_to_stream_when_provider_requires_it(self, agent):
+        """测试遇到 provider 强制 streaming 时自动切换流式聚合。"""
+
+        async def fake_create(**kwargs):
+            if kwargs.get("stream"):
+                return _FakeAsyncStreamResponse([
+                    _FakeStreamChunk("Stream "),
+                    _FakeStreamChunk("fallback"),
+                ])
+            raise Exception("Streaming is required for operations that may take longer than 10 minutes.")
+
+        with patch.object(agent.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.side_effect = fake_create
+
+            response = await agent.call_llm([
+                {"role": "user", "content": "Hello"}
+            ])
+
+            assert response == "Stream fallback"
+            assert mock_create.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_call_llm_retries_stream_when_transport_fails_midflight(self, agent):
+        """测试流式输出中途中断时会自动续传且不会重复片段。"""
+        agent.retry_config.max_retries = 1
+        agent.retry_config.delay = 0
+        agent.retry_config.max_delay = 0
+        agent.retry_config.jitter = False
+
+        async def fake_create(**kwargs):
+            if not kwargs.get("stream"):
+                raise AssertionError("expected streaming request")
+
+            call_index = fake_create.call_count
+            fake_create.call_count += 1
+
+            if call_index == 0:
+                return _FailingAsyncStreamResponse(
+                    [_FakeStreamChunk("hel")],
+                    Exception("stream error: stream ID 149; INTERNAL_ERROR; received from peer"),
+                )
+
+            return _FakeAsyncStreamResponse([
+                _FakeStreamChunk("hello "),
+                _FakeStreamChunk("world"),
+            ])
+
+        fake_create.call_count = 0
+
+        with patch.object(agent.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.side_effect = fake_create
+
+            stream = await agent.call_llm([
+                {"role": "user", "content": "Hello"}
+            ], stream=True)
+            chunks = []
+            async for chunk in stream:
+                chunks.append(chunk)
+
+            assert "".join(chunks) == "hello world"
+            assert mock_create.await_count == 2
     
     @pytest.mark.asyncio
     async def test_execute(self, agent, mock_openai_response):
@@ -406,6 +525,97 @@ class TestAgentIntegration:
             assert result == "user_input"
             assert len(callback_received) == 1
             assert callback_received[0]["type"] == "user_input_required"
+
+    @pytest.mark.asyncio
+    async def test_send_task_waits_for_completion_when_progress_events_exist(self, mock_model_config):
+        """测试 send_task 不会被 TASK_PROGRESS 提前结束。"""
+        with patch('novel_agent.agents.base_agent.get_config_manager') as mock_manager:
+            mock_manager.return_value.get_effective_config.return_value = mock_model_config
+
+            bus = MessageBus()
+            requester = ConcreteAgent(name="Requester")
+            worker = StreamingConcreteAgent(name="Worker")
+            requester._message_bus = bus
+            worker._message_bus = bus
+
+            async def fake_create(**kwargs):
+                assert kwargs.get("stream") is True
+                return _FakeAsyncStreamResponse([
+                    _FakeStreamChunk("chunk-1"),
+                    _FakeStreamChunk("chunk-2"),
+                ])
+
+            with patch.object(worker.client.chat.completions, 'create', new=fake_create):
+                await bus.start()
+                try:
+                    await requester.ensure_subscribed()
+                    await worker.ensure_subscribed()
+
+                    result = await requester.send_task(
+                        receiver="Worker",
+                        task_type="streaming_test",
+                        task_data={"topic": "test"},
+                        context={"source": "unit-test"},
+                        timeout=1,
+                    )
+
+                    assert result is not None
+                    assert result["result"] == "chunk-1chunk-2"
+                    assert result["context"]["source"] == "unit-test"
+                finally:
+                    await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_send_task_stream_emits_progress_chunks_and_completion(self, mock_model_config):
+        """测试 send_task_stream 能收到完整流式事件序列。"""
+        with patch('novel_agent.agents.base_agent.get_config_manager') as mock_manager:
+            mock_manager.return_value.get_effective_config.return_value = mock_model_config
+
+            bus = MessageBus()
+            requester = ConcreteAgent(name="Requester")
+            worker = StreamingConcreteAgent(name="Worker")
+            requester._message_bus = bus
+            worker._message_bus = bus
+
+            async def fake_create(**kwargs):
+                assert kwargs.get("stream") is True
+                return _FakeAsyncStreamResponse([
+                    _FakeStreamChunk("甲"),
+                    _FakeStreamChunk("乙"),
+                ])
+
+            with patch.object(worker.client.chat.completions, 'create', new=fake_create):
+                await bus.start()
+                try:
+                    await requester.ensure_subscribed()
+                    await worker.ensure_subscribed()
+
+                    events = []
+                    async for event in requester.send_task_stream(
+                        receiver="Worker",
+                        task_type="streaming_test",
+                        task_data={"topic": "test"},
+                        context={"source": "stream-test"},
+                        timeout=1,
+                    ):
+                        events.append(event)
+
+                    assert [event["msg_type"] for event in events] == [
+                        "task_progress",
+                        "task_progress",
+                        "task_progress",
+                        "task_progress",
+                        "task_completed",
+                    ]
+                    assert events[0]["payload"]["message"] == "starting"
+                    assert events[1]["payload"]["type"] == "llm_chunk"
+                    assert events[1]["payload"]["content"] == "甲"
+                    assert events[2]["payload"]["content"] == "乙"
+                    assert events[3]["payload"]["message"] == "finished_generation"
+                    assert events[4]["payload"]["result"]["result"] == "甲乙"
+                    assert events[4]["is_terminal"] is True
+                finally:
+                    await bus.stop()
 
 
 # ==================== Error Handling Tests ====================

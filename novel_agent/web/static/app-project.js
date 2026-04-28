@@ -6,12 +6,14 @@
 // ===== 项目管理功能 =====
 
 function getActiveProjectId() {
-    return store.currentProject || store.currentProjectId || null;
+    return store.currentProjectId || null;
 }
 
 function setActiveProjectId(projectId) {
-    store.currentProject = projectId;
-    store.currentProjectId = projectId;
+    const normalizedProjectId = projectId || null;
+    store.currentProjectId = normalizedProjectId;
+    // 兼容旧代码读取，但主状态字段统一为 currentProjectId
+    store.currentProject = normalizedProjectId;
 }
 
 async function loadProjects() {
@@ -60,9 +62,11 @@ function updateProjectSelector() {
 
 function toggleProjectDropdown() {
     let dropdown = document.getElementById('project-dropdown');
+    const trigger = document.getElementById('project-current');
     
     if (dropdown && !dropdown.classList.contains('hidden')) {
         dropdown.classList.add('hidden');
+        trigger?.setAttribute('aria-expanded', 'false');
         return;
     }
     
@@ -163,12 +167,14 @@ function toggleProjectDropdown() {
     });
     
     dropdown.classList.remove('hidden');
+    trigger?.setAttribute('aria-expanded', 'true');
     
     // 点击外部关闭
     setTimeout(() => {
         document.addEventListener('click', function closeDropdown(e) {
             if (!dropdown.contains(e.target) && e.target.id !== 'project-selector') {
                 dropdown.classList.add('hidden');
+                trigger?.setAttribute('aria-expanded', 'false');
                 document.removeEventListener('click', closeDropdown);
             }
         });
@@ -217,7 +223,8 @@ async function loadCurrentProjectData() {
                 eventlines: [],
                 outline_settings: [],
                 detail_settings: [],
-                chapter_settings: []
+                chapter_settings: [],
+                chapter_summary: []
             };
             if (typeof updateMentionData === 'function') {
                 updateMentionData();
@@ -241,9 +248,46 @@ async function loadCurrentProjectData() {
         const itemData = await apiCall('/api/project-data/items');
         store.projectData.items = itemData.data || [];
 
-        // 加载扩展资料库（localStorage）
+        // 加载其他内置资料库
+        const eventlineData = await apiCall('/api/project-data/eventlines');
+        store.projectData.eventlines = Array.isArray(eventlineData.data) ? eventlineData.data : [];
+
+        const detailSettingsData = await apiCall('/api/project-data/detail_settings');
+        store.projectData.detail_settings = Array.isArray(detailSettingsData.data) ? detailSettingsData.data : [];
+
+        const chapterSettingsData = await apiCall('/api/project-data/chapter_settings');
+        store.projectData.chapter_settings = Array.isArray(chapterSettingsData.data) ? chapterSettingsData.data : [];
+
+        const chapterSummaryData = await apiCall('/api/project-data/chapter_summary');
+        store.projectData.chapter_summary = Array.isArray(chapterSummaryData.data) ? chapterSummaryData.data : [];
+
+        // outline_settings 迁移：降级为自定义分类
+        try {
+            const outlineSettingsData = await apiCall('/api/project-data/outline_settings');
+            const osData = Array.isArray(outlineSettingsData.data) ? outlineSettingsData.data : [];
+            store.projectData.outline_settings = osData;
+            if (osData.length > 0) {
+                const existsCat = store.knowledgeCategories.find(c => c.key === 'outline_settings');
+                if (!existsCat) {
+                    store.knowledgeCategories.push({
+                        id: 'db-outline-legacy', key: 'outline_settings',
+                        name: '大纲笔记', icon: 'ri-file-list-3-line', builtin: false
+                    });
+                }
+            }
+        } catch (_e) {
+            store.projectData.outline_settings = [];
+        }
+
+        // 加载扩展资料库（localStorage，仅自定义分类）
         if (typeof loadExtendedKnowledgeData === 'function') {
             loadExtendedKnowledgeData();
+        }
+        if (typeof syncKnowledgeCategoriesToProjectState === 'function') {
+            await syncKnowledgeCategoriesToProjectState();
+        }
+        if (typeof loadCopilotAutoSavePreference === 'function') {
+            await loadCopilotAutoSavePreference();
         }
         
         // 更新提及数据
@@ -516,7 +560,8 @@ async function deleteProject(projectId) {
                 eventlines: [],
                 outline_settings: [],
                 detail_settings: [],
-                chapter_settings: []
+                chapter_settings: [],
+                chapter_summary: []
             };
             updateProjectSelector();
             if (typeof showEmptyEditor === 'function') {

@@ -28,6 +28,26 @@ from ..models.requests import (
 
 router = APIRouter()
 
+
+def _get_library_character_context() -> str:
+    try:
+        from ...library_service import get_library_service
+        svc = get_library_service()
+        if svc.is_degraded:
+            return ""
+        chars = svc.list_entries(entry_type="character")
+        if not chars:
+            return ""
+        lines = ["[角色参考]"]
+        for c in chars[:8]:
+            name = c.content_structured.get("name", c.title)
+            role = c.content_structured.get("role", "")
+            desc = c.content_structured.get("description", "")
+            lines.append(f"- {name}({role}): {desc[:60]}" if desc else f"- {name}: {role}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
 logger = logging.getLogger(__name__)
 _service = NovelToScriptService()
 
@@ -250,6 +270,9 @@ async def convert_novel_to_script(request: NovelToScriptConvertRequest):
 
     for batch in plan["batches"]:
         prompt = _service.build_messages(source_payload=batch, config=normalized_config)
+        lib_ctx = _get_library_character_context()
+        if lib_ctx and "user" in prompt:
+            prompt["user"] = lib_ctx + "\n\n" + prompt["user"]
         try:
             raw_output = await _run_conversion_prompt(
                 prompt,

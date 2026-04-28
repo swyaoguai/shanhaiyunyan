@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 from enum import Enum
 
 from .backup import get_backup_service
+from .atomic_write import atomic_write_json
 from ..project_manager import get_project_manager
 
 logger = logging.getLogger(__name__)

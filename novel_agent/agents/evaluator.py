@@ -5,7 +5,7 @@
 """
 
 from typing import Dict, Any, Optional, List
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentCapability
 from ..constants import AGENT_TEMPERATURE, WRITING_CONFIG
 
 
@@ -21,6 +21,20 @@ class EvaluatorAgent(BaseAgent):
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import EVALUATOR_PROMPT
         return EVALUATOR_PROMPT
+
+    def get_capabilities(self) -> AgentCapability:
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=["evaluate_chapter", "quality_review"],
+            accept_task_types=["evaluate_chapter"],
+            required_inputs=["content", "chapter_outline"],
+            produced_outputs=["evaluation"],
+            priority=90,
+            max_concurrency=2,
+            metadata={
+                "stage": "evaluation",
+            },
+        )
     
     async def execute(
         self, 

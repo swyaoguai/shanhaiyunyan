@@ -11,7 +11,8 @@ console.log('[PromptManager] 开始加载提示词管理模块...');
 var promptsData = {
     agents: [],
     currentAgent: null,
-    currentTask: null
+    currentTask: null,
+    showAdvanced: false
 };
 
 // 使用全局 showToast 或创建本地版本
@@ -45,8 +46,18 @@ async function loadPromptSettings() {
                 提示词管理
             </h2>
             <p style="color: var(--text-secondary); margin-bottom: 24px; line-height: 1.6;">
-                自定义各Agent的系统提示词和任务提示词。修改后将覆盖默认提示词，删除后恢复使用默认提示词。
+                这里只显示会直接影响创作结果的核心AI Agent。系统内部流程节点已隐藏，避免误改影响稳定性。
             </p>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; padding: 14px 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px;">
+                <div>
+                    <div style="font-size: 14px; color: var(--text-primary); font-weight: 600;">高级 / 开发者模式</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">开启后可查看部分内部辅助 Agent 的提示词入口，请谨慎修改。</div>
+                </div>
+                <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); cursor: pointer; user-select: none;">
+                    <input id="prompt-advanced-toggle" type="checkbox" ${promptsData.showAdvanced ? 'checked' : ''} style="accent-color: var(--accent-color);">
+                    <span style="font-size: 13px;">显示高级 Agent</span>
+                </label>
+            </div>
             
             <div style="display: grid; grid-template-columns: 280px 1fr; gap: 24px; min-height: 500px;">
                 <!-- 左侧：Agent列表 -->
@@ -91,6 +102,25 @@ async function loadPromptSettings() {
     `;
     
     // 加载Agent列表
+    const advancedToggle = document.getElementById('prompt-advanced-toggle');
+    if (advancedToggle) {
+        advancedToggle.addEventListener('change', async function() {
+            promptsData.showAdvanced = !!advancedToggle.checked;
+            promptsData.currentAgent = null;
+            await loadAgentList();
+            const editorArea = document.getElementById('prompt-editor-area');
+            if (editorArea) {
+                editorArea.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary);">
+                        <div style="text-align: center;">
+                            <i class="ri-arrow-left-line" style="font-size: 48px; opacity: 0.3;"></i>
+                            <p style="margin-top: 16px;">从左侧选择一个Agent查看提示词</p>
+                        </div>
+                    </div>
+                `;
+            }
+        });
+    }
     await loadAgentList();
 }
 
@@ -102,7 +132,7 @@ async function loadAgentList() {
     
     try {
         console.log('[PromptManager] 正在加载Agent列表...');
-        const response = await fetch('/api/prompts');
+        const response = await fetch(normalizeApiUrl(`/api/v1/prompts?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`));
         console.log('[PromptManager] API响应状态:', response.status);
         
         if (!response.ok) {
@@ -116,7 +146,7 @@ async function loadAgentList() {
             throw new Error(data.error || '加载失败');
         }
         
-        promptsData.agents = data.agents;
+        promptsData.agents = data.agents || [];
         
         // 渲染Agent列表
         listContainer.innerHTML = data.agents.map(agent => `
@@ -128,6 +158,7 @@ async function loadAgentList() {
                         <div style="font-weight: 500; color: var(--text-primary);">${agent.display_name || agent.name}</div>
                         <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
                             ${agent.task_count || 0} 个任务提示词
+                            ${agent.visibility === 'advanced' ? '<span style="color: #a78bfa; margin-left: 4px;">🛠 高级</span>' : ''}
                             ${agent.has_custom ? '<span style="color: #f59e0b; margin-left: 4px;">✎ 已自定义</span>' : ''}
                         </div>
                     </div>
@@ -205,7 +236,7 @@ async function loadAgentPrompts(agentType) {
     `;
     
     try {
-        const response = await fetch(`/api/prompts/${agentType}`);
+        const response = await fetch(`/api/prompts/${agentType}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`);
         const data = await response.json();
         
         if (!data.success) {
@@ -408,7 +439,7 @@ function bindSystemPromptEvents(agentType) {
             saveBtn.disabled = true;
             
             try {
-                const response = await fetch(`/api/prompts/${agentType}/system`, {
+            const response = await fetch(`/api/prompts/${agentType}/system?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ content })
@@ -441,7 +472,7 @@ function bindSystemPromptEvents(agentType) {
             resetBtn.disabled = true;
             
             try {
-                const response = await fetch(`/api/prompts/${agentType}/system`, {
+            const response = await fetch(`/api/prompts/${agentType}/system?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
                     method: 'DELETE'
                 });
                 const data = await response.json();
@@ -479,7 +510,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                 saveBtn.disabled = true;
                 
                 try {
-                    const response = await fetch(`/api/prompts/${agentType}/${taskName}`, {
+                    const response = await fetch(`/api/prompts/${agentType}/${taskName}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ content })
@@ -511,7 +542,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                 resetBtn.disabled = true;
                 
                 try {
-                    const response = await fetch(`/api/prompts/${agentType}/${taskName}`, {
+                    const response = await fetch(`/api/prompts/${agentType}/${taskName}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
                         method: 'DELETE'
                     });
                     const data = await response.json();

@@ -750,80 +750,128 @@ class PlotConstraintStore:
         location_constraints = [c for c in constraints if c.constraint_type == ConstraintType.LOCATION_CHANGE.value]
         timeline_constraints = [c for c in constraints if c.constraint_type == ConstraintType.TIMELINE.value]
         
+        def _append_constraint_line(icon: str, label: str, constraint: PlotConstraint) -> None:
+            entities_str = ", ".join(constraint.entities) if constraint.entities else ""
+            desc = str(constraint.description or "").strip()
+            context = str(constraint.context or "").strip()
+            payload_parts = [part for part in [entities_str, desc, context[:100] + ("..." if len(context) > 100 else "") if context else ""] if part]
+            payload = " | ".join(payload_parts) if payload_parts else "无补充信息"
+            lines.append(f"  {icon} [{constraint.constraint_type}] {label}: {payload}")
+        
         if death_constraints:
             lines.append("【角色生死 - 不可更改】")
             for c in death_constraints:
                 entities_str = ', '.join(c.entities) if c.entities else "未知角色"
-                lines.append(f"  ❌ {entities_str} 已死亡")
-                lines.append(f"     来源: {c.context[:80]}...")
+                lines.append(f"  ❌ [{c.constraint_type}] 死亡角色: {entities_str}")
+                if c.context:
+                    lines.append(f"     来源: {c.context[:80]}...")
             lines.append("")
         
         if power_constraints:
             lines.append("【能力/境界等级】")
             for c in power_constraints:
-                entities_str = ', '.join(c.entities) if c.entities else "相关角色"
-                lines.append(f"  ⬆ {entities_str}: {c.description}")
+                _append_constraint_line("⬆", "能力变化", c)
             lines.append("")
         
         if world_rule_constraints:
             lines.append("【世界规则/设定】")
             for c in world_rule_constraints:
-                lines.append(f"  📜 {c.context[:100]}...")
+                _append_constraint_line("📜", "世界规则", c)
             lines.append("")
         
         if secret_constraints:
             lines.append("【已揭露的秘密】")
             for c in secret_constraints:
-                entities_str = ', '.join(c.entities) if c.entities else ""
-                lines.append(f"  🔓 {entities_str}: {c.context[:80]}...")
+                _append_constraint_line("🔓", "秘密揭露", c)
             lines.append("")
         
         if promise_constraints:
             lines.append("【承诺/誓言】")
             for c in promise_constraints:
-                entities_str = ', '.join(c.entities) if c.entities else ""
-                lines.append(f"  🤝 {entities_str}: {c.context[:80]}...")
+                _append_constraint_line("🤝", "承诺誓言", c)
             lines.append("")
         
         if status_constraints:
             lines.append("【角色状态变化】")
             for c in status_constraints:
-                entities_str = ', '.join(c.entities) if c.entities else ""
-                lines.append(f"  - {entities_str}: {c.description}")
+                _append_constraint_line("🩹", "状态变化", c)
             lines.append("")
         
         if relationship_constraints:
             lines.append("【关系变化】")
             for c in relationship_constraints:
-                entities_str = ', '.join(c.entities) if c.entities else ""
-                lines.append(f"  👥 {entities_str}: {c.description}")
+                _append_constraint_line("👥", "关系变化", c)
             lines.append("")
         
         if item_constraints:
             lines.append("【重要物品状态】")
             for c in item_constraints:
-                lines.append(f"  📦 {c.description}")
+                _append_constraint_line("📦", "物品状态", c)
             lines.append("")
         
         if location_constraints:
             lines.append("【地点/势力变化】")
             for c in location_constraints:
-                lines.append(f"  🏰 {c.description}")
+                _append_constraint_line("🏰", "地点变化", c)
             lines.append("")
         
         if event_constraints:
             lines.append("【重要事件】")
             for c in event_constraints:
-                lines.append(f"  ⚡ {c.description}")
+                _append_constraint_line("⚡", "重要事件", c)
             lines.append("")
         
         if timeline_constraints:
             lines.append("【时间节点】")
             for c in timeline_constraints:
-                lines.append(f"  ⏰ {c.description}")
+                _append_constraint_line("⏰", "时间节点", c)
             lines.append("")
         
         return "\n".join(lines)
+
+    @staticmethod
+    def _extract_constraint_lines(document: str) -> List[Dict[str, Any]]:
+        """从约束文档中提取结构化行，兼容旧格式与新格式。"""
+        rows: List[Dict[str, Any]] = []
+        if not document:
+            return rows
+
+        current_section = ""
+        for raw_line in str(document).splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("【") and line.endswith("】"):
+                current_section = line
+                continue
+
+            # 新格式：❌ [character_death] 死亡角色: 张三, 李四
+            match = re.match(
+                r"^[^\w\u4e00-\u9fff]*([\U0001F300-\U0001FAFF❌⬆📜🔓🤝🩹👥📦🏰⚡⏰-])?\s*(?:\[(?P<constraint_type>[a-z_]+)\])?\s*(?P<label>[^:：]+)\s*[:：]\s*(?P<payload>.+)$",
+                line
+            )
+            if match:
+                rows.append({
+                    "section": current_section,
+                    "constraint_type": str(match.group("constraint_type") or "").strip(),
+                    "label": str(match.group("label") or "").strip(),
+                    "payload": str(match.group("payload") or "").strip(),
+                    "raw": line,
+                })
+                continue
+
+            # 兼容旧格式：❌ 张三 已死亡
+            legacy_match = re.match(r"^❌\s*(?P<entities>.+?)\s+已死亡$", line)
+            if legacy_match:
+                rows.append({
+                    "section": current_section,
+                    "constraint_type": ConstraintType.CHARACTER_DEATH.value,
+                    "label": "死亡角色",
+                    "payload": str(legacy_match.group("entities") or "").strip(),
+                    "raw": line,
+                })
+
+        return rows
     
     def search_constraints(
         self,
@@ -854,15 +902,23 @@ class PlotConstraintStore:
             
             constraints = []
             for result in results.results:
+                metadata = result.metadata or {}
                 # 只返回约束类型的文档
-                if result.metadata.get("type") == "plot_constraints":
-                    constraints.append({
-                        "document": result.document,
-                        "chapter_id": result.metadata.get("source_chapter"),
-                        "constraint_count": result.metadata.get("constraint_count", 0),
-                        "constraint_types": result.metadata.get("constraint_types", []),
-                        "score": result.score
-                    })
+                if metadata.get("type") != "plot_constraints":
+                    continue
+
+                result_constraint_types = metadata.get("constraint_types", []) or []
+                if constraint_types and not any(item in result_constraint_types for item in constraint_types):
+                    continue
+
+                constraints.append({
+                    "document": result.document,
+                    "chapter_id": metadata.get("source_chapter"),
+                    "constraint_count": metadata.get("constraint_count", 0),
+                    "constraint_types": result_constraint_types,
+                    "score": result.score,
+                    "structured_lines": self._extract_constraint_lines(result.document),
+                })
             
             return constraints[:top_k]
             
@@ -887,24 +943,34 @@ class PlotConstraintStore:
             )
             
             for result in results.results:
-                if result.metadata.get("type") == "plot_constraints":
-                    # 从文档内容中提取死亡角色
-                    content = result.document
-                    if "【角色死亡" in content:
-                        # 提取角色名
-                        lines = content.split("\n")
-                        for line in lines:
-                            if line.strip().startswith("- ") and ":" in line:
-                                names_part = line.split(":")[0].replace("- ", "").strip()
-                                for name in names_part.split(","):
-                                    name = name.strip()
-                                    if name:
-                                        dead_characters.add(name)
+                metadata = result.metadata or {}
+                if metadata.get("type") != "plot_constraints":
+                    continue
+
+                for row in self._extract_constraint_lines(result.document):
+                    constraint_type = str(row.get("constraint_type") or "").strip()
+                    section = str(row.get("section") or "").strip()
+                    label = str(row.get("label") or "").strip()
+                    payload = str(row.get("payload") or "").strip()
+
+                    is_death_row = (
+                        constraint_type == ConstraintType.CHARACTER_DEATH.value
+                        or "角色生死" in section
+                        or "死亡角色" in label
+                    )
+                    if not is_death_row or not payload:
+                        continue
+
+                    entity_segment = payload.split("|", 1)[0].strip()
+                    for name in re.split(r"[,，、/\s]+", entity_segment):
+                        normalized = str(name or "").strip()
+                        if normalized and normalized not in {"未知角色", "相关角色"}:
+                            dead_characters.add(normalized)
             
         except Exception as e:
             logger.error(f"[PlotConstraint] 获取死亡角色失败: {e}")
         
-        return list(dead_characters)
+        return sorted(dead_characters)
     
     def get_all_constraints_summary(self) -> str:
         """

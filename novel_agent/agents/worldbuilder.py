@@ -4,7 +4,7 @@
 """
 
 from typing import Dict, Any, Optional
-from .base_agent import BaseAgent
+from .base_agent import AgentCapability, BaseAgent
 
 
 class WorldbuilderAgent(BaseAgent):
@@ -19,6 +19,22 @@ class WorldbuilderAgent(BaseAgent):
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import WORLDBUILDER_PROMPT
         return WORLDBUILDER_PROMPT
+
+    def get_capabilities(self) -> AgentCapability:
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=["worldbuilding", "story_planning"],
+            accept_task_types=["build_world"],
+            required_inputs=["novel_type"],
+            produced_outputs=["world"],
+            priority=92,
+            max_concurrency=1,
+            metadata={
+                "stage": "planning",
+                "prompt_file": self.prompt_file or "",
+                "agent_class": self.__class__.__name__,
+            },
+        )
     
     async def execute(
         self, 
@@ -35,7 +51,7 @@ class WorldbuilderAgent(BaseAgent):
         Returns:
             世界观设定字典
         """
-        novel_type = input_data.get("novel_type", "玄幻")
+        novel_type = input_data.get("novel_type") or ""
         theme = input_data.get("theme", "")
         requirements = input_data.get("requirements", "")
 
@@ -44,11 +60,12 @@ class WorldbuilderAgent(BaseAgent):
             await self.notify_progress("正在读取需求并确认风格...", 10)
         except Exception:
             pass
-        
+
+        novel_type_section = f"## 小说类型\n{novel_type}" if novel_type else "## 小说类型\n请告诉我小说类型（玄幻、都市、科幻、言情、武侠等）"
+
         prompt = f"""请为以下小说构建世界观：
 
-## 小说类型
-{novel_type}
+{novel_type_section}
 
 ## 主题/风格
 {theme if theme else "由你自由发挥"}

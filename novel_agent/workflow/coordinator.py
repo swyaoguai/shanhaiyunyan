@@ -5,10 +5,10 @@
 增强功能：
 - 工作流状态管理 (WorkflowState)
 - 检查点保存/恢复 (Checkpoint)
-- 并行章节写作
+- 串行章节写作
 - 回调处理器集成
 - 指标收集
-- 智能路由集成
+- 智能路由集成（强制LLM意图识别）
 """
 
 import asyncio
@@ -21,13 +21,13 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 import logging
 
-from ..agents import (
-    WorldbuilderAgent,
-    OutlinerAgent,
-    ChapterWriterAgent,
-    PolisherAgent,
-    EvaluatorAgent
-)
+from ..agents.worldbuilder import WorldbuilderAgent
+from ..agents.outliner import OutlinerAgent
+from ..agents.chapter_writer import ChapterWriterAgent
+from ..agents.polisher import PolisherAgent
+from ..agents.evaluator import EvaluatorAgent
+from ..agents.character_builder import CharacterBuilderAgent
+from ..agents.capability_registry import get_capability_registry
 from ..agents.message_bus import (
     get_message_bus, MessageType, AgentMessage,
     create_user_input_request
@@ -35,10 +35,29 @@ from ..agents.message_bus import (
 from ..context import ContextManager, CharacterManager, WorldManager
 from ..utils.metrics import get_metrics_collector
 from ..constants import WRITING_CONFIG, TIMEOUTS
+from ..utils.atomic_write import atomic_write_text, atomic_write_json
 from ..memory_manager import get_memory_manager
 from ..aux_memory import get_aux_memory_service
 from ..project_manager import get_project_manager
 from .plot_thread_state import PlotThreadStateMachine
+from .contracts import (
+    CreationContract,
+    TaskDefinition,
+    build_default_creation_contract,
+    build_default_task_graph,
+)
+from .agent_dispatcher import AgentDispatcher
+from .checkpoint_manager import CheckpointManager
+from .collab_registry import CollabAgentRegistry, CollabServiceRegistry
+from .collab_services import (
+    build_default_collab_participants,
+    build_default_collab_service_registry,
+)
+from .execution_context import CollabExecutionContext, TaskExecutionEnvelope
+from .memory_sync import MemorySyncManager
+from .routing_policy import RoutingPolicy
+from .runtime_state import RuntimeStateStore
+from .task_pool import TaskPool, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -119,17 +138,16 @@ class NovelCoordinator:
     
     增强功能：
     - 工作流状态管理和检查点
-    - 并行章节写作
+    - 串行章节写作
     - 回调处理器
     - 消息总线集成
-    - 智能路由（自动意图识别）
+    - 智能路由（强制LLM意图识别）
     """
     
     def __init__(
         self,
         project_dir: Optional[Path] = None,
         progress_callback: Optional[ProgressCallback] = None,
-        parallel_chapters: int = 1,
         auto_save_checkpoint: bool = True
     ):
         """
@@ -138,16 +156,14 @@ class NovelCoordinator:
         Args:
             project_dir: 项目目录
             progress_callback: 进度回调函数
-            parallel_chapters: 并行写作的章节数
             auto_save_checkpoint: 是否自动保存检查点
         """
         from ..constants import PATH_DEFAULTS
         self.project_dir = project_dir or Path(PATH_DEFAULTS.NOVEL_OUTPUT_DIR)
         self.project_dir.mkdir(parents=True, exist_ok=True)
         
-        # 回调和并行配置
+        # 回调配置
         self.progress_callback = progress_callback
-        self.parallel_chapters = max(1, parallel_chapters)
         self.auto_save_checkpoint = auto_save_checkpoint
         
         # 初始化各专业Agent（传入回调处理器）
@@ -156,6 +172,25 @@ class NovelCoordinator:
         self.chapter_writer = ChapterWriterAgent()
         self.polisher = PolisherAgent()
         self.evaluator = EvaluatorAgent()
+        self.character_builder = CharacterBuilderAgent()
+        self.collab_service_registry = CollabServiceRegistry()
+        self.collab_service_registry.register_many(build_default_collab_service_registry())
+        self.collab_agent_registry = CollabAgentRegistry(
+            fallback_registry_provider=lambda: self.capability_registry
+        )
+        default_collab_participants = build_default_collab_participants(
+            {
+                name: self.collab_service_registry.get(name)
+                for name in self.collab_service_registry.list_agents()
+            }
+        )
+        self.collab_agent_registry.register_many(list(default_collab_participants.values()))
+        self.context_strategy = default_collab_participants["ContextStrategy"]
+        self.content_reader = default_collab_participants["ContentReader"]
+        self.content_expansion = default_collab_participants["ContentExpansion"]
+        # 问题6修复：使用 ServiceBackedCollabParticipant 包装后的实例，与其他服务保持一致
+        self.file_naming = default_collab_participants.get("FileNaming") or self.collab_service_registry.get("file_naming")
+        self.summary_orchestrator = default_collab_participants["SummaryOrchestrator"]
         
         # 为Agent设置回调处理器
         if progress_callback:
@@ -165,27 +200,89 @@ class NovelCoordinator:
         self.memory_manager = get_memory_manager()
         self.aux_memory_service = get_aux_memory_service()
         self.project_manager = get_project_manager()
+        self.checkpoint_manager = CheckpointManager(
+            project_dir_provider=lambda: self.project_dir,
+        )
+        self.runtime_state_store = RuntimeStateStore(
+            project_dir_provider=lambda: self.project_dir,
+            project_manager_provider=lambda: self.project_manager,
+        )
+        self.memory_sync_manager = MemorySyncManager(
+            project_dir_provider=lambda: self.project_dir,
+            project_scope_provider=lambda: self.project_manager.current_project_id or (self.project.id if self.project else ""),
+            project_payload_provider=lambda: self.project.to_dict() if self.project else {},
+            memory_manager=self.memory_manager,
+            contract_version_provider=lambda: self._memory_contract_version,
+        )
         
         # 初始化上下文管理器（使用当前项目目录）
         self._init_managers()
         self._plot_thread_state_key = "plot_thread_state"
-        self._plot_thread_machine = PlotThreadStateMachine()
+        self._plot_thread_machine = PlotThreadStateMachine(project_dir=self.project_dir)
         self._plot_thread_lock = asyncio.Lock()
         self._load_plot_thread_state()
         self._memory_agent_ids: Dict[str, str] = {}
         self._memory_contract_version = "2026-02-07.1"
-        
+        self._trends_service: Optional[Any] = None
+        self._project_ready_executor: Optional['ProjectReadyTaskExecutor'] = None
+
         # 项目信息
         self.project: Optional[NovelProject] = None
         
         # 工作流状态
         self.workflow_state = WorkflowState.IDLE
+        self._last_active_workflow_state = WorkflowState.IDLE
         self.checkpoint: Optional[WorkflowCheckpoint] = None
         self._load_checkpoint()
         
         # 消息总线和指标
         self.message_bus = get_message_bus()
         self.metrics = get_metrics_collector()
+
+        # Agent能力注册表
+        self.capability_registry = get_capability_registry()
+        self.capability_registry.register_many([
+            self.worldbuilder,
+            self.outliner,
+            self.chapter_writer,
+            self.polisher,
+            self.evaluator,
+            self.character_builder,
+        ])
+        self.routing_policy = RoutingPolicy.default()
+        self.agent_dispatcher = AgentDispatcher(
+            routing_policy=self.routing_policy,
+            capability_registry_provider=lambda: self.collab_agent_registry,
+            project_manager_provider=lambda: self.project_manager,
+            project_dir_provider=lambda: self.project_dir,
+            save_runtime_task_pool=self.runtime_state_store.save_runtime_task_pool,
+            notify_progress=self._notify_progress,
+            supervised_mode_provider=lambda: self.supervised_mode,
+            fallback_to_orchestrated_provider=lambda: self.fallback_to_orchestrated,
+            runtime_state_store=self.runtime_state_store,
+        )
+
+        # 问题9修复：为需要 LLM 的 Service 创建共享 LLMClient 并注入
+        from ..agents.llm_client import create_llm_client
+        self._service_llm_client = create_llm_client(
+            metrics_namespace="collab_service",
+        )
+        for service_name in ("content_expansion", "summary_orchestrator"):
+            svc = self.collab_service_registry.get(service_name)
+            if svc is not None and hasattr(svc, "set_llm_client"):
+                svc.set_llm_client(self._service_llm_client)
+        # 同时为 ServiceBackedCollabParticipant 包装的实例注入
+        for participant_name in ("ContentExpansion", "SummaryOrchestrator"):
+            participant = default_collab_participants.get(participant_name)
+            if participant is not None and hasattr(participant, "set_llm_client"):
+                participant.set_llm_client(self._service_llm_client)
+
+        # 共享知识库实例（由Web层统一注入）
+        self.knowledge_base = None
+
+        # 监督式自组织保底策略
+        self.supervised_mode = True
+        self.fallback_to_orchestrated = True
         
         # 控制标志
         self._paused = False
@@ -197,9 +294,32 @@ class NovelCoordinator:
         
         # 待处理的用户输入请求
         self._pending_user_inputs: Dict[str, asyncio.Future] = {}
+        self._project_persistence_lock = asyncio.Lock()
 
         logger.info(f"NovelCoordinator initialized with project dir: {self.project_dir}")
-    
+
+    def _sync_outline_to_library(self, outline_rows: List[Dict[str, Any]]) -> None:
+        """Dedup: sync outline to library service."""
+        try:
+            from ..library_service import get_library_service
+            svc = get_library_service()
+            svc.upsert_from_legacy("outline", outline_rows)
+        except Exception as e:
+            logger.warning(f"[Coordinator] Library outline sync failed: {e}")
+
+    def _build_metadata_patch(self, run_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Dedup: build metadata patch for project-ready task execution."""
+        return {
+            "project_task_execution": "ready_task_loop",
+            "selected_agent": run_result.get("selected_agent", ""),
+            "execution_mode": run_result.get("execution_mode", ""),
+            "fallback_used": bool(run_result.get("fallback_used", False)),
+            "route_reason": run_result.get("route_reason", ""),
+            "candidate_source": run_result.get("candidate_source", ""),
+            "context_snapshot_id": run_result.get("context_snapshot_id", ""),
+            "fallback_provenance": run_result.get("fallback_provenance", {}),
+        }
+
     def _init_managers(self):
         """初始化或重新初始化所有管理器（使用当前项目目录）"""
         # 如果有当前项目，使用项目目录；否则使用默认目录
@@ -243,6 +363,31 @@ class NovelCoordinator:
         
         logger.info(f"Switched to project {project_id}, dir: {new_project_dir}")
         return True
+
+    def set_knowledge_base(self, knowledge_base) -> None:
+        """统一为协调器及其子Agent注入知识库实例。"""
+        self.knowledge_base = knowledge_base
+
+        for agent in [
+            self.worldbuilder,
+            self.outliner,
+            self.chapter_writer,
+            self.polisher,
+            self.evaluator,
+            self.character_builder,
+            self.context_strategy,
+            self.content_reader,
+            self.content_expansion,
+            self.file_naming,
+            self.summary_orchestrator,
+        ]:
+            if hasattr(agent, "set_knowledge_base"):
+                try:
+                    agent.set_knowledge_base(knowledge_base)
+                except Exception as exc:
+                    logger.warning(f"[Coordinator] 为 {getattr(agent, 'name', type(agent).__name__)} 注入知识库失败: {exc}")
+
+        logger.info("[Coordinator] 知识库已同步到协调器子Agent")
 
     def _build_aux_memory_query(self, chapter_num: int, chapter_outline: Dict[str, Any], context: Dict[str, Any]) -> str:
         """构建辅助记忆检索查询文本"""
@@ -300,315 +445,33 @@ class NovelCoordinator:
                 "mode": "fast",
             }
 
-    @staticmethod
-    def _normalize_trend_platforms(platforms: Optional[List[str]]) -> List[str]:
-        normalized: List[str] = []
-        for platform in platforms or []:
-            value = str(platform or "").strip().lower()
-            if value and value not in normalized:
-                normalized.append(value)
-        return normalized
+    def _init_trends_service(self) -> 'TrendsService':
+        from .trends_service import TrendsService
+        return TrendsService(worldbuilder=self.worldbuilder)
 
-    @staticmethod
-    def _extract_trend_tool_error(result: Any) -> str:
-        if result is None:
-            return ""
-        if hasattr(result, "content") and result.content:
-            first = result.content[0]
-            text = getattr(first, "text", "")
-            if isinstance(text, str):
-                return text.strip()
-        return ""
-
-    def _get_trend_tool_name(self, platform: str) -> str:
-        mapping = {
-            "douban": "get_douban_rank",
-            "weread": "get_weread_rank",
-            "zhihu": "get_zhihu_trending",
-            "gcores": "get_gcores_new",
-            "toutiao": "get_toutiao_trending",
-            "netease": "get_netease_news_trending",
-            "tencent": "get_tencent_news_trending",
-            "thepaper": "get_thepaper_trending",
-            "bilibili": "get_bilibili_rank",
-            "douyin": "get_douyin_trending",
-            "weibo": "get_weibo_trending",
-            "36kr": "get_36kr_trending",
-            "sspai": "get_sspai_rank",
-            "ifanr": "get_ifanr_news",
-            "juejin": "get_juejin_article_rank",
-            "smzdm": "get_smzdm_rank",
-        }
-        normalized = str(platform or "").strip().lower()
-        return mapping.get(normalized, f"get_{normalized}_trending")
-
-    def _build_trend_tool_candidates(self, platform: str) -> List[str]:
-        normalized = str(platform or "").strip().lower()
-        if not normalized:
-            return []
-
-        candidates: List[str] = []
-
-        def _add(tool_name: str) -> None:
-            if tool_name and tool_name not in candidates:
-                candidates.append(tool_name)
-
-        mapped = self._get_trend_tool_name(normalized)
-        _add(mapped)
-
-        modern = f"get_{normalized}_trending"
-        _add(modern)
-        _add(modern.replace("_", "-"))
-
-        if mapped:
-            _add(mapped.replace("_", "-"))
-
-        return candidates
-
-    @staticmethod
-    def _select_balanced_trend_candidates(
-        trends_data: List[Dict[str, Any]],
-        limit: int = 5,
-    ) -> List[Dict[str, Any]]:
-        if not trends_data or limit <= 0:
-            return []
-
-        platform_buckets: Dict[str, List[Dict[str, Any]]] = {}
-        platform_order: List[str] = []
-
-        for trend in trends_data:
-            platform = str(trend.get("platform", "")).strip().lower()
-            if platform not in platform_buckets:
-                platform_buckets[platform] = []
-                platform_order.append(platform)
-            platform_buckets[platform].append(trend)
-
-        merged: List[Dict[str, Any]] = []
-        cursor = {platform: 0 for platform in platform_order}
-        while len(merged) < limit:
-            appended = False
-            for platform in platform_order:
-                idx = cursor[platform]
-                items = platform_buckets.get(platform, [])
-                if idx >= len(items):
-                    continue
-                merged.append(items[idx])
-                cursor[platform] = idx + 1
-                appended = True
-                if len(merged) >= limit:
-                    break
-            if not appended:
-                break
-
-        return merged
-
-    async def _search_trends_for_collab(
-        self,
-        platforms: Optional[List[str]],
-        limit: int = 5,
-    ) -> List[Dict[str, Any]]:
-        """协作模式热点检索：多平台回退 + 去重 + 轮询均衡聚合。"""
-        selected_platforms = self._normalize_trend_platforms(platforms)
-        total_limit = int(limit or 0)
-        if not selected_platforms or total_limit <= 0:
-            return []
-
-        def _extract_tag(text: str, tag: str) -> str:
-            if not text:
-                return ""
-            match = re.search(rf"<{tag}>([\s\S]*?)</{tag}>", text, re.IGNORECASE)
-            return match.group(1).strip() if match else ""
-
-        def _strip_xml(text: str) -> str:
-            if not text:
-                return ""
-            return re.sub(r"<[^>]+>", "", text).strip()
-
-        def _parse_trend_payload(payload: Any) -> List[Dict[str, str]]:
-            rows: List[Dict[str, str]] = []
-            if payload is None:
-                return rows
-
-            if isinstance(payload, list):
-                for item in payload:
-                    rows.extend(_parse_trend_payload(item))
-                return rows
-
-            if isinstance(payload, dict):
-                for key in ("data", "list", "items", "result"):
-                    value = payload.get(key)
-                    if isinstance(value, list):
-                        rows.extend(_parse_trend_payload(value))
-                        return rows
-
-                title_val = payload.get("title") or payload.get("name") or payload.get("content") or ""
-                if isinstance(title_val, (list, dict)):
-                    rows.extend(_parse_trend_payload(title_val))
-                    return rows
-
-                title_text = str(title_val or "").strip()
-                title = _extract_tag(title_text, "title") or _strip_xml(title_text) or title_text
-                if title:
-                    hot_val = (
-                        payload.get("hot")
-                        or payload.get("hotValue")
-                        or payload.get("heat")
-                        or payload.get("popularity")
-                        or payload.get("score")
-                        or ""
-                    )
-                    url_val = payload.get("url") or payload.get("link") or ""
-                    rows.append(
-                        {
-                            "title": str(title),
-                            "hot": str(hot_val or ""),
-                            "url": str(url_val or ""),
-                        }
-                    )
-                return rows
-
-            if isinstance(payload, str):
-                text = payload.strip()
-                if not text:
-                    return rows
-                try:
-                    parsed = json.loads(text)
-                    rows.extend(_parse_trend_payload(parsed))
-                    return rows
-                except json.JSONDecodeError:
-                    title = _extract_tag(text, "title") or _strip_xml(text) or text
-                    if title:
-                        rows.append(
-                            {
-                                "title": str(title),
-                                "hot": _extract_tag(text, "popularity"),
-                                "url": _extract_tag(text, "link"),
-                            }
-                        )
-                return rows
-
-            return rows
-
-        try:
-            seen_titles = set()
-            platform_trends: Dict[str, List[Dict[str, Any]]] = {
-                platform: [] for platform in selected_platforms
-            }
-
-            for platform in selected_platforms:
-                tool_candidates = self._build_trend_tool_candidates(platform)
-                result = None
-                used_tool = ""
-
-                for tool_name in tool_candidates:
-                    try:
-                        # 使用 Skill 系统
-                        current = self.worldbuilder.use_skill("trends_search", tool_name, limit=total_limit)
-                    except Exception as call_error:
-                        logger.debug(
-                            f"[Coordinator] 热点工具调用异常({platform}, {tool_name}): {call_error}"
-                        )
-                        continue
-
-                    # 检查 Skill 调用结果
-                    if not current or not current.get("success"):
-                        error_msg = current.get("error", "") if current else "unknown error"
-                        lowered_error = error_msg.lower()
-                        if "not found" in lowered_error:
-                            logger.debug(
-                                f"[Coordinator] 热点工具不存在，尝试下一个候选: platform={platform}, tool={tool_name}"
-                            )
-                            continue
-                        logger.debug(
-                            f"[Coordinator] 热点工具调用失败({platform}, {tool_name}): {error_msg}"
-                        )
-                        continue
-
-                    if current and current.get("success"):
-                        result = current
-                        used_tool = tool_name
-                        break
-
-                if result is None:
-                    logger.debug(
-                        f"[Coordinator] 未获取到平台热点({platform})，候选工具: {tool_candidates}"
-                    )
-                    continue
-
-                # 处理 Skill 返回的数据
-                if result and result.get("data"):
-                    data_items = result.get("data", [])
-                    for item in data_items:
-                        title = str(item.get("title") or "").strip()
-                        if not title or title in seen_titles:
-                            continue
-                        seen_titles.add(title)
-                        platform_trends[platform].append(
-                            {
-                                "title": title,
-                                "hot": str(item.get("热度", "") or ""),
-                                "url": str(item.get("url", "") or ""),
-                                "platform": platform,
-                            }
-                        )
-                        if len(platform_trends[platform]) >= total_limit:
-                            break
-
-                logger.debug(
-                    f"[Coordinator] 平台热点获取成功: platform={platform}, tool={used_tool}, count={len(platform_trends[platform])}"
-                )
-
-            merged_candidates: List[Dict[str, Any]] = []
-            for platform in selected_platforms:
-                merged_candidates.extend(platform_trends.get(platform, []))
-            return self._select_balanced_trend_candidates(merged_candidates, limit=total_limit)
-        except Exception as e:
-            logger.warning(f"[Coordinator] 热点检索失败: {e}")
-            return []
+    async def _search_trends_for_collab(self, platforms: Optional[List[str]], limit: int = 5) -> List[Dict[str, Any]]:
+        svc = self._trends_service or self._init_trends_service()
+        self._trends_service = svc
+        return await svc.search_trends(platforms=platforms, limit=limit)
 
     def _build_trends_prompt_block(self, trends_data: List[Dict[str, Any]], limit: int = 5) -> str:
-        if not trends_data:
-            return ""
+        from .trends_service import build_trends_prompt_block
+        return build_trends_prompt_block(trends_data, limit)
 
-        parts: List[str] = []
-        parts.append("热点融合要求：")
-        parts.append("请从热点候选中选择 1-2 条与当前剧情最契合的内容进行改编融入。")
-        parts.append("不要原样照抄热点标题，不要写成新闻播报，要转化为角色动机/冲突/事件触发。")
-        parts.append("")
-        parts.append("[热点候选]")
+    def _init_plot_thread_machine(self) -> 'PlotThreadStateMachine':
+        from .plot_thread_state import PlotThreadStateMachine
+        pm = PlotThreadStateMachine(project_dir=self.project_dir)
+        if self._plot_thread_state_key:
+            pm.state_key = self._plot_thread_state_key
+        return pm
 
-        for trend in self._select_balanced_trend_candidates(trends_data, limit=limit):
-            title = str(trend.get("title", "")).strip()
-            if not title:
-                continue
-            platform = str(trend.get("platform", "")).strip()
-            hot = str(trend.get("hot", "")).strip()
-            source = f"[{platform}]" if platform else ""
-            heat = f"（热度:{hot}）" if hot else ""
-            parts.append(f"- {source}{title}{heat}")
-
-        parts.append("")
-        return "\n".join(parts)
-    
     def _load_plot_thread_state(self) -> None:
-        """Load persisted plot thread state for the current project."""
-        try:
-            payload = self.project_manager.load_project_state(
-                self._plot_thread_state_key, default=None
-            )
-        except Exception as exc:
-            logger.warning(f"[PlotThread] failed to load state: {exc}")
-            payload = None
-        self._plot_thread_machine.load(payload if isinstance(payload, dict) else None)
+        self._plot_thread_machine = self._init_plot_thread_machine()
+        self._plot_thread_machine.load_plot_thread_state()
 
     def _save_plot_thread_state(self) -> None:
-        """Persist plot thread state for the current project."""
-        try:
-            self.project_manager.save_project_state(
-                self._plot_thread_state_key, self._plot_thread_machine.snapshot()
-            )
-        except Exception as exc:
-            logger.warning(f"[PlotThread] failed to save state: {exc}")
+        if hasattr(self, '_plot_thread_machine'):
+            self._plot_thread_machine.save_plot_thread_state()
 
     def _sync_plot_thread_state_with_outline(
         self,
@@ -616,40 +479,19 @@ class NovelCoordinator:
         total_chapters: int,
         reset: bool,
     ) -> Dict[str, Any]:
-        """Sync thread definitions from outline and persist."""
-        try:
-            state = self._plot_thread_machine.sync_with_outline(
-                outline_data if isinstance(outline_data, dict) else {},
-                total_chapters=total_chapters,
-                reset=reset,
-            )
-            self._save_plot_thread_state()
-            return state
-        except Exception as exc:
-            logger.warning(f"[PlotThread] failed to sync with outline: {exc}")
-            return self._plot_thread_machine.snapshot()
+        return self._plot_thread_machine.sync_with_outline_external(
+            outline_data if isinstance(outline_data, dict) else {},
+            total_chapters=total_chapters,
+            reset=reset,
+        )
 
     async def _plan_plot_thread_for_chapter(
         self,
         chapter_num: int,
         chapter_outline: Any,
     ) -> Dict[str, Any]:
-        """Plan active thread before writing a chapter."""
         async with self._plot_thread_lock:
-            try:
-                context = self._plot_thread_machine.plan_chapter(chapter_num, chapter_outline)
-                self._save_plot_thread_state()
-                return context
-            except Exception as exc:
-                logger.warning(f"[PlotThread] failed to plan chapter {chapter_num}: {exc}")
-                return {
-                    "active_thread_id": "main",
-                    "active_thread": {"id": "main", "title": "主线", "thread_type": "main"},
-                    "subplot_streak": 0,
-                    "last_transition_reason": "plan_failed",
-                    "threads_overview": [],
-                    "writer_guidance": "保持主线推进。",
-                }
+            return await self._plot_thread_machine.plan_for_chapter(chapter_num, chapter_outline)
 
     async def _complete_plot_thread_for_chapter(
         self,
@@ -658,27 +500,10 @@ class NovelCoordinator:
         chapter_content: str,
         evaluation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Apply post-chapter transitions and persist state."""
         async with self._plot_thread_lock:
-            try:
-                result = self._plot_thread_machine.complete_chapter(
-                    chapter_number=chapter_num,
-                    chapter_outline=chapter_outline,
-                    chapter_content=chapter_content,
-                    evaluation=evaluation or {},
-                )
-                self._save_plot_thread_state()
-                return result
-            except Exception as exc:
-                logger.warning(f"[PlotThread] failed to finalize chapter {chapter_num}: {exc}")
-                return {
-                    "active_thread_id": self._plot_thread_machine.snapshot().get(
-                        "active_thread_id", "main"
-                    ),
-                    "resolved_thread_ids": [],
-                    "transition_reason": "complete_failed",
-                    "threads_overview": [],
-                }
+            return await self._plot_thread_machine.complete_for_chapter(
+                chapter_num, chapter_outline, chapter_content, evaluation,
+            )
 
     async def _ensure_message_bus_started(self):
         """确保消息总线已启动并订阅"""
@@ -790,36 +615,42 @@ class NovelCoordinator:
                 await self.progress_callback(data)
             return None
         
-        for agent in [self.worldbuilder, self.outliner, self.chapter_writer,
-                      self.polisher, self.evaluator]:
+        for agent in [
+            self.worldbuilder,
+            self.outliner,
+            self.chapter_writer,
+            self.polisher,
+            self.evaluator,
+            self.character_builder,
+            self.context_strategy,
+            self.content_reader,
+            self.content_expansion,
+            self.file_naming,
+            self.summary_orchestrator,
+        ]:
             agent.set_callback_handler(agent_callback)
     
     def _load_checkpoint(self):
         """加载检查点"""
-        checkpoint_file = self.project_dir / "checkpoint.json"
-        if checkpoint_file.exists():
+        data = self.checkpoint_manager.load_payload()
+        if isinstance(data, dict) and data:
             try:
-                data = json.loads(checkpoint_file.read_text(encoding="utf-8"))
                 self.checkpoint = WorkflowCheckpoint.from_dict(data)
                 self.workflow_state = self.checkpoint.state
                 logger.info(f"Checkpoint loaded: state={self.checkpoint.state.value}, chapter={self.checkpoint.current_chapter}")
             except Exception as e:
-                logger.warning(f"Failed to load checkpoint: {e}")
+                logger.warning(f"Failed to hydrate checkpoint: {e}")
     
     def _save_checkpoint(self):
         """保存检查点"""
-        if not self.auto_save_checkpoint or not self.checkpoint:
+        if not self.checkpoint:
             return
-        
-        try:
-            checkpoint_file = self.project_dir / "checkpoint.json"
-            checkpoint_file.write_text(
-                json.dumps(self.checkpoint.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
+        saved = self.checkpoint_manager.save_payload(
+            self.checkpoint.to_dict(),
+            enabled=self.auto_save_checkpoint,
+        )
+        if saved:
             logger.debug(f"Checkpoint saved: state={self.checkpoint.state.value}")
-        except Exception as e:
-            logger.error(f"Failed to save checkpoint: {e}")
     
     def _update_checkpoint(
         self,
@@ -829,28 +660,18 @@ class NovelCoordinator:
         error_info: Optional[str] = None
     ):
         """更新检查点"""
-        if self.checkpoint is None:
-            self.checkpoint = WorkflowCheckpoint(
-                state=WorkflowState.IDLE,
-                current_chapter=0,
-                completed_stages=[],
-                project_data=asdict(self.project) if self.project else {},
-                last_updated=datetime.now().isoformat()
-            )
-        
-        if state:
-            self.checkpoint.state = state
-            self.workflow_state = state
-        if current_chapter is not None:
-            self.checkpoint.current_chapter = current_chapter
-        if add_stage and add_stage not in self.checkpoint.completed_stages:
-            self.checkpoint.completed_stages.append(add_stage)
-        if error_info:
-            self.checkpoint.error_info = error_info
-        
-        self.checkpoint.last_updated = datetime.now().isoformat()
-        self.checkpoint.project_data = asdict(self.project) if self.project else {}
-        
+        payload = self.checkpoint_manager.build_updated_payload(
+            self.checkpoint.to_dict() if self.checkpoint else None,
+            state_value=state.value if state else None,
+            current_chapter=current_chapter,
+            add_stage=add_stage,
+            error_info=error_info,
+            project_data=asdict(self.project) if self.project else {},
+        )
+        self.checkpoint = WorkflowCheckpoint.from_dict(payload)
+        self.workflow_state = self.checkpoint.state
+        if state and state != WorkflowState.PAUSED:
+            self._last_active_workflow_state = state
         self._save_checkpoint()
     
     async def _notify_progress(self, data: Dict[str, Any]):
@@ -863,172 +684,38 @@ class NovelCoordinator:
 
     def _build_memory_contract(self) -> Dict[str, Any]:
         """定义记忆权威源与冲突合并规则（版本化）"""
-        return {
-            "contract_version": self._memory_contract_version,
-            "updated_at": datetime.now().isoformat(),
-            "source_of_truth": {
-                "chapter_facts": "KnowledgeBase",
-                "session_state": "SessionStore",
-                "workflow_state": "ContextManager+Checkpoint",
-                "long_term_preferences_and_summary": "MemoryManager(Wensi)"
-            },
-            "conflict_resolution": {
-                "priority_order": [
-                    "KnowledgeBase",
-                    "SessionStore",
-                    "ContextManager+Checkpoint",
-                    "MemoryManager(Wensi)"
-                ],
-                "default_strategy": "last_write_wins_with_priority",
-                "versioning": "timestamp+contract_version",
-                "notes": "高优先级源覆盖低优先级源；同优先级冲突按最近更新时间合并。"
-            }
-        }
+        return self.memory_sync_manager.build_contract()
 
     def _memory_meta_file(self) -> Path:
-        return self.project_dir / "memory_sync_meta.json"
+        return self.memory_sync_manager.meta_file()
 
     def _memory_snapshot_file(self) -> Path:
-        return self.project_dir / "memory_snapshot.json"
+        return self.memory_sync_manager.snapshot_file()
 
-    def _append_memory_event(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
+    async def _append_memory_event(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
         """记录记忆同步事件到本地文件，便于排障与审计"""
-        try:
-            path = self._memory_meta_file()
-            payload = {
-                "contract": self._build_memory_contract(),
-                "project": self.project.to_dict() if self.project else {},
-                "project_scope": self.project_manager.current_project_id or "",
-                "updated_at": datetime.now().isoformat(),
-                "events": []
-            }
-
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(existing, dict):
-                        payload.update(existing)
-                        payload["contract"] = self._build_memory_contract()
-                        payload["updated_at"] = datetime.now().isoformat()
-                except Exception:
-                    pass
-
-            payload.setdefault("events", [])
-            payload["events"].append({
-                "type": event_type,
-                "time": datetime.now().isoformat(),
-                "data": data or {}
-            })
-
-            # 控制事件数量，防止无限增长
-            if len(payload["events"]) > 300:
-                payload["events"] = payload["events"][-300:]
-
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to append memory event: {e}")
+        await self.memory_sync_manager.append_event(event_type, data)
 
     async def _ensure_memory_agent(self, agent_type: str) -> Optional[str]:
         """确保指定类型的记忆Agent已创建"""
-        project_scope = self.project_manager.current_project_id or (self.project.id if self.project else "default")
-        scoped_key = f"{project_scope}:{agent_type}"
-        if scoped_key in self._memory_agent_ids:
-            return self._memory_agent_ids[scoped_key]
-
-        if not self.memory_manager.wensi_service.is_available:
-            self._append_memory_event("memory_agent_skipped", {
-                "agent_type": agent_type,
-                "reason": "wensi_unavailable"
-            })
-            return None
-
-        try:
-            agent_name = f"novel_{project_scope}_{agent_type}".lower()
-            agent_id = await self.memory_manager.wensi_service.create_agent(name=agent_name)
-            if agent_id:
-                self._memory_agent_ids[scoped_key] = agent_id
-                self._append_memory_event("memory_agent_created", {
-                    "agent_type": agent_type,
-                    "project_scope": project_scope,
-                    "agent_id": agent_id
-                })
-                return agent_id
-            self._append_memory_event("memory_agent_create_failed", {
-                "agent_type": agent_type,
-                "project_scope": project_scope
-            })
-        except Exception as e:
-            logger.warning(f"Failed to create memory agent for {agent_type}: {e}")
-            self._append_memory_event("memory_agent_create_exception", {
-                "agent_type": agent_type,
-                "error": str(e)
-            })
-        return None
+        return await self.memory_sync_manager.ensure_memory_agent(self._memory_agent_ids, agent_type)
 
     async def _sync_memory_for_agent(self, agent_type: str) -> None:
         """按Agent类型执行记忆同步"""
-        try:
-            agent_id = await self._ensure_memory_agent(agent_type)
-            if not agent_id:
-                return
-
-            success = await self.memory_manager.sync_project_to_memory(agent_type, agent_id)
-            self._append_memory_event("memory_sync", {
-                "agent_type": agent_type,
-                "agent_id": agent_id,
-                "success": success
-            })
-        except Exception as e:
-            logger.warning(f"Memory sync failed for {agent_type}: {e}")
-            self._append_memory_event("memory_sync_exception", {
-                "agent_type": agent_type,
-                "error": str(e)
-            })
+        await self.memory_sync_manager.sync_memory_for_agent(self._memory_agent_ids, agent_type)
 
     async def _sync_memory_stage(self, stage: str) -> None:
         """在关键阶段执行增量记忆同步"""
-        stage_agent_map = {
-            "init": ["ChapterWriter"],
-            "worldbuilding": ["Worldbuilder", "ChapterWriter"],
-            "outlining": ["Outliner", "ChapterWriter"],
-            "writing": ["ChapterWriter", "Polisher"],
-            "resume": ["ChapterWriter"]
-        }
-        for agent_type in stage_agent_map.get(stage, []):
-            await self._sync_memory_for_agent(agent_type)
+        await self.memory_sync_manager.sync_stage(self._memory_agent_ids, stage)
 
     async def _export_memory_snapshot(self, reason: str) -> None:
         """导出记忆快照到项目目录"""
-        try:
-            memory_payload = {
-                "reason": reason,
-                "exported_at": datetime.now().isoformat(),
-                "contract": self._build_memory_contract(),
-                "project": self.project.to_dict() if self.project else {},
-                "project_scope": self.project_manager.current_project_id or "",
-                "agent_memories": {}
-            }
-
-            for scoped_key, agent_id in self._memory_agent_ids.items():
-                try:
-                    memory_payload["agent_memories"][scoped_key] = await self.memory_manager.export_memory_to_project(agent_id)
-                except Exception as e:
-                    memory_payload["agent_memories"][scoped_key] = {"_error": str(e)}
-
-            self._memory_snapshot_file().write_text(
-                json.dumps(memory_payload, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-            self._append_memory_event("memory_export", {"reason": reason, "agent_count": len(self._memory_agent_ids)})
-        except Exception as e:
-            logger.warning(f"Failed to export memory snapshot: {e}")
-            self._append_memory_event("memory_export_exception", {"reason": reason, "error": str(e)})
+        await self.memory_sync_manager.export_snapshot(self._memory_agent_ids, reason)
     
     def pause(self):
         """暂停工作流"""
+        if self.workflow_state != WorkflowState.PAUSED:
+            self._last_active_workflow_state = self.workflow_state
         self._paused = True
         self._update_checkpoint(state=WorkflowState.PAUSED)
         logger.info("Workflow paused")
@@ -1036,11 +723,29 @@ class NovelCoordinator:
     def resume(self):
         """恢复工作流"""
         self._paused = False
+        self._cancelled = False
+        resume_state = self._last_active_workflow_state
+        if resume_state == WorkflowState.PAUSED:
+            resume_state = WorkflowState.WRITING
+        if self.workflow_state == WorkflowState.PAUSED or (
+            self.checkpoint and self.checkpoint.state == WorkflowState.PAUSED
+        ):
+            self._update_checkpoint(state=resume_state)
+            if self.project and resume_state == WorkflowState.WRITING:
+                self.project.status = "writing"
+                self.project.updated_at = datetime.now().isoformat()
         logger.info("Workflow resumed")
     
     def cancel(self):
         """取消工作流"""
         self._cancelled = True
+        self._paused = False
+        cancel_resume_state = self.workflow_state
+        if cancel_resume_state == WorkflowState.PAUSED:
+            cancel_resume_state = self._last_active_workflow_state
+        if cancel_resume_state == WorkflowState.PAUSED:
+            cancel_resume_state = WorkflowState.WRITING
+        self._update_checkpoint(state=cancel_resume_state, error_info="cancel_requested")
         logger.info("Workflow cancelled")
     
     async def _check_pause_cancel(self) -> bool:
@@ -1054,7 +759,644 @@ class NovelCoordinator:
                 return True
         
         return False
-    
+
+    async def check_pause_cancel(self) -> bool:
+        """公共暂停/取消检查接口。"""
+        return await self._check_pause_cancel()
+
+    def _persist_creation_contract(
+        self,
+        *,
+        novel_type: str,
+        theme: str,
+        requirements: str,
+        protagonist: str,
+        plot_idea: str,
+        volume_count: int,
+        chapters_per_volume: int,
+        session_context: Optional[Dict[str, Any]] = None,
+        user_confirmed: bool = True,
+    ) -> Dict[str, Any]:
+        """保存当前项目的创作合同与任务图草案。"""
+        session_context = dict(session_context or {})
+        contract = build_default_creation_contract(
+            novel_type=novel_type,
+            theme=theme,
+            requirements=requirements,
+            protagonist=protagonist,
+            plot_idea=plot_idea,
+            volume_count=volume_count,
+            chapters_per_volume=chapters_per_volume,
+            source_session_id=str(session_context.get("session_id") or "").strip(),
+            source_message=str(plot_idea or "").strip(),
+            user_confirmed=user_confirmed,
+        )
+
+        conversation_history = session_context.get("conversation_history")
+        collected_info = session_context.get("collected_info")
+        discussion_lines: List[str] = []
+        if isinstance(conversation_history, list):
+            for item in conversation_history:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").strip().lower()
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                role_label = "用户" if role == "user" else "助手" if role == "assistant" else "系统"
+                discussion_lines.append(f"{role_label}：{content}")
+
+        if isinstance(collected_info, dict) and collected_info:
+            contract.metadata["collected_info"] = dict(collected_info)
+
+        discussion_context = "\n".join(discussion_lines).strip()
+        if discussion_context:
+            contract.scope["discussion_context"] = discussion_context[:6000]
+
+        contract.metadata.update({
+            "generated_by": "NovelCoordinator",
+            "stage": "orchestrated_execution",
+            "project_id": self.project_manager.current_project_id or "",
+        })
+        contract.task_graph = build_default_task_graph(contract)
+        payload = contract.to_dict()
+
+        self.project_manager.save_project_state("creation_contract", payload)
+        self.project_manager.save_project_state("task_graph_draft", payload.get("task_graph", []))
+        return payload
+
+    def initialize_task_pool_from_contract(
+        self,
+        contract_payload: Dict[str, Any],
+        approved: bool = True,
+    ) -> Dict[str, Any]:
+        """基于已确认合同初始化正式任务池与协作执行轨迹。"""
+        if not isinstance(contract_payload, dict) or not contract_payload:
+            raise ValueError("contract_payload 不能为空")
+
+        contract = CreationContract.from_dict(contract_payload)
+        contract.user_confirmed = bool(approved)
+        contract.updated_at = datetime.now().isoformat()
+        contract.metadata = dict(contract.metadata or {})
+        contract.metadata["draft"] = not bool(approved)
+        contract.metadata["confirmed_at"] = contract.updated_at if approved else ""
+
+        task_pool = TaskPool()
+        created_tasks: List[TaskDefinition] = []
+        for task in contract.task_graph:
+            if not isinstance(task, TaskDefinition):
+                continue
+            created_tasks.append(
+                task_pool.create_task(
+                    task_type=task.task_type,
+                    title=task.title,
+                    description=task.description,
+                    inputs=dict(task.inputs or {}),
+                    expected_outputs=list(task.expected_outputs or []),
+                    candidate_agents=list(task.candidate_agents or []),
+                    priority=int(task.priority or 0),
+                    depends_on=list(task.depends_on or []),
+                    review_required=bool(task.review_required),
+                    metadata=dict(task.metadata or {}),
+                )
+            )
+
+        self._hydrate_project_task_depends_on(created_tasks)
+
+        task_pool.metadata.update({
+            "contract_id": contract.contract_id,
+            "source": "contract_confirmation",
+            "approved": bool(approved),
+            "supervised_mode": bool(self.supervised_mode),
+            "fallback_to_orchestrated": bool(self.fallback_to_orchestrated),
+            "initialized_at": contract.updated_at,
+        })
+
+        persisted_contract = contract.to_dict()
+        return self.runtime_state_store.persist_contract_runtime(
+            persisted_contract=persisted_contract,
+            task_pool=task_pool,
+            approved=bool(approved),
+            supervised_mode=bool(self.supervised_mode),
+            fallback_to_orchestrated=bool(self.fallback_to_orchestrated),
+            initialized_at=contract.updated_at,
+        )
+
+    def _hydrate_project_task_depends_on(self, tasks: List[TaskDefinition]) -> None:
+        """将合同语义依赖映射为正式任务池可执行的 depends_on。"""
+        if not isinstance(tasks, list) or not tasks:
+            return
+
+        first_by_type: Dict[str, TaskDefinition] = {}
+        write_chapter_by_number: Dict[int, TaskDefinition] = {}
+        for task in tasks:
+            if not isinstance(task, TaskDefinition):
+                continue
+            task_type = str(task.task_type or "").strip()
+            if task_type and task_type not in first_by_type:
+                first_by_type[task_type] = task
+            if task_type == "write_chapter":
+                try:
+                    chapter_number = int((task.inputs or {}).get("chapter_number") or 0)
+                except (TypeError, ValueError):
+                    chapter_number = 0
+                if chapter_number > 0:
+                    write_chapter_by_number[chapter_number] = task
+
+        dependency_map = {
+            "world_ready": first_by_type.get("build_world"),
+            "outline_ready": first_by_type.get("build_outline"),
+        }
+
+        for task in tasks:
+            if not isinstance(task, TaskDefinition):
+                continue
+            depends_on = list(task.depends_on or [])
+            for dependency in task.dependencies or []:
+                dependency_key = str(getattr(dependency, "dependency_key", "") or "").strip()
+                mapped_task = dependency_map.get(dependency_key)
+                if mapped_task is None:
+                    continue
+                if mapped_task.task_id not in depends_on:
+                    depends_on.append(mapped_task.task_id)
+
+            if str(task.task_type or "").strip() == "summary_orchestrate":
+                try:
+                    end_chapter = int((task.inputs or {}).get("end_chapter") or 0)
+                except (TypeError, ValueError):
+                    end_chapter = 0
+                end_chapter_task = write_chapter_by_number.get(end_chapter)
+                if end_chapter_task is not None and end_chapter_task.task_id not in depends_on:
+                    depends_on.append(end_chapter_task.task_id)
+
+            task.depends_on = depends_on
+            task.touch()
+
+    def _load_project_outline_rows(self) -> List[Dict[str, Any]]:
+        """加载项目级大纲行。"""
+        outline_rows = self.project_manager.load_project_data("outline")
+        if not isinstance(outline_rows, list):
+            return []
+        return [row for row in outline_rows if isinstance(row, dict)]
+
+    def _load_project_previous_chapters(self, chapter_number: int, outline_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """为项目级章节任务收集前序章节内容。"""
+        previous_chapters: List[Dict[str, Any]] = []
+        for index in range(1, max(1, int(chapter_number or 1))):
+            if index > len(outline_rows):
+                break
+            row = outline_rows[index - 1]
+            content = str(row.get("content") or "").strip()
+            if not content:
+                continue
+            title = str(row.get("title") or f"第{index}章").strip() or f"第{index}章"
+            previous_chapters.append({
+                "number": index,
+                "chapter_number": index,
+                "title": title,
+                "chapter_title": title,
+                "content": content,
+            })
+        return previous_chapters
+
+    async def _persist_project_ready_chapter_result(
+        self,
+        chapter_result: Dict[str, Any],
+        outline_rows: List[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        """将项目级 ready-task 产出的章节结果写回项目数据。"""
+        outline_path = self.project_manager.get_project_data_path("outline")
+        outline_existed_before = outline_path.exists()
+        chapter_number = int(
+            chapter_result.get("chapter_number")
+            or chapter_result.get("number")
+            or 1
+        )
+        chapter_title = str(
+            chapter_result.get("chapter_title")
+            or chapter_result.get("title")
+            or f"第{chapter_number}章"
+        ).strip() or f"第{chapter_number}章"
+        chapter_content = str(chapter_result.get("content") or "").strip()
+        timestamp = datetime.now().isoformat()
+
+        while len(outline_rows) < chapter_number:
+            placeholder_num = len(outline_rows) + 1
+            outline_rows.append({
+                "chapter_number": placeholder_num,
+                "title": f"第{placeholder_num}章",
+                "summary": "",
+                "content": "",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            })
+
+        row = outline_rows[chapter_number - 1]
+        row["chapter_number"] = chapter_number
+        row["title"] = chapter_title
+        row["content"] = chapter_content
+        row["updated_at"] = timestamp
+
+        self.project_manager.save_project_data("outline", outline_rows)
+        self._sync_outline_to_library(outline_rows)
+
+        chapters_dir = self.project_manager.get_project_data_path("chapters")
+        chapters_dir.mkdir(parents=True, exist_ok=True)
+        suggested_filename = str(chapter_result.get("suggested_filename") or "").strip()
+        if suggested_filename:
+            safe_filename = re.sub(r'[\\/:*?"<>|]+', "_", suggested_filename).strip()
+            if not safe_filename.lower().endswith(".md"):
+                safe_filename = f"{safe_filename}.md"
+            chapter_file = chapters_dir / safe_filename
+        else:
+            safe_title = re.sub(r'[\\/:*?"<>|]+', "_", chapter_title).strip() or f"chapter_{chapter_number}"
+            safe_title = re.sub(r"\s+", "_", safe_title).strip("._") or f"chapter_{chapter_number}"
+            chapter_file = chapters_dir / f"{chapter_number:03d}_{safe_title[:48]}.md"
+
+        chapter_existed_before = chapter_file.exists()
+        old_content = chapter_file.read_text(encoding="utf-8") if chapter_file.exists() else None
+        atomic_write_text(chapter_file, chapter_content, old_content=old_content)
+
+        # 自动生成章节摘要（问题1修复：使用 await 替代 asyncio.run）
+        try:
+            from ..chapter_summary_service import (
+                get_auto_summary_enabled,
+                generate_chapter_summary,
+                save_chapter_summary_to_library,
+            )
+            if get_auto_summary_enabled(self.project_manager.current_project_id):
+                summary = await generate_chapter_summary(
+                    chapter_number=chapter_number,
+                    title=chapter_title,
+                    content=chapter_content,
+                )
+                save_chapter_summary_to_library(chapter_number, summary)
+        except Exception as e:
+            logger.warning(f"[Coordinator] Auto chapter summary failed: {e}")
+
+        return {
+            "outline_path": str(outline_path),
+            "outline_status": "updated" if outline_existed_before else "created",
+            "chapter_path": str(chapter_file),
+            "chapter_status": "updated" if chapter_existed_before else "created",
+        }
+
+    def _load_project_stage_summary_chapters(
+        self,
+        start_chapter: int,
+        end_chapter: int,
+        outline_rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """加载项目级阶段总结所需章节内容。"""
+        chapter_items: List[Dict[str, Any]] = []
+        normalized_start = max(1, int(start_chapter or 1))
+        normalized_end = max(normalized_start, int(end_chapter or normalized_start))
+
+        for chapter_number in range(normalized_start, normalized_end + 1):
+            if chapter_number > len(outline_rows):
+                break
+            row = outline_rows[chapter_number - 1]
+            if not isinstance(row, dict):
+                continue
+            content = str(row.get("content") or "").strip()
+            title = str(row.get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+            summary = str(row.get("summary") or "").strip()
+            if not content and not summary:
+                continue
+            chapter_items.append({
+                "chapter_number": chapter_number,
+                "number": chapter_number,
+                "title": title,
+                "chapter_title": title,
+                "content": content,
+                "summary": summary,
+            })
+
+        return chapter_items
+
+    def _persist_project_stage_summary_result(
+        self,
+        summary_result: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """将项目级阶段总结结果写回项目状态与文件。"""
+        summary_payload = dict(summary_result.get("summary_payload") or {})
+        summary_text = str(summary_result.get("summary") or summary_payload.get("summary") or "").strip()
+        return self.runtime_state_store.persist_stage_summary(summary_payload, summary_text)
+
+    def _init_project_ready_executor(self) -> 'ProjectReadyTaskExecutor':
+        from .project_ready import ProjectReadyTaskExecutor
+        if self._project_ready_executor is None:
+            self._project_ready_executor = ProjectReadyTaskExecutor(coordinator=self)
+        return self._project_ready_executor
+
+    async def _execute_project_ready_batch(
+        self,
+        *,
+        max_tasks: int = 2,
+        max_chapter_tasks: Optional[int] = 1,
+    ) -> Dict[str, Any]:
+        """Execute next batch of project-ready tasks."""
+        executor = self._init_project_ready_executor()
+        return await executor.execute_next_batch(
+            max_tasks=max_tasks,
+            max_chapter_tasks=max_chapter_tasks,
+        )
+
+    async def execute_project_ready_tasks(
+        self,
+        *,
+        max_tasks: int = 2,
+        max_chapter_tasks: Optional[int] = 1,
+    ) -> Dict[str, Any]:
+        """Execute project-ready tasks. Delegates to ProjectReadyTaskExecutor."""
+        executor = self._init_project_ready_executor()
+        return await executor.execute_next_batch(
+            max_tasks=max_tasks,
+            max_chapter_tasks=max_chapter_tasks,
+        )
+
+    def _load_runtime_task_pool(self) -> TaskPool:
+        """加载项目级运行态任务池；若不存在则返回空任务池。"""
+        return self.runtime_state_store.load_runtime_task_pool()
+
+    def _save_runtime_task_pool(self, task_pool: TaskPool) -> Dict[str, Any]:
+        """持久化项目级运行态任务池。"""
+        return self.runtime_state_store.save_runtime_task_pool(task_pool)
+
+    def _append_collab_execution_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """追加协作执行轨迹事件并落盘。"""
+        return self.runtime_state_store.append_execution_event(
+            event_type,
+            payload,
+            supervised_mode=bool(self.supervised_mode),
+            fallback_to_orchestrated=bool(self.fallback_to_orchestrated),
+        )
+
+    def _upsert_runtime_task(
+        self,
+        *,
+        task_type: str,
+        title: str,
+        description: str,
+        input_data: Dict[str, Any],
+        expected_outputs: Optional[List[str]],
+        candidate_agents: List[str],
+        review_required: bool,
+        task_metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[TaskPool, TaskDefinition]:
+        """将单次自治任务映射到项目级运行态任务池。"""
+        return self.runtime_state_store.upsert_runtime_task(
+            task_type=task_type,
+            title=title,
+            description=description,
+            input_data=input_data,
+            expected_outputs=expected_outputs,
+            candidate_agents=candidate_agents,
+            review_required=review_required,
+            task_metadata=task_metadata,
+        )
+
+    def _build_chapter_autonomous_task_pool(
+        self,
+        *,
+        chapter_num: int,
+        chapter_title: str,
+        chapter_outline_text: str,
+        base_context: Dict[str, Any],
+    ) -> TaskPool:
+        """Build chapter-level autonomous task pool. Delegates to dispatcher."""
+        return self.agent_dispatcher.build_chapter_task_pool(
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+            chapter_outline_text=chapter_outline_text,
+            base_context=base_context,
+        )
+
+    async def _execute_chapter_task_market(
+        self,
+        *,
+        chapter_num: int,
+        task_pool: TaskPool,
+        base_context: Dict[str, Any],
+        fallback_agents: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute chapter task market loop. Delegates to dispatcher."""
+        return await self.agent_dispatcher.execute_chapter_task_market_loop(
+            chapter_num=chapter_num,
+            task_pool=task_pool,
+            base_context=base_context,
+            fallback_agents=fallback_agents,
+        )
+
+    async def _stage_worldbuilding(
+        self,
+        *,
+        novel_type: str,
+        effective_theme: str,
+        effective_requirements: str,
+        effective_protagonist: str,
+        effective_plot_idea: str,
+        effective_volume_count: int,
+        effective_chapters_per_volume: int,
+        session_id: str,
+        collected_info: Dict[str, Any],
+        conversation_history: List[Any],
+    ) -> tuple[list[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+        """
+        执行世界观构建阶段。
+        Returns: (progress_events, world_data, creation_context)
+        """
+        progress: list[Dict[str, Any]] = []
+
+        if await self._check_pause_cancel():
+            progress.append({"stage": "cancelled", "message": "创作已取消"})
+            return progress, {}, {}
+
+        self._update_checkpoint(state=WorkflowState.WORLDBUILDING)
+        progress.append({"stage": "worldbuilding", "message": "正在构建世界观...", "progress": 5})
+
+        creation_context = {
+            "project_dir": str(self.project_dir),
+            "session_id": session_id,
+            "collected_info": collected_info,
+            "conversation_history": conversation_history,
+            "creation_requirements": {
+                "novel_type": novel_type,
+                "theme": effective_theme,
+                "requirements": effective_requirements,
+                "protagonist": effective_protagonist,
+                "plot_idea": effective_plot_idea,
+                "volume_count": effective_volume_count,
+                "chapters_per_volume": effective_chapters_per_volume,
+            },
+        }
+
+        world_run_result = await self._run_autonomous_task(
+            task_type="build_world",
+            input_data={
+                "novel_type": novel_type,
+                "theme": effective_theme,
+                "requirements": effective_requirements,
+                "protagonist": effective_protagonist,
+                "plot_idea": effective_plot_idea,
+            },
+            context=creation_context,
+            fallback_agent=self.worldbuilder,
+            stage="creation_mainline",
+            title="构建世界观",
+            description="为长篇创作主流程生成世界观设定",
+            expected_outputs=["world"],
+        )
+        world_result = world_run_result.get("result", {}) if isinstance(world_run_result, dict) else {}
+        world_data = world_result.get("world", {})
+
+        self.context_manager.save("world", world_data, "world")
+        if isinstance(world_data, dict):
+            from ..context.world_manager import WorldSetting
+            world_setting = WorldSetting(
+                name=world_data.get("world_name", "未命名世界"),
+                world_type=novel_type,
+                power_system=world_data.get("power_system", {}),
+                geography=world_data.get("geography", {}),
+                factions=world_data.get("factions", []),
+                rules=world_data.get("rules", []),
+                culture=world_data.get("culture", {}),
+            )
+            self.world_manager.set_world(world_setting)
+
+        self._update_checkpoint(add_stage="worldbuilding")
+        await self._sync_memory_stage("worldbuilding")
+        progress.append({
+            "stage": "worldbuilding",
+            "message": "世界观构建完成",
+            "progress": 15,
+            "data": world_data,
+        })
+
+        return progress, world_data, creation_context
+
+    async def _stage_character_building(
+        self,
+        *,
+        world_data: Dict[str, Any],
+        creation_context: Dict[str, Any],
+        novel_type: str,
+        effective_theme: str,
+        effective_protagonist: str,
+        effective_plot_idea: str,
+    ) -> tuple[list[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        执行角色构建阶段。
+        Returns: (progress_events, built_characters)
+        """
+        progress: list[Dict[str, Any]] = []
+        progress.append({"stage": "character_building", "message": "正在构建角色档案...", "progress": 18})
+
+        character_context = dict(creation_context)
+        character_context["world"] = world_data
+        character_run_result = await self._run_autonomous_task(
+            task_type="build_characters",
+            input_data={
+                "novel_type": novel_type,
+                "theme": effective_theme,
+                "protagonist": effective_protagonist,
+                "plot_idea": effective_plot_idea,
+                "character_request": effective_protagonist or effective_plot_idea,
+                "request_mode": "draft",
+            },
+            context=character_context,
+            fallback_agent=self.character_builder,
+            stage="creation_mainline",
+            title="构建角色档案",
+            description="基于世界观和核心设定生成角色档案草稿",
+            expected_outputs=["characters"],
+        )
+        character_result = character_run_result.get("result", {}) if isinstance(character_run_result, dict) else {}
+        built_characters = character_result.get("characters", []) if isinstance(character_result, dict) else []
+
+        for raw_char in built_characters:
+            if not isinstance(raw_char, dict):
+                continue
+            try:
+                from ..context.character_manager import Character
+                self.character_manager.add_character(Character(**raw_char))
+            except Exception as exc:
+                logger.warning(f"[Coordinator] 角色档案写入失败: {exc}")
+
+        self.context_manager.save("characters", self.character_manager.export_for_llm(), "character")
+        progress.append({
+            "stage": "character_building",
+            "message": f"角色档案构建完成，共 {len(self.character_manager.get_all_characters())} 个角色",
+            "progress": 22,
+            "data": self.character_manager.export_for_llm(),
+        })
+
+        return progress, built_characters
+
+    async def _stage_outlining(
+        self,
+        *,
+        world_data: Dict[str, Any],
+        creation_context: Dict[str, Any],
+        novel_type: str,
+        effective_protagonist: str,
+        effective_plot_idea: str,
+        effective_volume_count: int,
+        effective_chapters_per_volume: int,
+    ) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+        """
+        执行大纲规划阶段。
+        Returns: (progress_events, outline_data)
+        """
+        progress: list[Dict[str, Any]] = []
+
+        if await self._check_pause_cancel():
+            progress.append({"stage": "cancelled", "message": "创作已取消"})
+            return progress, {}
+
+        self._update_checkpoint(state=WorkflowState.OUTLINING)
+        progress.append({"stage": "outlining", "message": "正在规划故事大纲...", "progress": 20})
+
+        outline_context = dict(creation_context)
+        outline_context["world"] = world_data
+        outline_context["characters"] = self.character_manager.export_for_llm()
+        outline_run_result = await self._run_autonomous_task(
+            task_type="build_outline",
+            input_data={
+                "world": world_data,
+                "protagonist": effective_protagonist,
+                "plot_idea": effective_plot_idea,
+                "volume_count": effective_volume_count,
+                "chapters_per_volume": effective_chapters_per_volume,
+            },
+            context=outline_context,
+            fallback_agent=self.outliner,
+            stage="creation_mainline",
+            title="规划故事大纲",
+            description="基于世界观和角色设定规划长篇大纲",
+            expected_outputs=["outline"],
+        )
+        outline_result = outline_run_result.get("result", {}) if isinstance(outline_run_result, dict) else {}
+        outline_data = outline_result.get("outline", {})
+
+        self.context_manager.save("outline", outline_data, "plot")
+        outline_rows = self._outline_to_project_rows(outline_data)
+        self._persist_outline_rows(outline_rows)
+
+        if isinstance(outline_data, dict):
+            self.project.title = outline_data.get("title", f"{novel_type}小说")
+
+        self._update_checkpoint(add_stage="outlining")
+        await self._sync_memory_stage("outlining")
+        progress.append({
+            "stage": "outlining",
+            "message": "故事大纲规划完成",
+            "progress": 30,
+            "data": outline_data,
+        })
+
+        return progress, outline_data
+
     async def create_novel(
         self,
         novel_type: str,
@@ -1063,7 +1405,8 @@ class NovelCoordinator:
         protagonist: str = "",
         plot_idea: str = "",
         volume_count: int = 1,
-        chapters_per_volume: int = 10
+        chapters_per_volume: int = 10,
+        session_context: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         创建一部新小说(完整流程)
@@ -1084,7 +1427,31 @@ class NovelCoordinator:
         # 重置控制标志
         self._paused = False
         self._cancelled = False
-        
+        session_context = dict(session_context or {})
+        conversation_history = session_context.get("conversation_history")
+        if not isinstance(conversation_history, list):
+            conversation_history = []
+        collected_info = session_context.get("collected_info")
+        if not isinstance(collected_info, dict):
+            collected_info = {}
+        session_id = str(session_context.get("session_id") or "").strip()
+        effective_theme = str(collected_info.get("theme") or theme or "").strip()
+        effective_requirements = str(collected_info.get("requirements") or requirements or "").strip()
+        effective_protagonist = str(collected_info.get("protagonist") or protagonist or "").strip()
+        effective_plot_idea = str(collected_info.get("plot_idea") or plot_idea or "").strip()
+        effective_volume_count = volume_count
+        try:
+            if collected_info.get("volume_count"):
+                effective_volume_count = max(1, int(collected_info.get("volume_count")))
+        except (TypeError, ValueError):
+            effective_volume_count = volume_count
+        effective_chapters_per_volume = chapters_per_volume
+        try:
+            if collected_info.get("chapters_per_volume"):
+                effective_chapters_per_volume = max(1, int(collected_info.get("chapters_per_volume")))
+        except (TypeError, ValueError):
+            effective_chapters_per_volume = chapters_per_volume
+
         # 确保消息总线启动
         await self._ensure_message_bus_started()
         
@@ -1095,7 +1462,7 @@ class NovelCoordinator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pm_project = self.project_manager.create_project(
             name=f"{novel_type}小说_{timestamp}",
-            description=f"类型：{novel_type}，主题：{theme or '未指定'}"
+            description=f"类型：{novel_type}，主题：{effective_theme or '未指定'}"
         )
         
         # 切换到新项目（这会同步所有管理器的目录）
@@ -1109,9 +1476,21 @@ class NovelCoordinator:
             status="planning",
             created_at=pm_project.created_at,
             updated_at=pm_project.updated_at,
-            total_chapters=volume_count * chapters_per_volume
+            total_chapters=effective_volume_count * effective_chapters_per_volume
         )
         
+        contract_payload = self._persist_creation_contract(
+            novel_type=novel_type,
+            theme=effective_theme,
+            requirements=effective_requirements,
+            protagonist=effective_protagonist,
+            plot_idea=effective_plot_idea,
+            volume_count=effective_volume_count,
+            chapters_per_volume=effective_chapters_per_volume,
+            session_context=session_context,
+            user_confirmed=True,
+        )
+
         # 初始化检查点
         self._update_checkpoint(state=WorkflowState.IDLE, current_chapter=0)
         await self._sync_memory_stage("init")
@@ -1121,84 +1500,55 @@ class NovelCoordinator:
             "message": f"开始创作小说...（项目ID: {pm_project.id}）",
             "progress": 0,
             "project_id": pm_project.id,
-            "project_dir": str(self.project_dir)
+            "project_dir": str(self.project_dir),
+            "creation_contract": contract_payload,
         }
         
         try:
             # === Stage 1: 世界观构建 ===
-            if await self._check_pause_cancel():
-                yield {"stage": "cancelled", "message": "创作已取消"}
+            world_progress, world_data, creation_context = await self._stage_worldbuilding(
+                novel_type=novel_type,
+                effective_theme=effective_theme,
+                effective_requirements=effective_requirements,
+                effective_protagonist=effective_protagonist,
+                effective_plot_idea=effective_plot_idea,
+                effective_volume_count=effective_volume_count,
+                effective_chapters_per_volume=effective_chapters_per_volume,
+                session_id=session_id,
+                collected_info=collected_info,
+                conversation_history=conversation_history,
+            )
+            for event in world_progress:
+                yield event
+            if world_progress and world_progress[0].get("stage") == "cancelled":
                 return
             
-            self._update_checkpoint(state=WorkflowState.WORLDBUILDING)
-            yield {"stage": "worldbuilding", "message": "正在构建世界观...", "progress": 5}
-            
-            world_result = await self.worldbuilder.execute({
-                "novel_type": novel_type,
-                "theme": theme,
-                "requirements": requirements
-            })
-            
-            world_data = world_result.get("world", {})
-            
-            # 保存到 ContextManager
-            self.context_manager.save("world", world_data, "world")
-            
-            # 更新世界管理器并保存到项目目录
-            if isinstance(world_data, dict):
-                from ..context.world_manager import WorldSetting
-                world_setting = WorldSetting(
-                    name=world_data.get("world_name", "未命名世界"),
-                    world_type=novel_type,
-                    power_system=world_data.get("power_system", {}),
-                    geography=world_data.get("geography", {}),
-                    factions=world_data.get("factions", []),
-                    rules=world_data.get("rules", []),
-                    culture=world_data.get("culture", {})
-                )
-                self.world_manager.set_world(world_setting)
-                logger.info(f"World saved to: {self.project_dir / 'worldbuilding.json'}")
-            
-            self._update_checkpoint(add_stage="worldbuilding")
-            await self._sync_memory_stage("worldbuilding")
-            yield {
-                "stage": "worldbuilding",
-                "message": "世界观构建完成",
-                "progress": 15,
-                "data": world_data
-            }
-            
+            # === Stage 1.5: 角色构建 ===
+            char_progress, built_characters = await self._stage_character_building(
+                world_data=world_data,
+                creation_context=creation_context,
+                novel_type=novel_type,
+                effective_theme=effective_theme,
+                effective_protagonist=effective_protagonist,
+                effective_plot_idea=effective_plot_idea,
+            )
+            for event in char_progress:
+                yield event
+
             # === Stage 2: 大纲规划 ===
-            if await self._check_pause_cancel():
-                yield {"stage": "cancelled", "message": "创作已取消"}
+            outline_progress, outline_data = await self._stage_outlining(
+                world_data=world_data,
+                creation_context=creation_context,
+                novel_type=novel_type,
+                effective_protagonist=effective_protagonist,
+                effective_plot_idea=effective_plot_idea,
+                effective_volume_count=effective_volume_count,
+                effective_chapters_per_volume=effective_chapters_per_volume,
+            )
+            for event in outline_progress:
+                yield event
+            if outline_progress and outline_progress[0].get("stage") == "cancelled":
                 return
-            
-            self._update_checkpoint(state=WorkflowState.OUTLINING)
-            yield {"stage": "outlining", "message": "正在规划故事大纲...", "progress": 20}
-            
-            outline_result = await self.outliner.execute({
-                "world": world_data,
-                "protagonist": protagonist,
-                "plot_idea": plot_idea,
-                "volume_count": volume_count,
-                "chapters_per_volume": chapters_per_volume
-            }, context={"world": world_data})
-            
-            outline_data = outline_result.get("outline", {})
-            self.context_manager.save("outline", outline_data, "plot")
-            
-            # 更新项目标题
-            if isinstance(outline_data, dict):
-                self.project.title = outline_data.get("title", f"{novel_type}小说")
-            
-            self._update_checkpoint(add_stage="outlining")
-            await self._sync_memory_stage("outlining")
-            yield {
-                "stage": "outlining",
-                "message": "故事大纲规划完成",
-                "progress": 30,
-                "data": outline_data
-            }
             
             # === Stage 3: 章节撰写 ===
             if await self._check_pause_cancel():
@@ -1220,27 +1570,15 @@ class NovelCoordinator:
             
             written_chapters = []
             
-            # 根据并行配置决定写作方式
-            if self.parallel_chapters > 1:
-                # 并行写作
-                async for progress_data in self._write_chapters_parallel(
-                    chapters, world_data, outline_data
-                ):
-                    yield progress_data
-                    if progress_data.get("stage") == "cancelled":
-                        return
-                    if progress_data.get("stage") == "chapter_complete":
-                        written_chapters.append(progress_data.get("chapter"))
-            else:
-                # 串行写作
-                async for progress_data in self._write_chapters_serial(
-                    chapters, world_data, outline_data
-                ):
-                    yield progress_data
-                    if progress_data.get("stage") == "cancelled":
-                        return
-                    if progress_data.get("stage") == "chapter_complete":
-                        written_chapters.append(progress_data.get("chapter"))
+            # 串行写作
+            async for progress_data in self._write_chapters_serial(
+                chapters, world_data, outline_data
+            ):
+                yield progress_data
+                if progress_data.get("stage") == "cancelled":
+                    return
+                if progress_data.get("stage") == "chapter_complete":
+                    written_chapters.append(progress_data.get("chapter"))
             
             await self._sync_memory_stage("writing")
 
@@ -1248,7 +1586,8 @@ class NovelCoordinator:
             self._update_checkpoint(state=WorkflowState.COMPLETED)
             self.project.status = "completed"
             self.project.updated_at = datetime.now().isoformat()
-            self.project.word_count = sum(len(ch.get("content", "")) for ch in written_chapters)
+            # 问题8修复：使用去空白字符统计中文字数
+            self.project.word_count = sum(len(re.sub(r"\s+", "", ch.get("content", ""))) for ch in written_chapters)
             
             # 保存完整小说
             novel_file = self.project_dir / f"{self.project.title}.txt"
@@ -1274,7 +1613,48 @@ class NovelCoordinator:
                 "error": str(e)
             }
             raise
-    
+
+    def _outline_to_project_rows(self, outline_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        chapters = self._extract_chapters(outline_data)
+        timestamp = datetime.now().isoformat()
+        rows: List[Dict[str, Any]] = []
+        for index, chapter in enumerate(chapters, start=1):
+            title = f"第{index}章"
+            summary = ""
+            if isinstance(chapter, dict):
+                title = str(chapter.get("title") or title).strip() or title
+                summary = str(
+                    chapter.get("summary")
+                    or chapter.get("outline")
+                    or chapter.get("description")
+                    or chapter.get("content")
+                    or ""
+                ).strip()
+            elif chapter is not None:
+                summary = str(chapter).strip()
+
+            rows.append(
+                {
+                    "chapter_number": index,
+                    "title": title,
+                    "summary": summary,
+                    "content": "",
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            )
+        return rows
+
+    def _persist_outline_rows(self, outline_rows: List[Dict[str, Any]]) -> Dict[str, str]:
+        outline_path = self.project_manager.get_project_data_path("outline")
+        existed_before = outline_path.exists()
+        self.project_manager.save_project_data("outline", outline_rows)
+        self._sync_outline_to_library(outline_rows)
+        return {
+            "outline_path": str(outline_path),
+            "outline_status": "updated" if existed_before else "created",
+        }
+
     async def _subscribe_all_agents(self):
         """让所有Agent订阅消息总线"""
         agents = [
@@ -1282,7 +1662,13 @@ class NovelCoordinator:
             self.outliner,
             self.chapter_writer,
             self.polisher,
-            self.evaluator
+            self.evaluator,
+            self.character_builder,
+            self.context_strategy,
+            self.content_reader,
+            self.content_expansion,
+            self.file_naming,
+            self.summary_orchestrator,
         ]
         
         for agent in agents:
@@ -1332,76 +1718,42 @@ class NovelCoordinator:
                 "chapter": chapter_data
             }
     
-    async def _write_chapters_parallel(
+    async def _run_autonomous_task(
         self,
-        chapters: List[Dict],
-        world_data: Dict,
-        outline_data: Dict
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """并行写作章节"""
-        total_chapters = len(chapters)
-        written_chapters: Dict[int, Dict] = {}
-        
-        # 分批处理
-        for batch_start in range(0, total_chapters, self.parallel_chapters):
-            if await self._check_pause_cancel():
-                yield {"stage": "cancelled", "message": "创作已取消"}
-                return
-            
-            batch_end = min(batch_start + self.parallel_chapters, total_chapters)
-            batch = chapters[batch_start:batch_end]
-            
-            progress = 35 + int(50 * (batch_start / total_chapters))
-            
-            yield {
-                "stage": "writing",
-                "message": f"正在并行撰写第 {batch_start + 1}-{batch_end} 章...",
-                "progress": progress,
-                "current_chapter": batch_start + 1,
-                "total_chapters": total_chapters
-            }
-            
-            # 并行执行这一批章节
-            tasks = []
-            for i, chapter_outline in enumerate(batch):
-                chapter_num = batch_start + i + 1
-                # 获取之前的章节用于上下文
-                prev_chapters = [written_chapters[j] for j in sorted(written_chapters.keys())]
-                tasks.append(
-                    self._write_single_chapter_internal(
-                        chapter_num, chapter_outline, prev_chapters
-                    )
-                )
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # 处理结果
-            for i, result in enumerate(results):
-                chapter_num = batch_start + i + 1
-                
-                if isinstance(result, Exception):
-                    logger.error(f"Chapter {chapter_num} failed: {result}")
-                    yield {
-                        "stage": "chapter_error",
-                        "message": f"第 {chapter_num} 章写作失败: {str(result)}",
-                        "chapter_number": chapter_num,
-                        "error": str(result)
-                    }
-                else:
-                    written_chapters[chapter_num] = result
-                    self.project.completed_chapters = max(
-                        self.project.completed_chapters, chapter_num
-                    )
-                    
-                    yield {
-                        "stage": "chapter_complete",
-                        "message": f"第 {chapter_num} 章完成",
-                        "progress": progress,
-                        "chapter": result
-                    }
-            
-            self._update_checkpoint(current_chapter=batch_end)
-    
+        *,
+        task_type: str,
+        input_data: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        fallback_agent: Any = None,
+        stage: str = "",
+        title: str = "",
+        description: str = "",
+        expected_outputs: Optional[List[str]] = None,
+        review_required: bool = False,
+    ) -> Dict[str, Any]:
+        """Phase 1 unified execution entry: explicit routing + context contract + fallback."""
+        return await self.agent_dispatcher.run_autonomous_task(
+            task_type=task_type,
+            input_data=input_data,
+            context=context,
+            fallback_agent=fallback_agent,
+            stage=stage,
+            title=title,
+            description=description,
+            expected_outputs=expected_outputs,
+            review_required=review_required,
+        )
+
+    def _resolve_chapter_market_results(
+        self,
+        chapter_market_results: Dict[str, Any],
+        chapter_num: int,
+        chapter_title: str,
+    ) -> Dict[str, Any]:
+        """Parse chapter task market results. Pure function in collab_services."""
+        from .collab_services import resolve_chapter_market_results as _resolve
+        return _resolve(chapter_market_results, chapter_num, chapter_title)
+
     async def _write_single_chapter_internal(
         self,
         chapter_num: int,
@@ -1410,10 +1762,12 @@ class NovelCoordinator:
     ) -> Dict[str, Any]:
         """写作单个章节的内部实现"""
         # 获取上下文
-        context = self.context_manager.get_relevant_context("ChapterWriter")
+        context = await self.context_manager.get_optimized_context("ChapterWriter")
         context["world"] = self.world_manager.get_world_context()
         context["characters"] = self.character_manager.get_character_context()
-        
+        context["eventlines"] = self._get_eventline_context()
+        context["project_dir"] = str(self.project_dir)
+
         if previous_chapters:
             context["previous_summary"] = self._summarize_chapter(
                 previous_chapters[-1].get("content", "")
@@ -1423,6 +1777,13 @@ class NovelCoordinator:
             chapter_outline=chapter_outline,
         )
 
+        chapter_title = chapter_outline.get("title", f"第{chapter_num}章")
+        chapter_outline_text = chapter_outline.get("summary", str(chapter_outline))
+        context["chapter_title"] = chapter_title
+        context["chapter_outline"] = chapter_outline_text
+        context["previous_chapters"] = list(previous_chapters or [])
+
+        # 问题4修复：将辅助记忆注入移到章节任务市场执行之前
         aux_query = self._build_aux_memory_query(chapter_num, chapter_outline, context)
         aux_injection = self._get_aux_memory_injection_context(aux_query)
         context["aux_memory"] = {
@@ -1432,31 +1793,46 @@ class NovelCoordinator:
             "count": aux_injection.get("count", 0),
             "mode": aux_injection.get("mode", "fast"),
         }
-        
-        # 撰写章节
-        chapter_result = await self.chapter_writer.execute({
-            "chapter_outline": chapter_outline.get("summary", str(chapter_outline)),
-            "chapter_title": chapter_outline.get("title", f"第{chapter_num}章"),
-            "chapter_number": chapter_num
-        }, context=context)
-        
-        chapter_content = chapter_result.get("content", "")
-        
-        # 评估与润色
-        eval_result = await self.evaluator.execute({
-            "content": chapter_content,
-            "chapter_outline": chapter_outline
-        }, context=context)
-        
-        evaluation = eval_result.get("evaluation", {})
-        
-        # 如果评估不通过，进行润色
-        if not evaluation.get("passed", True):
-            polish_result = await self.polisher.execute({
-                "content": chapter_content,
-                "feedback": json.dumps(evaluation.get("suggestions", []), ensure_ascii=False)
-            })
-            chapter_content = polish_result.get("content", chapter_content)
+
+        chapter_task_market = self._build_chapter_autonomous_task_pool(
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+            chapter_outline_text=chapter_outline_text,
+            base_context=context,
+        )
+        chapter_market_result = await self._execute_chapter_task_market(
+            chapter_num=chapter_num,
+            task_pool=chapter_task_market,
+            base_context=context,
+            fallback_agents={
+                "context_plan": self.context_strategy,
+                "content_read": self.content_reader,
+                "write_chapter": self.chapter_writer,
+                "evaluate_chapter": self.evaluator,
+                "polish_chapter": self.polisher,
+                "expand_content": self.content_expansion,
+                "summary_orchestrate": self.summary_orchestrator,
+            },
+        )
+        chapter_market_results = chapter_market_result.get("results", {})
+        # 问题2修复：使用 update 合并而非整体替换，避免丢失 world/characters/eventlines 等字段
+        market_context = chapter_market_result.get("context")
+        if isinstance(market_context, dict) and market_context:
+            context.update(market_context)
+
+        # 从章节任务市场结果中解析章节数据
+        resolved = self._resolve_chapter_market_results(
+            chapter_market_results=chapter_market_results,
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+        )
+        chapter_content = resolved["chapter_content"]
+        evaluation = resolved["evaluation"]
+        expanded_result = resolved["expanded_result"]
+        summary_result = resolved["summary_result"]
+        summary_payload = resolved["summary_payload"]
+        reader_result = resolved["reader_result"]
+        autonomy_trace = resolved["autonomy_trace"]
 
         plot_thread_result = await self._complete_plot_thread_for_chapter(
             chapter_num=chapter_num,
@@ -1464,23 +1840,66 @@ class NovelCoordinator:
             chapter_content=chapter_content,
             evaluation=evaluation,
         )
-        
+
+        file_naming_result = await self.file_naming.execute({
+            "chapter_number": chapter_num,
+            "chapter_title": chapter_title,
+            "content": chapter_content,
+        }, context=context)
+
+        normalized_word_count = int(
+            file_naming_result.get("word_count")
+            or resolved["normalized_word_count"]
+            or 0
+        )
+
         # 保存章节
         chapter_data = {
             "number": chapter_num,
-            "title": chapter_outline.get("title", f"第{chapter_num}章"),
+            "title": chapter_title,
             "content": chapter_content,
-            "word_count": len(chapter_content),
+            "word_count": normalized_word_count,
             "evaluation": evaluation,
             "plot_thread": plot_thread_result,
+            "suggested_filename": str(file_naming_result.get("filename") or ""),
+            "context_strategy": context.get("context_strategy", {}),
+            "content_reader_report": reader_result.get("report", []) if isinstance(reader_result, dict) else [],
+            "expanded": bool(expanded_result.get("expanded", False)) if isinstance(expanded_result, dict) else False,
+            "autonomy_trace": autonomy_trace,
         }
+        if isinstance(summary_result, dict) and summary_result:
+            chapter_data["stage_summary"] = str(summary_result.get("summary") or "")
         
         self.context_manager.save_chapter_result(
             chapter_num,
             chapter_content,
             self._summarize_chapter(chapter_content)
         )
-        
+
+        # 自动生成章节摘要（问题1修复：使用 await 替代 asyncio.run）
+        try:
+            from ..chapter_summary_service import (
+                get_auto_summary_enabled,
+                generate_chapter_summary,
+                save_chapter_summary_to_library,
+            )
+            if get_auto_summary_enabled(self.project_manager.current_project_id):
+                summary = await generate_chapter_summary(
+                    chapter_number=chapter_num,
+                    title=chapter_title,
+                    content=chapter_content,
+                )
+                save_chapter_summary_to_library(chapter_num, summary)
+        except Exception as e:
+            logger.warning(f"[Coordinator] Auto chapter summary failed: {e}")
+
+        if isinstance(summary_payload, dict) and summary_payload:
+            summary_persist_result = self.runtime_state_store.persist_stage_summary(
+                summary_payload,
+                chapter_data.get("stage_summary", ""),
+            )
+            chapter_data["stage_summary_file"] = str(summary_persist_result.get("summary_path") or "")
+
         return chapter_data
     
     async def resume_from_checkpoint(self) -> AsyncGenerator[Dict[str, Any], None]:
@@ -1503,9 +1922,12 @@ class NovelCoordinator:
         self._paused = False
         self._cancelled = False
         
-        # 恢复项目信息
+        # 恢复项目信息（问题3修复：过滤多余字段避免 TypeError）
         if self.checkpoint.project_data:
-            self.project = NovelProject(**self.checkpoint.project_data)
+            import dataclasses
+            valid_fields = {f.name for f in dataclasses.fields(NovelProject)}
+            filtered_data = {k: v for k, v in self.checkpoint.project_data.items() if k in valid_fields}
+            self.project = NovelProject(**filtered_data)
 
         await self._sync_memory_stage("resume")
         
@@ -1547,32 +1969,23 @@ class NovelCoordinator:
                 
                 written_chapters = []
                 
-                # 根据并行配置决定写作方式
-                if self.parallel_chapters > 1:
-                    async for progress_data in self._write_chapters_parallel(
-                        chapters, world_data, outline_data
-                    ):
-                        yield progress_data
-                        if progress_data.get("stage") == "cancelled":
-                            return
-                        if progress_data.get("stage") == "chapter_complete":
-                            written_chapters.append(progress_data.get("chapter"))
-                else:
-                    async for progress_data in self._write_chapters_serial(
-                        chapters, world_data, outline_data
-                    ):
-                        yield progress_data
-                        if progress_data.get("stage") == "cancelled":
-                            return
-                        if progress_data.get("stage") == "chapter_complete":
-                            written_chapters.append(progress_data.get("chapter"))
+                # 串行写作
+                async for progress_data in self._write_chapters_serial(
+                    chapters, world_data, outline_data
+                ):
+                    yield progress_data
+                    if progress_data.get("stage") == "cancelled":
+                        return
+                    if progress_data.get("stage") == "chapter_complete":
+                        written_chapters.append(progress_data.get("chapter"))
                 
                 # 完成
                 await self._sync_memory_stage("writing")
                 self._update_checkpoint(state=WorkflowState.COMPLETED)
                 self.project.status = "completed"
                 self.project.updated_at = datetime.now().isoformat()
-                self.project.word_count = sum(len(ch.get("content", "")) for ch in written_chapters)
+                # 问题8修复：使用去空白字符统计中文字数
+                self.project.word_count = sum(len(re.sub(r"\s+", "", ch.get("content", ""))) for ch in written_chapters)
                 
                 # 保存小说
                 novel_file = self.project_dir / f"{self.project.title}.txt"
@@ -1652,50 +2065,58 @@ class NovelCoordinator:
         trends_platforms: Optional[List[str]] = None,
         trends_query: str = "",
     ) -> Dict[str, Any]:
-        """撰写单个章节"""
-        context = self.context_manager.get_chapter_context(chapter_number)
-        context["world"] = self.world_manager.get_world_context()
-        context["characters"] = self.character_manager.get_character_context()
+        """撰写单个章节（走统一协作子Agent闭环）。"""
         outline_payload = {
-            "title": chapter_title or f"Chapter {chapter_number}",
+            "title": chapter_title or f"第{chapter_number}章",
             "summary": chapter_outline,
         }
-        context["plot_thread"] = await self._plan_plot_thread_for_chapter(
+
+        previous_chapters: List[Dict[str, Any]] = []
+        if chapter_number > 1:
+            previous_summary = self.context_manager.get(f"chapter_{chapter_number - 1}_summary", "")
+            if previous_summary:
+                previous_chapters.append({
+                    "number": chapter_number - 1,
+                    "title": f"第{chapter_number - 1}章",
+                    "content": previous_summary,
+                })
+
+        result = await self._write_single_chapter_internal(
             chapter_num=chapter_number,
             chapter_outline=outline_payload,
+            previous_chapters=previous_chapters,
         )
 
-        aux_query = f"{chapter_title or ''} {chapter_outline} chapter:{chapter_number}".strip()
-        aux_injection = self._get_aux_memory_injection_context(aux_query)
-        context["aux_memory"] = {
-            "enabled": aux_injection.get("enabled", False),
-            "items": aux_injection.get("items", []),
-            "prompt_preview": aux_injection.get("prompt_preview", ""),
-            "count": aux_injection.get("count", 0),
-            "mode": aux_injection.get("mode", "fast"),
-        }
-
-        trends_data: List[Dict[str, Any]] = []
         if enable_trends:
             trends_data = await self._search_trends_for_collab(trends_platforms, limit=5)
             if trends_data:
                 logger.debug(
                     f"[Coordinator] 协作写章注入热点: count={len(trends_data)}, query={trends_query[:80]}"
                 )
-        context["trends_data"] = trends_data
-        
-        result = await self.chapter_writer.execute({
-            "chapter_outline": chapter_outline,
-            "chapter_title": chapter_title or f"第{chapter_number}章",
-            "chapter_number": chapter_number
-        }, context=context)
-        await self._complete_plot_thread_for_chapter(
-            chapter_num=chapter_number,
-            chapter_outline=outline_payload,
-            chapter_content=result.get("content", ""),
-            evaluation={},
-        )
+                result["trends_data"] = trends_data
+
         return result
+
+    async def write_chapter_from_context(
+        self,
+        chapter_number: int,
+        chapter_outline: Dict[str, Any],
+        previous_chapters: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """公共章节写作接口，供外部在保留上下文时调用。"""
+        return await self._write_single_chapter_internal(
+            chapter_num=chapter_number,
+            chapter_outline=chapter_outline,
+            previous_chapters=previous_chapters,
+        )
+
+    def extract_outline_chapters(self, outline_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """公共大纲章节提取接口。"""
+        return self._extract_chapters(outline_data)
+
+    def save_compiled_novel(self, file_path: Path, chapters: List[Dict[str, Any]]) -> None:
+        """公共合集保存接口。"""
+        self._save_novel(file_path, chapters)
     
     async def continue_chapter(
         self,
@@ -1711,6 +2132,7 @@ class NovelCoordinator:
         context = self.context_manager.get_chapter_context(chapter_index + 1)
         context["world"] = self.world_manager.get_world_context()
         context["characters"] = self.character_manager.get_character_context()
+        context["eventlines"] = self._get_eventline_context()
         context["existing_content"] = existing_content
 
         aux_query = f"{chapter_title or ''} {existing_content[-500:]} chapter:{chapter_index + 1}".strip()
@@ -1739,6 +2161,15 @@ class NovelCoordinator:
 
 已有内容：
 {existing_content}
+
+世界设定摘要：
+{context.get("world", "暂无世界设定")}
+
+角色摘要：
+{context.get("characters", "暂无角色")}
+
+事件线摘要：
+{context.get("eventlines", "暂无事件线")}
 
 辅助记忆约束（低优先级）：
 {context.get("aux_memory", {}).get("prompt_preview", "未启用辅助记忆或无匹配")}
@@ -1769,6 +2200,26 @@ class NovelCoordinator:
                 "error": str(e),
                 "content": ""
             }
+
+    def _get_eventline_context(self, limit: int = 3) -> str:
+        rows = self.project_manager.load_project_data("eventlines")
+        if not isinstance(rows, list) or not rows:
+            return "暂无事件线"
+
+        lines = ["【事件线】"]
+        count = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "未命名事件线").strip() or "未命名事件线"
+            conflict = str(row.get("conflict") or row.get("description") or "").strip()
+            status = str(row.get("status") or "").strip()
+            summary = "｜".join(part for part in [conflict, status] if part)
+            lines.append(f"- {name}" + (f"：{summary}" if summary else ""))
+            count += 1
+            if count >= limit:
+                break
+        return "\n".join(lines) if count else "暂无事件线"
     
     async def polish_content(
         self,
@@ -1834,10 +2285,28 @@ class NovelCoordinator:
         return chapters
     
     def _summarize_chapter(self, content: str, max_length: int = WRITING_CONFIG.SUMMARY_MAX_LENGTH) -> str:
-        """章节摘要"""
-        if len(content) <= max_length:
-            return content
-        return content[:max_length] + "..."
+        """章节摘要（问题5修复：提取关键情节而非纯截断）"""
+        if not content or not content.strip():
+            return ""
+        # 去除空白后统计实际字数
+        clean = re.sub(r"\s+", "", content)
+        if len(clean) <= max_length:
+            return content.strip()
+        # 按段落分割，优先保留对话和关键段落
+        paragraphs = [p.strip() for p in content.split("\n") if p.strip()]
+        summary_parts: List[str] = []
+        current_len = 0
+        for para in paragraphs:
+            para_clean_len = len(re.sub(r"\s+", "", para))
+            if current_len + para_clean_len > max_length:
+                # 最后一段如果太长，截取到目标长度
+                remaining = max_length - current_len
+                if remaining > 20:
+                    summary_parts.append(para[:remaining])
+                break
+            summary_parts.append(para)
+            current_len += para_clean_len
+        return "\n".join(summary_parts) if summary_parts else clean[:max_length]
     
     def _save_novel(self, file_path: Path, chapters: List[Dict]) -> None:
         """保存小说到文件"""
@@ -1856,21 +2325,34 @@ class NovelCoordinator:
             content_parts.append(chapter_content)
             content_parts.append("\n\n" + "-" * 30 + "\n")
         
-        file_path.write_text("".join(content_parts), encoding="utf-8")
+        old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else None
+        atomic_write_text(file_path, "".join(content_parts), old_content=old_content)
         logger.info(f"Novel saved to: {file_path}")
     
+    def get_candidate_agents_for_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """查询指定任务的候选 Agent 列表。"""
+        return self.collab_agent_registry.find_candidates(task)
+
     def get_project_status(self) -> Dict[str, Any]:
         """获取项目状态"""
+        workflow_state = self.workflow_state.value
+        if self._cancelled:
+            workflow_state = "cancelled"
+        elif self._paused:
+            workflow_state = WorkflowState.PAUSED.value
         return {
             "project": self.project.to_dict() if self.project else None,
-            "workflow_state": self.workflow_state.value,
+            "workflow_state": workflow_state,
             "checkpoint": self.checkpoint.to_dict() if self.checkpoint else None,
             "world": self.world_manager.export_for_llm(),
             "characters": self.character_manager.export_for_llm(),
             "contexts": self.context_manager.export_all(),
             "plot_thread_state": self._plot_thread_machine.snapshot(),
             "metrics": self.metrics.get_report(),
-            "context_stats": self.context_manager.get_stats()
+            "context_stats": self.context_manager.get_stats(),
+            "capability_registry": self.capability_registry.to_dict(),
+            "collab_agent_registry": self.collab_agent_registry.to_dict(),
+            "collab_service_registry": self.collab_service_registry.to_dict(),
         }
     
     def get_metrics_report(self) -> Dict[str, Any]:
@@ -1884,32 +2366,7 @@ class NovelCoordinator:
 
     def get_memory_diagnostics(self) -> Dict[str, Any]:
         """获取记忆契约与同步诊断信息"""
-        meta_file = self._memory_meta_file()
-        snapshot_file = self._memory_snapshot_file()
-
-        diagnostics = {
-            "contract": self._build_memory_contract(),
-            "memory_agent_count": len(self._memory_agent_ids),
-            "memory_agents": list(self._memory_agent_ids.keys()),
-            "meta_file": str(meta_file),
-            "meta_exists": meta_file.exists(),
-            "snapshot_file": str(snapshot_file),
-            "snapshot_exists": snapshot_file.exists(),
-        }
-
-        if meta_file.exists():
-            try:
-                diagnostics["meta"] = json.loads(meta_file.read_text(encoding="utf-8"))
-            except Exception as e:
-                diagnostics["meta_error"] = str(e)
-
-        if snapshot_file.exists():
-            try:
-                diagnostics["snapshot"] = json.loads(snapshot_file.read_text(encoding="utf-8"))
-            except Exception as e:
-                diagnostics["snapshot_error"] = str(e)
-
-        return diagnostics
+        return self.memory_sync_manager.diagnostics(self._memory_agent_ids)
 
 
-# 模块职责说明：实现协调者-工作者多智能体协作模式，管理小说创作的完整工作流、检查点保存和并行写作。
+# 模块职责说明：实现协调者-工作者多智能体协作模式，管理小说创作的完整工作流、检查点保存和串行章节写作。

@@ -5,11 +5,12 @@
 """
 
 import json
+import copy
 import logging
 import os
 import time
 import re
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields as dc_fields
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 _PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MAX_CONVERSATION_HISTORY = 200
 
 
 @dataclass
@@ -51,7 +53,9 @@ class ChatSessionState:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ChatSessionState":
-        return cls(**data)
+        known = {f.name for f in dc_fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
     def is_expired(self) -> bool:
         return int(time.time()) >= self.expires_at
@@ -74,6 +78,7 @@ class ChatSessionStore:
         self._cache: Dict[str, ChatSessionState] = {}
         self._locks: Dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
+        self._MAX_LOCK_POOL_SIZE = 500
 
         logger.info(f"[ChatSessionStore] 初始化完成，目录: {self.storage_dir}")
 
@@ -82,6 +87,19 @@ class ChatSessionStore:
         with self._locks_guard:
             lock = self._locks.get(key)
             if lock is None:
+                if len(self._locks) >= self._MAX_LOCK_POOL_SIZE:
+                    evicted = False
+                    for candidate_key in list(self._locks):
+                        candidate = self._locks[candidate_key]
+                        if candidate.acquire(blocking=False):
+                            candidate.release()
+                            del self._locks[candidate_key]
+                            evicted = True
+                            break
+                    if not evicted:
+                        logger.warning(
+                            f"[ChatSessionStore] 锁池已满({self._MAX_LOCK_POOL_SIZE})且全部活跃，允许临时超出"
+                        )
                 lock = threading.RLock()
                 self._locks[key] = lock
             return lock
@@ -131,8 +149,10 @@ class ChatSessionStore:
             with lock:
                 state.refresh_ttl()
                 state.version = max(0, int(getattr(state, "version", 0))) + 1
+                if len(state.conversation_history) > MAX_CONVERSATION_HISTORY:
+                    state.conversation_history = state.conversation_history[-MAX_CONVERSATION_HISTORY:]
                 key = self._cache_key(state.session_id, state.project_id)
-                self._cache[key] = state
+                self._cache[key] = copy.deepcopy(state)
 
                 path = self._get_session_path(state.session_id, state.project_id)
                 temp = path.with_suffix(f".tmp.{int(time.time() * 1000)}")
@@ -162,7 +182,7 @@ class ChatSessionStore:
                 if state.is_expired():
                     self.delete(session_id, project_id)
                     return None
-                return state
+                return copy.deepcopy(state)
 
             path = self._get_session_path(session_id, project_id)
             if not path.exists():
@@ -176,7 +196,7 @@ class ChatSessionStore:
                     return None
 
                 self._cache[key] = state
-                return state
+                return copy.deepcopy(state)
             except Exception as e:
                 logger.error(f"[ChatSessionStore] 加载失败: {e}")
                 return None
@@ -195,8 +215,6 @@ class ChatSessionStore:
                 if path.exists():
                     path.unlink()
 
-                with self._locks_guard:
-                    self._locks.pop(key, None)
                 return True
         except ValueError as e:
             logger.warning(f"[ChatSessionStore] 非法会话标识，删除拒绝: {e}")
@@ -229,6 +247,32 @@ class ChatSessionStore:
                 continue
 
         return deleted
+
+
+    def clear_project_cache(self, project_id: str = "") -> int:
+        """仅清理指定项目作用域的内存缓存与锁，不删除磁盘文件。"""
+        try:
+            safe_project_id = self._validate_path_component(project_id, "project_id", allow_empty=True)
+        except ValueError as e:
+            logger.warning(f"[ChatSessionStore] 非法项目标识，清理缓存拒绝: {e}")
+            return 0
+
+        scope = safe_project_id or "default"
+        prefix = f"{scope}::"
+        removed = 0
+
+        for key in list(self._cache.keys()):
+            if key.startswith(prefix):
+                self._cache.pop(key, None)
+                removed += 1
+
+        with self._locks_guard:
+            for key in list(self._locks.keys()):
+                if key.startswith(prefix):
+                    self._locks.pop(key, None)
+
+        logger.info(f"[ChatSessionStore] 已清理项目缓存: project_id={safe_project_id}, removed={removed}")
+        return removed
 
 
 _chat_session_store: Optional[ChatSessionStore] = None

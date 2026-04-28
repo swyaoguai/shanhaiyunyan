@@ -4,7 +4,7 @@
 """
 
 from typing import Dict, Any, Optional
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentCapability
 from ..constants import AGENT_TEMPERATURE
 
 
@@ -20,6 +20,20 @@ class PolisherAgent(BaseAgent):
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import POLISHER_PROMPT
         return POLISHER_PROMPT
+
+    def get_capabilities(self) -> AgentCapability:
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=["polish_chapter", "revise_content"],
+            accept_task_types=["polish_chapter"],
+            required_inputs=["content", "feedback"],
+            produced_outputs=["content"],
+            priority=85,
+            max_concurrency=2,
+            metadata={
+                "stage": "polishing",
+            },
+        )
     
     async def execute(
         self, 

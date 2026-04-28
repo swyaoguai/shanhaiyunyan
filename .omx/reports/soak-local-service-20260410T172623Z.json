@@ -1,0 +1,63 @@
+{
+  "base_url": "http://127.0.0.1:56264",
+  "duration_seconds": 600,
+  "uptime_seconds": 609.976,
+  "stats": {
+    "status": {
+      "name": "status",
+      "count": 594,
+      "failures": 0,
+      "avg_ms": 2.609,
+      "max_ms": 69.702
+    },
+    "projects": {
+      "name": "projects",
+      "count": 594,
+      "failures": 0,
+      "avg_ms": 1.709,
+      "max_ms": 12.225
+    },
+    "chat_sessions_list": {
+      "name": "chat_sessions_list",
+      "count": 2308,
+      "failures": 0,
+      "avg_ms": 3.32,
+      "max_ms": 69.922
+    },
+    "chat_session_create": {
+      "name": "chat_session_create",
+      "count": 2308,
+      "failures": 0,
+      "avg_ms": 2.445,
+      "max_ms": 31.054
+    },
+    "chat_history": {
+      "name": "chat_history",
+      "count": 2308,
+      "failures": 0,
+      "avg_ms": 2.075,
+      "max_ms": 51.771
+    },
+    "chat_workflow_status": {
+      "name": "chat_workflow_status",
+      "count": 2308,
+      "failures": 0,
+      "avg_ms": 1.951,
+      "max_ms": 22.876
+    },
+    "chat_reset": {
+      "name": "chat_reset",
+      "count": 2308,
+      "failures": 0,
+      "avg_ms": 1.846,
+      "max_ms": 22.973
+    },
+    "websocket_connect": {
+      "name": "websocket_connect",
+      "count": 298,
+      "failures": 0,
+      "avg_ms": 4.718,
+      "max_ms": 67.66
+    }
+  }
+}

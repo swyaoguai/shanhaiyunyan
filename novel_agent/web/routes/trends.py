@@ -25,8 +25,7 @@ TRENDS_CONFIG_DEFAULTS = {
     "auto_refresh": False,
     "refresh_interval": 300,
     "default_platforms": [],
-    "show_in_infinite_write": True,
-    "show_in_multi_agent": True
+    "show_in_infinite_write": True
 }
 
 # 平台ID到Skill方法名称的映射
@@ -273,8 +272,6 @@ async def save_trends_config(request: TrendsConfigRequest):
         logger.info(f"[TrendsConfig] 正在更新 default_platforms 为: {request.default_platforms}")
     if request.show_in_infinite_write is not None:
         config_data["show_in_infinite_write"] = request.show_in_infinite_write
-    if request.show_in_multi_agent is not None:
-        config_data["show_in_multi_agent"] = request.show_in_multi_agent
     
     for key, default_value in TRENDS_CONFIG_DEFAULTS.items():
         if key not in config_data:
@@ -320,7 +317,6 @@ async def save_trends_visibility(request: TrendsVisibilityRequest):
             logger.error(f"[TrendsVisibility] 加载配置失败: {e}")
     
     config_data["show_in_infinite_write"] = request.show_in_infinite_write
-    config_data["show_in_multi_agent"] = request.show_in_multi_agent
     
     for key, default_value in TRENDS_CONFIG_DEFAULTS.items():
         if key not in config_data:

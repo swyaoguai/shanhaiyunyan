@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import json
 
+from ..utils.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,7 +22,9 @@ class ConfigValidationError(Exception):
 class ConfigValidator:
     """配置验证器"""
 
-    def __init__(self):
+    def __init__(self, app_dir: Optional[Path] = None, project_root: Optional[Path] = None):
+        self.app_dir = app_dir or Path(__file__).resolve().parent.parent
+        self.project_root = project_root or self.app_dir.parent
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
@@ -57,7 +61,7 @@ class ConfigValidator:
                 self.errors.append(f"无法创建输出目录 {config.paths.output_dir}: {e}")
 
         # 检查数据目录
-        data_dir = Path(__file__).parent.parent / "data"
+        data_dir = self.app_dir / "data"
         if not data_dir.exists():
             try:
                 data_dir.mkdir(parents=True, exist_ok=True)
@@ -67,7 +71,7 @@ class ConfigValidator:
 
     def _validate_knowledge_base(self):
         """验证知识库配置"""
-        config_path = Path(__file__).parent.parent / "data" / "knowledge_base_config.json"
+        config_path = self.app_dir / "data" / "knowledge_base_config.json"
 
         if not config_path.exists():
             self.warnings.append(
@@ -111,7 +115,7 @@ class ConfigValidator:
 
     def _validate_skills(self):
         """验证 Skill 配置"""
-        skills_dir = Path(__file__).parent.parent.parent / "skills"
+        skills_dir = self.project_root / "skills"
 
         if not skills_dir.exists():
             self.warnings.append(
@@ -130,9 +134,21 @@ class ConfigValidator:
                 example_config = skill_dir / "config.example.json"
 
                 if not config_file.exists() and example_config.exists():
+                    if self._bootstrap_config_from_example(
+                        config_file=config_file,
+                        example_config=example_config,
+                        display_name=f"Skill '{skill_dir.name}'"
+                    ):
+                        continue
+
+                if not config_file.exists() and example_config.exists():
                     self.warnings.append(
                         f"Skill '{skill_dir.name}' 配置文件不存在。"
                         f"请复制 {example_config} 到 {config_file} 并配置。"
+                    )
+                elif not config_file.exists():
+                    self.warnings.append(
+                        f"Skill '{skill_dir.name}' 缺少配置文件，且未提供 config.example.json 模板。"
                     )
 
         if available_skills:
@@ -156,6 +172,29 @@ class ConfigValidator:
             self.warnings.append(
                 f"端口 {port} 已被占用。系统将自动尝试其他端口。"
             )
+
+    def _bootstrap_config_from_example(
+        self,
+        config_file: Path,
+        example_config: Path,
+        display_name: str,
+    ) -> bool:
+        """当配置缺失时，尝试从示例文件自动创建。"""
+        try:
+            content = example_config.read_text(encoding="utf-8")
+            atomic_write_text(config_file, content)
+            self.warnings.append(
+                f"{display_name} 配置文件缺失，已根据示例自动创建: {config_file}。"
+                "请按需补充真实配置。"
+            )
+            logger.info(f"{display_name} 默认配置已创建: {config_file}")
+            return True
+        except Exception as e:
+            self.warnings.append(
+                f"{display_name} 配置文件不存在，且自动创建失败。"
+                f"请复制 {example_config} 到 {config_file} 并配置。错误: {e}"
+            )
+            return False
 
 
 def validate_startup_config() -> bool:

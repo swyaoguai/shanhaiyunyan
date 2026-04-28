@@ -193,7 +193,7 @@ function bindBackupEvents() {
         
         try {
             showToast('正在导入备份...');
-            const response = await fetch('/api/backup/import', {
+            const response = await fetch(normalizeApiUrl('/api/v1/backup/import'), {
                 method: 'POST',
                 body: formData
             });

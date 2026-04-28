@@ -12,7 +12,8 @@ from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, asdict, field
 
 from .constants import LLM_DEFAULTS
-from .utils.atomic_write import atomic_write_json
+from .utils.llm_params import normalize_max_tokens
+from .utils.atomic_write import atomic_write_json, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,62 @@ class AgentConfigManager:
             "description": "富有创造力的长篇创作专家，擅长基于已有内容进行连续性创作。能够保持故事连贯性、维持人物性格一致性、推进情节发展，创作出自然流畅的续写内容。",
             "recommended_models": ["gpt-4", "claude-3-opus", "gemini-pro"],
             "default_temperature": 0.8
+        },
+        "CharacterBuilder": {
+            "display_name": "角色构建师",
+            "description": "专业角色设定师，负责根据讨论内容与世界观生成结构化角色卡草稿，适合定义主角、反派与关键配角的人设。",
+            "recommended_models": ["gpt-5.4", "gpt-4", "claude-3-opus"],
+            "default_temperature": 0.4
+        },
+        "EventlineBuilder": {
+            "display_name": "事件线构建师",
+            "description": "负责从大纲与讨论中提炼主线、支线和人物线，生成可追踪的事件线结构。",
+            "recommended_models": ["gpt-5.4", "gpt-4", "claude-3-opus"],
+            "default_temperature": 0.5
+        },
+        "DetailOutlineBuilder": {
+            "display_name": "细纲构建师",
+            "description": "负责把章节大纲进一步细化为场景目标、冲突和推进要点，形成可执行细纲。",
+            "recommended_models": ["gpt-5.4", "gpt-4", "claude-3-opus"],
+            "default_temperature": 0.5
+        },
+        "ChapterSettingBuilder": {
+            "display_name": "章纲构建师",
+            "description": "负责生成章节写作设定卡，包括本章目标、关键事件与结尾钩子。",
+            "recommended_models": ["gpt-5.4", "gpt-4", "claude-3-opus"],
+            "default_temperature": 0.5
+        },
+        "ContentExpansion": {
+            "display_name": "内容扩展师",
+            "description": "高级辅助 Agent，用于在不破坏原意的前提下扩写内容与补足细节。",
+            "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-sonnet"],
+            "default_temperature": 0.7
+        },
+        "SummaryOrchestrator": {
+            "display_name": "摘要编排器",
+            "description": "高级辅助 Agent，用于整理、压缩和编排长上下文摘要，适合开发者精调。",
+            "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-sonnet"],
+            "default_temperature": 0.4
         }
+    }
+
+    USER_VISIBLE_AGENT_NAMES = {
+        "Communicator",
+        "Worldbuilder",
+        "Outliner",
+        "ChapterWriter",
+        "Polisher",
+        "Evaluator",
+        "ContinuousWriter",
+        "CharacterBuilder",
+        "EventlineBuilder",
+        "DetailOutlineBuilder",
+        "ChapterSettingBuilder",
+    }
+
+    ADVANCED_AGENT_NAMES = {
+        "ContentExpansion",
+        "SummaryOrchestrator",
     }
     
     def __init__(self, config_dir: Optional[Path] = None):
@@ -190,6 +246,11 @@ class AgentConfigManager:
         self.multi_config: MultiAPIConfig = MultiAPIConfig()
         self._load_configs()
         self._load_global_config()
+
+    @staticmethod
+    def _normalize_config_max_tokens(max_tokens: Any, *, source: str) -> int:
+        """Normalize persisted max_tokens values to a provider-safe range."""
+        return normalize_max_tokens(max_tokens, source=source)
     
     def _load_configs(self) -> None:
         """从文件加载配置"""
@@ -200,6 +261,10 @@ class AgentConfigManager:
                     # 兼容旧版本配置，添加use_global字段
                     if 'use_global' not in cfg_data:
                         cfg_data['use_global'] = True
+                    cfg_data['max_tokens'] = self._normalize_config_max_tokens(
+                        cfg_data.get('max_tokens'),
+                        source=f"AgentConfig:{name}",
+                    )
                     self.configs[name] = AgentModelConfig(**cfg_data)
             except Exception as e:
                 logger.warning(f"Failed to load agent configs: {e}")
@@ -225,6 +290,10 @@ class AgentConfigManager:
                     # 新格式：多配置
                     configs = []
                     for cfg_data in data.get("configs", []):
+                        cfg_data["max_tokens"] = self._normalize_config_max_tokens(
+                            cfg_data.get("max_tokens"),
+                            source=f"GlobalAPIConfig:{cfg_data.get('name') or 'unnamed'}",
+                        )
                         configs.append(APIConfigItem(**cfg_data))
                     self.multi_config = MultiAPIConfig(
                         configs=configs,
@@ -235,6 +304,10 @@ class AgentConfigManager:
                     self._sync_global_from_multi()
                 else:
                     # 旧格式：单配置（向后兼容）
+                    data["max_tokens"] = self._normalize_config_max_tokens(
+                        data.get("max_tokens"),
+                        source="GlobalAPIConfig:legacy",
+                    )
                     self.global_config = GlobalAPIConfig(**data)
                     # 迁移到新格式
                     self._migrate_to_multi_config()
@@ -374,6 +447,7 @@ class AgentConfigManager:
                           model: str = "", temperature: float = LLM_DEFAULTS.TEMPERATURE,
                           max_tokens: int = LLM_DEFAULTS.MAX_TOKENS) -> GlobalAPIConfig:
         """设置全局API配置（兼容接口，更新当前激活的配置）"""
+        normalized_max_tokens = self._normalize_config_max_tokens(max_tokens, source="GlobalAPIConfig:set")
         active = self.multi_config.get_active_config()
         if active:
             # 更新现有配置
@@ -382,7 +456,7 @@ class AgentConfigManager:
             if model and model not in active.models:
                 active.models.append(model)
             active.temperature = temperature
-            active.max_tokens = max_tokens
+            active.max_tokens = normalized_max_tokens
             self.multi_config.active_model = model
         else:
             # 创建新配置
@@ -392,7 +466,7 @@ class AgentConfigManager:
                 api_key=api_key,
                 models=[model] if model else [],
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=normalized_max_tokens
             )
             self.multi_config.configs.append(config_item)
             self.multi_config.active_config_id = config_item.id
@@ -408,13 +482,14 @@ class AgentConfigManager:
                        models: List[str], temperature: float = LLM_DEFAULTS.TEMPERATURE,
                        max_tokens: int = LLM_DEFAULTS.MAX_TOKENS) -> APIConfigItem:
         """添加新的API配置"""
+        normalized_max_tokens = self._normalize_config_max_tokens(max_tokens, source=f"APIConfig:add:{name}")
         config_item = APIConfigItem(
             name=name,
             api_base=api_base,
             api_key=api_key,
             models=models,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=normalized_max_tokens
         )
         self.multi_config.configs.append(config_item)
         
@@ -434,6 +509,11 @@ class AgentConfigManager:
             if config.id == config_id:
                 for key, value in kwargs.items():
                     if hasattr(config, key):
+                        if key == "max_tokens":
+                            value = self._normalize_config_max_tokens(
+                                value,
+                                source=f"APIConfig:update:{config.name or config.id}",
+                            )
                         setattr(config, key, value)
                 self._sync_global_from_multi()
                 # 如果更新的是当前激活的配置，同步到.env文件
@@ -631,16 +711,27 @@ class AgentConfigManager:
         config = self.get_config(agent_name)
         for key, value in kwargs.items():
             if hasattr(config, key):
+                if key == "max_tokens":
+                    value = self._normalize_config_max_tokens(value, source=f"AgentConfig:update:{agent_name}")
                 setattr(config, key, value)
         self._save_configs()
         return config
     
-    def list_agents(self) -> List[Dict]:
+    def is_user_visible_agent(self, agent_name: str) -> bool:
+        return str(agent_name or "").strip() in self.USER_VISIBLE_AGENT_NAMES
+
+    def is_advanced_agent(self, agent_name: str) -> bool:
+        return str(agent_name or "").strip() in self.ADVANCED_AGENT_NAMES
+
+    def list_agents(self, *, include_advanced: bool = False) -> List[Dict]:
         """列出所有Agent及其配置状态"""
         result = []
         global_configured = self.global_config.is_configured()
         
         for agent_name in self.AGENT_DEFINITIONS:
+            if not self.is_user_visible_agent(agent_name):
+                if not include_advanced or not self.is_advanced_agent(agent_name):
+                    continue
             config = self.get_config(agent_name)
             definition = self.AGENT_DEFINITIONS[agent_name]
             
@@ -677,7 +768,8 @@ class AgentConfigManager:
                 "use_global": config.use_global,
                 "global_configured": global_configured,
                 "temperature": effective_temperature,
-                "max_tokens": effective_max_tokens
+                "max_tokens": effective_max_tokens,
+                "visibility": "advanced" if self.is_advanced_agent(agent_name) and not self.is_user_visible_agent(agent_name) else "user",
             })
         return result
     

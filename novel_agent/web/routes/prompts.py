@@ -4,7 +4,7 @@
 包含Agent提示词的查询、保存、删除和重载功能。
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..models.requests import SavePromptRequest
@@ -12,14 +12,21 @@ from ..models.requests import SavePromptRequest
 router = APIRouter()
 
 
+def _ensure_prompt_agent_visible(pm, agent_type: str, *, include_advanced: bool = False) -> None:
+    normalized = str(agent_type or "").strip()
+    is_visible = pm.is_user_visible_agent(normalized) or (include_advanced and pm.is_advanced_agent(normalized))
+    if not normalized or normalized.startswith('_') or not is_visible:
+        raise HTTPException(status_code=404, detail=f"普通设置中不可访问的Agent类型: {agent_type}")
+
+
 @router.get("/prompts")
-async def list_prompts():
+async def list_prompts(include_advanced: bool = Query(False)):
     """列出所有Agent类型及其可用的任务提示词"""
     try:
         from ...prompts.prompt_manager import get_prompt_manager
         
         pm = get_prompt_manager()
-        agents = pm.list_agents()
+        agents = pm.list_agents(include_advanced=include_advanced)
         
         return JSONResponse({
             "success": True,
@@ -34,18 +41,13 @@ async def list_prompts():
 
 
 @router.get("/prompts/{agent_type}")
-async def get_agent_prompts(agent_type: str):
+async def get_agent_prompts(agent_type: str, include_advanced: bool = Query(False)):
     """获取指定Agent的所有提示词"""
     try:
         from ...prompts.prompt_manager import get_prompt_manager
         
         pm = get_prompt_manager()
-        
-        if agent_type.startswith('_'):
-            return JSONResponse({
-                "success": False,
-                "error": f"无效的Agent类型: {agent_type}"
-            })
+        _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
         
         system_prompt = pm.get_system_prompt_raw(agent_type)
         tasks = pm.list_tasks(agent_type)
@@ -74,11 +76,12 @@ async def get_agent_prompts(agent_type: str):
 
 
 @router.get("/prompts/{agent_type}/{task_name}")
-async def get_task_prompt(agent_type: str, task_name: str):
+async def get_task_prompt(agent_type: str, task_name: str, include_advanced: bool = Query(False)):
     """获取指定任务的提示词"""
     from ...prompts.prompt_manager import get_prompt_manager
     
     pm = get_prompt_manager()
+    _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
     
     try:
         prompt = pm.get_task_prompt(agent_type, task_name)
@@ -102,11 +105,12 @@ async def get_task_prompt(agent_type: str, task_name: str):
 
 
 @router.post("/prompts/{agent_type}/{task_name}")
-async def save_custom_prompt(agent_type: str, task_name: str, request: SavePromptRequest):
+async def save_custom_prompt(agent_type: str, task_name: str, request: SavePromptRequest, include_advanced: bool = Query(False)):
     """保存自定义提示词"""
     from ...prompts.prompt_manager import get_prompt_manager
     
     pm = get_prompt_manager()
+    _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
     
     try:
         pm.save_custom_prompt(agent_type, task_name, request.content)
@@ -119,11 +123,12 @@ async def save_custom_prompt(agent_type: str, task_name: str, request: SavePromp
 
 
 @router.delete("/prompts/{agent_type}/{task_name}")
-async def delete_custom_prompt(agent_type: str, task_name: str):
+async def delete_custom_prompt(agent_type: str, task_name: str, include_advanced: bool = Query(False)):
     """删除自定义提示词，恢复使用默认提示词"""
     from ...prompts.prompt_manager import get_prompt_manager
     
     pm = get_prompt_manager()
+    _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
     
     try:
         pm.delete_custom_prompt(agent_type, task_name)
@@ -150,11 +155,12 @@ async def reload_prompts():
 
 
 @router.post("/prompts/{agent_type}/system")
-async def save_system_prompt(agent_type: str, request: SavePromptRequest):
+async def save_system_prompt(agent_type: str, request: SavePromptRequest, include_advanced: bool = Query(False)):
     """保存自定义系统提示词"""
     from ...prompts.prompt_manager import get_prompt_manager
     
     pm = get_prompt_manager()
+    _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
     
     try:
         pm.save_custom_prompt(agent_type, "system", request.content)
@@ -167,11 +173,12 @@ async def save_system_prompt(agent_type: str, request: SavePromptRequest):
 
 
 @router.delete("/prompts/{agent_type}/system")
-async def delete_system_prompt(agent_type: str):
+async def delete_system_prompt(agent_type: str, include_advanced: bool = Query(False)):
     """删除自定义系统提示词"""
     from ...prompts.prompt_manager import get_prompt_manager
     
     pm = get_prompt_manager()
+    _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
     
     try:
         pm.delete_custom_prompt(agent_type, "system")

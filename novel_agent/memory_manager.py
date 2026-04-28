@@ -99,25 +99,35 @@ class MemoryManager:
     
     async def _sync_worldbuilding(self, agent_id: str) -> None:
         """同步世界观数据"""
-        worldbuilding = self.project_manager.load_project_data("worldbuilding")
+        worldbuilding = self._load_from_library_or_legacy("worldbuilding")
         if worldbuilding:
             summary = self._summarize_worldbuilding(worldbuilding)
             await self.wensi_service.update_memory(agent_id, "worldview", summary)
-    
+
     async def _sync_outline(self, agent_id: str) -> None:
         """同步大纲数据"""
-        outline = self.project_manager.load_project_data("outline")
+        outline = self._load_from_library_or_legacy("outline")
         if outline:
             summary = self._summarize_outline(outline)
             await self.wensi_service.update_memory(agent_id, "plot_summary", summary)
-    
+
     async def _sync_characters(self, agent_id: str) -> None:
         """同步角色数据"""
-        characters = self.project_manager.load_project_data("characters")
+        characters = self._load_from_library_or_legacy("characters")
         if characters:
             summary = self._summarize_characters(characters)
             await self.wensi_service.update_memory(agent_id, "characters", summary)
-    
+
+    def _load_from_library_or_legacy(self, data_type: str):
+        try:
+            from .library_service import get_library_service
+            svc = get_library_service()
+            if not svc.is_degraded and svc.library_path.exists():
+                return svc.project_legacy_view(data_type)
+        except Exception:
+            pass
+        return self.project_manager.load_project_data(data_type)
+
     def _summarize_worldbuilding(self, data: List[Dict]) -> str:
         """生成世界观摘要"""
         if not data:

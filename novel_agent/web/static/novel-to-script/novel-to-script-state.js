@@ -44,7 +44,14 @@ const novelToScriptState = {
     ...createNovelToScriptProjectState()
 };
 
-function getNovelToScriptStorageKey(projectId = store?.currentProject || store?.currentProjectId || '') {
+function getNovelToScriptActiveProjectId() {
+    if (typeof getActiveProjectId === 'function') {
+        return getActiveProjectId() || '';
+    }
+    return store?.currentProjectId || '';
+}
+
+function getNovelToScriptStorageKey(projectId = getNovelToScriptActiveProjectId()) {
     return projectId ? `novel_to_script_data_${projectId}` : NOVEL_TO_SCRIPT_LEGACY_STORAGE_KEY;
 }
 
@@ -90,7 +97,7 @@ function buildNovelToScriptPersistedPayload() {
     };
 }
 
-function readNovelToScriptLocalCache(projectId = store?.currentProject || store?.currentProjectId || '') {
+function readNovelToScriptLocalCache(projectId = getNovelToScriptActiveProjectId()) {
     const preserveTransientState = novelToScriptState.loadedProjectId === projectId;
     const transientLoadingAction = preserveTransientState ? novelToScriptState.loadingAction : '';
     const storageKey = getNovelToScriptStorageKey(projectId);
@@ -120,7 +127,7 @@ function readNovelToScriptLocalCache(projectId = store?.currentProject || store?
 }
 
 function loadNovelToScriptDataForCurrentProject() {
-    const projectId = store?.currentProject || store?.currentProjectId || '';
+    const projectId = getNovelToScriptActiveProjectId();
     const { parsed, preserveTransientState, transientLoadingAction } = readNovelToScriptLocalCache(projectId);
 
     applyNovelToScriptProjectState(parsed);
@@ -132,7 +139,7 @@ function loadNovelToScriptDataForCurrentProject() {
 }
 
 async function persistNovelToScriptProjectState() {
-    const projectId = store?.currentProject || store?.currentProjectId || '';
+    const projectId = getNovelToScriptActiveProjectId();
     if (!projectId) return;
 
     try {
@@ -160,7 +167,7 @@ function queueNovelToScriptProjectStateSave() {
 }
 
 async function hydrateNovelToScriptProjectState(force = false) {
-    const projectId = store?.currentProject || store?.currentProjectId || '';
+    const projectId = getNovelToScriptActiveProjectId();
     if (!projectId) {
         loadNovelToScriptDataForCurrentProject();
         return;
@@ -194,7 +201,7 @@ async function hydrateNovelToScriptProjectState(force = false) {
 }
 
 function saveNovelToScriptData() {
-    const projectId = store?.currentProject || store?.currentProjectId || '';
+    const projectId = getNovelToScriptActiveProjectId();
     const storageKey = getNovelToScriptStorageKey(projectId);
     localStorage.setItem(storageKey, JSON.stringify(buildNovelToScriptPersistedPayload()));
     queueNovelToScriptProjectStateSave();
@@ -206,7 +213,7 @@ async function persistNovelToScriptProjectStateNow() {
 }
 
 async function resetNovelToScriptProjectState() {
-    const projectId = store?.currentProject || store?.currentProjectId || '';
+    const projectId = getNovelToScriptActiveProjectId();
     const storageKey = getNovelToScriptStorageKey(projectId);
 
     clearQueuedNovelToScriptProjectStateSave();

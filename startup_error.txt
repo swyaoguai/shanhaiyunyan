@@ -1,12 +1,6 @@
-Startup failed: No module named 'novel_agent.web.api'
+Startup failed: No module named 'uvicorn'
 
 Traceback (most recent call last):
-  File "C:\Users\wen\Desktop\AGENT\run.py", line 141, in main
-    from novel_agent.web import create_app
-  File "C:\Users\wen\Desktop\AGENT\novel_agent\web\__init__.py", line 2, in <module>
-    from .app import create_app
-  File "C:\Users\wen\Desktop\AGENT\novel_agent\web\app.py", line 30, in <module>
-    from .routes import register_routes
-  File "C:\Users\wen\Desktop\AGENT\novel_agent\web\routes\__init__.py", line 27, in <module>
-    from ...web.api.backup import router as backup_router
-ModuleNotFoundError: No module named 'novel_agent.web.api'
+  File "C:\Users\wen\Desktop\AGENT\run.py", line 139, in main
+    import uvicorn
+ModuleNotFoundError: No module named 'uvicorn'

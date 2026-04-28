@@ -1,6 +1,6 @@
 """
-濡炪倕婀卞ú鎵不閿涘嫭鍊為柛?
-缂佺媴绱曢幃濠冨緞濮橆偊鍤嬮悘蹇撶箺椤曗晜銇勯崷顓熺獥闁挎稑鑻悿鍕偝閻楀牊娈堕柟璇″櫍濞堁呯矉?
+濡炪倕婀卞ú鎵不閿涘嫭鍊為柛?
+缂佺媴绱曢幃濠冨緞濮橆偊鍤嬮悘蹇撶箺椤曗晜銇勯崷顓熺獥闁挎稑鑻悿鍕偝閻楀牊娈堕柟璇″櫍濞堁呯矉?
 """
 
 import json
@@ -39,8 +39,8 @@ class Project:
 
 class ProjectManager:
     """
-    濡炪倕婀卞ú鎵不閿涘嫭鍊為柛?
-    缂佺媴绱曢幃濠冨緞濮橆偊鍤嬮悘蹇撶箺椤曗晜銇勯崷顓熺獥闁汇劌瀚崹鍗烆嚈閹巻鍋撴担绋跨仚閻炴稏鍔婇埀顑跨閸ㄥ綊姊介妶鍛闁告帒娲﹀畷?
+    濡炪倕婀卞ú鎵不閿涘嫭鍊為柛?
+    缂佺媴绱曢幃濠冨緞濮橆偊鍤嬮悘蹇撶箺椤曗晜銇勯崷顓熺獥闁汇劌瀚崹鍗烆嚈閹巻鍋撴担绋跨仚閻炴稏鍔婇埀顑跨閸ㄥ綊姊介妶鍛闁告帒娲﹀畷?
     """
     
     def __init__(self, data_dir: Optional[Path] = None):
@@ -57,7 +57,7 @@ class ProjectManager:
     
     def _load_projects(self) -> None:
         """Load project metadata from disk."""
-        # 婵絽绻戦濂告煂瀹ュ牊绁伴梺顔挎閸樻稑銆掗崨顖楁晞闁告劕鎳庨悺銊╂晬瀹€鍕級闁稿繐绉靛Λ顐ｃ亜閸︻厽绐楁繛鍫濐儑閺嗏偓閻庝絻澹堥崵褔鎳樿箛鏃€娈堕柟璇″枤閻ゎ喚绮?
+        # 婵絽绻戦濂告煂瀹ュ牊绁伴梺顔挎閸樻稑銆掗崨顖楁晞闁告劕鎳庨悺銊╂晬瀹€鍕級闁稿繐绉靛Λ顐ｃ亜閸︻厽绐楁繛鍫濐儑閺嗏偓閻庝絻澹堥崵褔鎳樿箛鏃€娈堕柟璇″枤閻ゎ喚绮?
         self.projects = {}
         self.current_project_id = None
 
@@ -77,7 +77,7 @@ class ProjectManager:
             self.current_project_id = next(iter(self.projects.keys()))
         # Initialize a default project only when no projects exist
         if not self.projects:
-            default = self.create_project("Default Project", "Start writing")
+            default = self.create_project("默认项目", "开始创作你的小说")
             self.current_project_id = default.id
     def _save_projects(self) -> None:
         """Persist project metadata to disk."""
@@ -95,7 +95,7 @@ class ProjectManager:
         )
     
     def _get_project_dir(self, project_id: str) -> Path:
-        """闁兼儳鍢茶ぐ鍥ㄣ亜閸︻厽绐楅柡浣哄瀹撲線鎯勯鑲╃Э"""
+        """闁兼儳鍢茶ぐ鍥ㄣ亜閸︻厽绐楅柡浣哄瀹撲線鎯勯鑲╃Э"""
         proj_dir = self.projects_dir / project_id
         proj_dir.mkdir(parents=True, exist_ok=True)
         return proj_dir
@@ -122,11 +122,20 @@ class ProjectManager:
         proj_dir = self._get_project_dir(project_id)
         (proj_dir / "chapters").mkdir(exist_ok=True)
         
-        # 闁告帗绻傞～鎰板礌閺嶎偀鏁勯柡浣哄瀹撲線寮崶锔筋偨
-        (proj_dir / "outline.json").write_text("[]", encoding="utf-8")
-        (proj_dir / "characters.json").write_text("[]", encoding="utf-8")
-        (proj_dir / "worldbuilding.json").write_text("[]", encoding="utf-8")
-        (proj_dir / "items.json").write_text("[]", encoding="utf-8")
+        # 闁告帗绻傞～鎰板礌閺嶎偀鏁勯柡浣哄瀹撲線寮崶锔筋偨
+        # 使用原子写入初始化 JSON 文件
+        for filename in [
+            "outline.json",
+            "characters.json",
+            "worldbuilding.json",
+            "items.json",
+            "eventlines.json",
+            "outline_settings.json",
+            "detail_settings.json",
+            "chapter_settings.json",
+        ]:
+            file_path = proj_dir / filename
+            atomic_write_json(file_path, [], old_content=None, ensure_ascii=False, indent=2)
         
         self._save_projects()
         return project
@@ -175,11 +184,11 @@ class ProjectManager:
         return project
     
     def delete_project(self, project_id: str) -> bool:
-        """闁告帞濞€濞呭孩銇勯崷顓熺獥闁告瑥锕ら崣楣冨箥閳ь剟寮垫径瀣闁硅鍣槐娆撳礌閸涱喖顏柣顓滃劥閻︽垶鎯旈幙鍕"""
+        """闁告帞濞€濞呭孩銇勯崷顓熺獥闁告瑥锕ら崣楣冨箥閳ь剟寮垫径瀣闁硅鍣槐娆撳礌閸涱喖顏柣顓滃劥閻︽垶鎯旈幙鍕"""
         if project_id not in self.projects:
             return False
         
-        # 濞戞挸绉烽崗姗€宕氶悩缁樼彑闁哄牃鍋撻柛姘凹缁斿瓨绋夐鍫涒偓宥夋儎?
+        # 濞戞挸绉烽崗姗€宕氶悩缁樼彑闁哄牃鍋撻柛姘凹缁斿瓨绋夐鍫涒偓宥夋儎?
         
         if len(self.projects) <= 1:
             return False
@@ -190,7 +199,7 @@ class ProjectManager:
         if proj_dir.exists():
             shutil.rmtree(proj_dir)
         
-        # 闁告帞濞€濞呭酣鎯岄妷銊ф閹煎瓨鎸惧ú鎷屻亹?
+        # 闁告帞濞€濞呭酣鎯岄妷銊ф閹煎瓨鎸惧ú鎷屻亹?
         
         kb_dir = self.data_dir.parent / "data" / "knowledge_base" / project_id
         if kb_dir.exists():
@@ -199,7 +208,7 @@ class ProjectManager:
         
         del self.projects[project_id]
         
-        # 濠碘€冲€归悘澶愬礆閻樼粯鐝熼柣銊ュ濡叉瓕銇愰幘鍐差枀濡炪倕婀卞ú浼存晬鐏炶棄鐎奸柟骞垮灩閸╁矂宕楅張鐢甸搨濡炪倕婀卞ú?
+        # 濠碘€冲€归悘澶愬礆閻樼粯鐝熼柣銊ュ濡叉瓕銇愰幘鍐差枀濡炪倕婀卞ú浼存晬鐏炶棄鐎奸柟骞垮灩閸╁矂宕楅張鐢甸搨濡炪倕婀卞ú?
         
         if self.current_project_id == project_id:
             self.current_project_id = list(self.projects.keys())[0]
@@ -207,7 +216,7 @@ class ProjectManager:
         self._save_projects()
         return True
     
-    # ===== 濡炪倕婀卞ú浼村极閻楀牆绁﹂柟鍨С缂?=====
+    # ===== 濡炪倕婀卞ú浼村极閻楀牆绁﹂柟鍨С缂?=====
     
     def get_project_data_path(self, data_type: str) -> Path:
         """Get current project data file path."""
@@ -224,10 +233,32 @@ class ProjectManager:
             return proj_dir / "worldbuilding.json"
         elif data_type == "items":
             return proj_dir / "items.json"
+        elif data_type == "eventlines":
+            return proj_dir / "eventlines.json"
+        elif data_type == "outline_settings":
+            return proj_dir / "outline_settings.json"
+        elif data_type == "detail_settings":
+            return proj_dir / "detail_settings.json"
+        elif data_type == "chapter_settings":
+            return proj_dir / "chapter_settings.json"
         elif data_type == "chapters":
             return proj_dir / "chapters"
         else:
             raise ValueError(f"Unknown data type: {data_type}")
+
+    def get_library_path(self) -> Path:
+        """返回当前项目的 library.json 路径"""
+        proj_dir = self.projects_dir / self.current_project_id
+        return proj_dir / "library.json"
+
+    def get_library_backup_dir(self) -> Path:
+        """返回当前项目的 library 备份目录"""
+        proj_dir = self.projects_dir / self.current_project_id
+        return proj_dir / ".library_backup"
+
+    def get_current_project_dir(self) -> Path:
+        """返回当前项目目录"""
+        return self.projects_dir / self.current_project_id
     
     def load_project_data(self, data_type: str) -> List[Dict]:
         """Load current project data."""
@@ -242,11 +273,15 @@ class ProjectManager:
     def save_project_data(self, data_type: str, data: List[Dict]) -> None:
         """Save current project data."""
         path = self.get_project_data_path(data_type)
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
+        old_content = path.read_text(encoding="utf-8") if path.exists() else None
+        atomic_write_json(
+            path,
+            data,
+            old_content=old_content,
+            ensure_ascii=False,
+            indent=2,
         )
-        # 闁哄洤鐡ㄩ弻濠冦亜閸︻厽绐楀ǎ鍥跺枟閺佸ジ寮崼鏇燂紵
+        # 闁哄洤鐡ㄩ弻濠冦亜閸︻厽绐楀ǎ鍥跺枟閺佸ジ寮崼鏇燂紵
         if self.current_project_id:
             self.update_project(self.current_project_id)
 
@@ -311,6 +346,4 @@ def get_project_manager() -> ProjectManager:
     return _project_manager
 
 
-# 婵☆垪鈧櫕鍋ラ柤鍗炵焷閻鎷犵€涙ɑ顫栭柨娑欐皑椤撴悂鎮堕崱妤婃▼濞戞搩浜滈惃顒傛嫚閹绢喓鈧秹鎯勯鐐暠闁告帗绋戠紓鎾诲Υ娴ｇ鐎奸柟璇℃娇閳ь兛绀侀崹褰掓⒔閵堝懏瀚查柡浣哄瀹撲線姊鹃弮鍌ょ€查柨娑樿嫰閻ゅ嫰鎮虫导娣偓宥夋儎椤旈箖鐛撻柡浣哄瀹撲線骞愭担椋庣暯闁告牗鐗撻埀?
-
-
+# 婵☆垪鈧櫕鍋ラ柤鍗炵焷閻鎷犵€涙ɑ顫栭柨娑欐皑椤撴悂鎮堕崱妤婃▼濞戞搩浜滈惃顒傛嫚閹绢喓鈧秹鎯勯鐐暠闁告帗绋戠紓鎾诲Υ娴ｇ鐎奸柟璇℃娇閳ь兛绀侀崹褰掓⒔閵堝懏瀚查柡浣哄瀹撲線姊鹃弮鍌ょ€查柨娑樿嫰閻ゅ嫰鎮虫导娣偓宥夋儎椤旈箖鐛撻柡浣哄瀹撲線骞愭担椋庣暯闁告牗鐗撻埀?

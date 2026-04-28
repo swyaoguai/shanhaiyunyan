@@ -94,6 +94,12 @@
 pip install -r requirements.txt
 ```
 
+### 安装开发/测试依赖
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ### 配置
 
 1. 复制环境变量模板：
@@ -130,6 +136,12 @@ python run.py
 ```
 
 默认访问 http://localhost:5656 进入 Web UI（若端口被占用，系统会自动切换并在控制台提示实际端口）
+
+### 运行测试
+
+```bash
+python -m pytest
+```
 
 ## 📁 项目结构
 

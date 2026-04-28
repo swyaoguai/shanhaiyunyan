@@ -20,11 +20,18 @@ import httpx
 from ..config import config
 from ..agent_config import AgentModelConfig
 from ..constants import RETRY_DEFAULTS
+from ..timeout_settings import get_llm_timeout_settings
+from ..utils.llm_params import normalize_max_tokens
 from ..utils.metrics import get_metrics_collector
 from ..utils.token_stats import record_token_usage
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    from ..utils.retry import is_retryable_error
+    return is_retryable_error(error)
 
 
 @dataclass
@@ -87,18 +94,23 @@ class LLMClient:
         """创建OpenAI客户端"""
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
+        llm_timeouts = get_llm_timeout_settings()
 
-        # 超时配置
         timeout_config = httpx.Timeout(
-            connect=60.0,
-            read=600.0,  # 10分钟，适合长文本生成
-            write=120.0,
-            pool=60.0
+            connect=float(llm_timeouts["connect"]),
+            read=float(llm_timeouts["read"]),
+            write=float(llm_timeouts["write"]),
+            pool=float(llm_timeouts["pool"]),
         )
 
         logger.info(
-            f"[LLMClient:{self.metrics_namespace}] Creating client: "
-            f"base_url={api_base}, timeout=read:600s"
+            "[LLMClient:%s] Creating client: base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss",
+            self.metrics_namespace,
+            api_base,
+            llm_timeouts["connect"],
+            llm_timeouts["read"],
+            llm_timeouts["write"],
+            llm_timeouts["pool"],
         )
 
         return AsyncOpenAI(
@@ -184,6 +196,9 @@ class LLMClient:
                 if attempt >= self.retry_config.max_retries:
                     break
 
+                if not _is_retryable_error(e):
+                    break
+
                 # 计算延迟
                 wait_time = min(current_delay, self.retry_config.max_delay)
                 if self.retry_config.jitter:
@@ -226,7 +241,10 @@ class LLMClient:
             "model": self.model_name,
             "messages": full_messages,
             "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "max_tokens": normalize_max_tokens(
+                max_tokens if max_tokens is not None else self.max_tokens,
+                source=f"LLMClient:{self.metrics_namespace}",
+            ),
             "stream": stream
         }
 

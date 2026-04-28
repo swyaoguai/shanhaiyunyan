@@ -1,0 +1,134 @@
+"""上下文管理器兼容旧数据格式的回归测试。"""
+
+import json
+import logging
+
+from novel_agent.context.character_manager import CharacterManager
+from novel_agent.context.world_manager import WorldManager
+
+
+def test_character_manager_loads_list_payload_without_warning(tmp_path, caplog):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "characters.json").write_text(
+        json.dumps(
+            [
+                {"name": "林舟", "description": "冷静的调查员", "personality": "理性,克制"},
+                {"name": "白璃", "description": "情报贩子", "role": "配角"},
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    caplog.set_level(logging.WARNING)
+    manager = CharacterManager(project_dir)
+
+    assert manager.get_character("林舟") is not None
+    assert manager.get_character("林舟").personality == ["理性", "克制"]
+    assert manager.get_character("白璃").role == "配角"
+    assert "Failed to load characters" not in caplog.text
+
+
+def test_character_manager_loads_structured_character_fields(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "characters.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "吴迪",
+                    "role": "主角",
+                    "identity": "合欢宗外门弟子",
+                    "occupation": "杂役弟子",
+                    "age": "17",
+                    "gender": "男",
+                    "personality": ["抽象", "无厘头"],
+                    "goals": ["摆脱追杀", "提升境界"],
+                    "relationships": "苏青禾：暧昧对象\n赵不凡：死对头",
+                    "motivation": "想要活下去并逆袭",
+                    "notes": "常用谐音梗回怼别人",
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = CharacterManager(project_dir)
+    character = manager.get_character("吴迪")
+
+    assert character is not None
+    assert character.identity == "合欢宗外门弟子"
+    assert character.occupation == "杂役弟子"
+    assert character.age == "17"
+    assert character.personality == ["抽象", "无厘头"]
+    assert character.goals == ["摆脱追杀", "提升境界"]
+    assert character.relationships["苏青禾"] == "暧昧对象"
+    assert character.notes == "常用谐音梗回怼别人"
+
+
+def test_world_manager_loads_list_payload_without_warning(tmp_path, caplog):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "worldbuilding.json").write_text(
+        json.dumps(
+            [
+                {"name": "北境雪原", "description": "终年暴雪，交通依赖冰轨列车"},
+                {"name": "灵能律法", "description": "普通人禁止私自使用军用级灵能装置"},
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    caplog.set_level(logging.WARNING)
+    manager = WorldManager(project_dir)
+
+    assert manager.world is not None
+    assert manager.world.world_type == "条目式设定"
+    assert "北境雪原：终年暴雪，交通依赖冰轨列车" in manager.world.rules
+    assert "灵能律法" in manager.get_world_context()
+    assert "Failed to load world" not in caplog.text
+
+
+def test_world_manager_compact_context_stays_short_and_structured(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "worldbuilding.json").write_text(
+        json.dumps(
+            {
+                "world": {
+                    "name": "玄荒天域",
+                    "world_type": "修仙",
+                    "power_system": "吞器炼体，灵器可化作修为",
+                    "geography": "宗门林立，秘境遍布",
+                    "factions": [
+                        {"name": "合欢宗", "description": "表面风月，内里吃人"},
+                        {"name": "天衡宗", "description": "自诩正道魁首"},
+                    ],
+                    "rules": [
+                        "资源决定修为",
+                        "高阶法器必须登记",
+                        "秘境开启伴随伤亡",
+                    ],
+                    "culture": {"note": "这里不该出现在紧凑上下文里"},
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = WorldManager(project_dir)
+    context = manager.get_world_context()
+
+    assert "【世界】玄荒天域" in context
+    assert "- 类型：修仙" in context
+    assert "- 核心规则：" in context
+    assert "合欢宗" in context
+    assert "文化习俗" not in context

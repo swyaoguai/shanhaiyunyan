@@ -1,0 +1,56 @@
+[
+  {
+    "name": "create_chat_session_burst",
+    "runs": 20,
+    "total_seconds": 0.0008,
+    "avg_ms": 0.042,
+    "p50_ms": 0.037,
+    "p95_ms": 0.059,
+    "min_ms": 0.028,
+    "max_ms": 0.119,
+    "extra": {
+      "unique_session_ids": 20,
+      "requested": 20
+    }
+  },
+  {
+    "name": "same_session_chat_sequential",
+    "runs": 50,
+    "total_seconds": 0.0109,
+    "avg_ms": 0.218,
+    "p50_ms": 0.064,
+    "p95_ms": 0.243,
+    "min_ms": 0.06,
+    "max_ms": 7.134,
+    "extra": {
+      "saved_states": 50
+    }
+  },
+  {
+    "name": "same_session_chat_concurrent",
+    "runs": 20,
+    "total_seconds": 0.0017,
+    "avg_ms": 0.086,
+    "p50_ms": 0.071,
+    "p95_ms": 0.141,
+    "min_ms": 0.064,
+    "max_ms": 0.22,
+    "extra": {
+      "saved_states": 20
+    }
+  },
+  {
+    "name": "formal_create_route_smoke",
+    "runs": 10,
+    "total_seconds": 1.5442,
+    "avg_ms": 154.42,
+    "p50_ms": 151.723,
+    "p95_ms": 169.903,
+    "min_ms": 141.773,
+    "max_ms": 169.903,
+    "extra": {
+      "avg_sse_chunks": 3.0,
+      "task_pool_source": "contract_confirmation"
+    }
+  }
+]

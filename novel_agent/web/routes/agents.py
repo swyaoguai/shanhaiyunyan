@@ -7,7 +7,7 @@ Agent配置API路由模块
 import json
 import httpx
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..models.requests import AgentConfigUpdateRequest, FetchModelsRequest
@@ -19,13 +19,13 @@ router = APIRouter()
 
 
 @router.get("/agents")
-async def list_agents():
+async def list_agents(include_advanced: bool = Query(False)):
     """获取所有Agent及其配置状态"""
     from ...agent_config import get_config_manager
     manager = get_config_manager()
     global_config = manager.get_global_config()
     return JSONResponse({
-        "agents": manager.list_agents(),
+        "agents": manager.list_agents(include_advanced=include_advanced),
         "global_configured": global_config.is_configured(),
         "global_model": global_config.model or "(未配置)"
     })

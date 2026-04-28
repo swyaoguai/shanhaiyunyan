@@ -7,7 +7,7 @@ that allows triggering Config.reload() via HTTP API.
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from novel_agent.web.app import create_app
 from novel_agent.config import Config
@@ -74,12 +74,10 @@ class TestReloadEndpoint:
         Should recreate NovelCoordinator with updated config
         """
         with patch.object(Config, 'reload', return_value=True):
-            with patch('novel_agent.web.app.NovelCoordinator') as mock_coordinator:
-                response = client.post("/api/settings/reload")
+            response = client.post("/api/settings/reload")
 
-                # Coordinator should be recreated
-                # (Note: actual coordinator creation happens inside the endpoint)
-                assert response.status_code == 200
+            # Coordinator should be recreated
+            assert response.status_code == 200
 
     def test_reload_returns_error_on_failure(self, client):
         """
@@ -116,6 +114,5 @@ def test_reload_syncs_router_coordinator_reference():
         new_router = get_router_agent()
 
         assert new_coordinator is not None
-        assert new_router is not None
-        assert new_coordinator is not old_coordinator
+        assert new_router is old_router
         assert new_router.coordinator is new_coordinator

@@ -25,9 +25,29 @@ from .polisher import PolisherAgent
 from .evaluator import EvaluatorAgent
 from .communicator import CommunicatorAgent
 from .continuous_writer import ContinuousWriter, ContinuousWriteConfig
+from .character_builder import CharacterBuilderAgent
+from .project_data_builders import (
+    EventlineBuilderAgent,
+    DetailOutlineBuilderAgent,
+    ChapterSettingBuilderAgent,
+)
 from .session_store import SessionStore, SessionState, get_session_store
 from .chat_session_store import ChatSessionStore, ChatSessionState, get_chat_session_store
 from .knowledge_mixin import KnowledgeBaseMixin, SharedKnowledgeContext
+# 协作辅助节点（已废弃，请使用 workflow.collab_services 下的服务）
+# 这些类保留向后兼容，但会在实例化时发出 DeprecationWarning
+from .collab_sub_agents import (
+    ContextStrategyAgent,
+    ContentReaderAgent,
+    ContentExpansionAgent,
+    FileNamingAgent,
+    SummaryOrchestratorAgent,
+)
+from .capability_registry import (
+    AgentCapabilityRegistry,
+    get_capability_registry,
+    reset_capability_registry,
+)
 
 # 消息总线
 from .message_bus import (
@@ -37,6 +57,9 @@ from .message_bus import (
     get_message_bus,
     reset_message_bus,
     create_task_message,
+    create_task_proposed_message,
+    create_task_claimed_message,
+    create_dependency_resolved_message,
     create_completion_message,
     create_context_update_message,
     create_user_input_request
@@ -80,6 +103,20 @@ __all__ = [
     # 知识库混入（多Agent协作）
     "KnowledgeBaseMixin",
     "SharedKnowledgeContext",
+    "CharacterBuilderAgent",
+    "EventlineBuilderAgent",
+    "DetailOutlineBuilderAgent",
+    "ChapterSettingBuilderAgent",
+    "ContextStrategyAgent",
+    "ContentReaderAgent",
+    "ContentExpansionAgent",
+    "FileNamingAgent",
+    "SummaryOrchestratorAgent",
+
+    # 能力注册表
+    "AgentCapabilityRegistry",
+    "get_capability_registry",
+    "reset_capability_registry",
 
     # 消息总线
     "MessageBus",
@@ -88,6 +125,9 @@ __all__ = [
     "get_message_bus",
     "reset_message_bus",
     "create_task_message",
+    "create_task_proposed_message",
+    "create_task_claimed_message",
+    "create_dependency_resolved_message",
     "create_completion_message",
     "create_context_update_message",
     "create_user_input_request",

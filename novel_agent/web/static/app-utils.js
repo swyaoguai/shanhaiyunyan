@@ -6,6 +6,24 @@
 
 // ===== API 调用 =====
 
+const DEFAULT_API_BASE = '/api/v1';
+
+function normalizeApiUrl(url) {
+    const raw = String(url || '').trim();
+    if (!raw) return raw;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (!raw.startsWith('/')) return raw;
+    if (raw.startsWith('/api/v1/')) return raw;
+    if (raw === '/api/v1') return raw;
+    if (raw.startsWith('/api/')) {
+        return `${DEFAULT_API_BASE}${raw.slice('/api'.length)}`;
+    }
+    if (raw === '/api') {
+        return DEFAULT_API_BASE;
+    }
+    return raw;
+}
+
 async function apiCall(url, method = 'GET', data) {
     const options = {
         method: method,
@@ -15,7 +33,7 @@ async function apiCall(url, method = 'GET', data) {
         options.body = JSON.stringify(data);
     }
 
-    const res = await fetch(url, options);
+    const res = await fetch(normalizeApiUrl(url), options);
     const contentType = res.headers.get('content-type') || '';
 
     if (!res.ok) {
@@ -61,7 +79,19 @@ async function apiCall(url, method = 'GET', data) {
             errorDetail = '';
         }
 
-        throw new Error(errorDetail ? `HTTP ${res.status}: ${errorDetail}` : `HTTP ${res.status}`);
+        const error = new Error(errorDetail ? `HTTP ${res.status}: ${errorDetail}` : `HTTP ${res.status}`);
+        error.status = res.status;
+        const retryAfterHeader = Number(res.headers.get('Retry-After'));
+        const retryAfterPayload = Number(
+            typeof errorDetail === 'string'
+                ? (errorDetail.match(/(\d+)\s*秒后重试/) || [])[1]
+                : 0
+        );
+        const retryAfter = retryAfterHeader > 0 ? retryAfterHeader : (retryAfterPayload > 0 ? retryAfterPayload : 0);
+        if (retryAfter > 0) {
+            error.retryAfter = retryAfter;
+        }
+        throw error;
     }
 
     if (res.status === 204) {
@@ -81,7 +111,7 @@ async function apiFormCall(url, formData, method = 'POST') {
         throw new Error('formData must be a FormData instance');
     }
 
-    const res = await fetch(url, {
+    const res = await fetch(normalizeApiUrl(url), {
         method: method,
         body: formData
     });
@@ -146,10 +176,69 @@ function showToast(msg, type) {
 // ===== HTML 转义 =====
 
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    return String(text).replace(/[&<>"']/g, (char) => {
+        const entities = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+        return entities[char] || char;
+    });
+}
+
+function safeHostname(url, fallback = '未设置') {
+    const raw = String(url || '').trim();
+    if (!raw) {
+        return fallback;
+    }
+    try {
+        return new URL(raw).hostname || fallback;
+    } catch (_) {
+        return raw;
+    }
+}
+
+function makeElementActivatable(element, onActivate, options = {}) {
+    if (!element || typeof onActivate !== 'function') {
+        return element;
+    }
+
+    const {
+        role = 'button',
+        tabIndex = 0,
+        allowWhen = () => true,
+        bindClick = true
+    } = options;
+
+    if (!element.hasAttribute('role')) {
+        element.setAttribute('role', role);
+    }
+    if (!element.hasAttribute('tabindex')) {
+        element.tabIndex = tabIndex;
+    }
+
+    const activate = (event) => {
+        if (!allowWhen(event)) {
+            return;
+        }
+        onActivate(event);
+    };
+
+    if (bindClick) {
+        element.addEventListener('click', activate);
+    }
+    element.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+        event.preventDefault();
+        activate(event);
+    });
+
+    return element;
 }
 
 // ===== 面包屑更新 =====
@@ -971,10 +1060,14 @@ function showEditRuleDialog(rule, onSave) {
 }
 
 // 全局暴露工具函数
+window.DEFAULT_API_BASE = DEFAULT_API_BASE;
+window.normalizeApiUrl = normalizeApiUrl;
 window.apiCall = apiCall;
 window.apiFormCall = apiFormCall;
 window.showToast = showToast;
 window.escapeHtml = escapeHtml;
+window.safeHostname = safeHostname;
+window.makeElementActivatable = makeElementActivatable;
 window.updateBreadcrumbs = updateBreadcrumbs;
 window.openDatabase = openDatabase;
 window.saveToIndexedDB = saveToIndexedDB;

@@ -13,7 +13,31 @@ from dataclasses import dataclass, field
 
 from ..constants import RETRY_DEFAULTS
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 logger = logging.getLogger(__name__)
+
+
+_RETRYABLE_MARKERS = (
+    "stream error", "internal_error", "server disconnected",
+    "connection reset", "connection aborted", "connection broken",
+    "peer closed connection", "remoteprotocolerror", "readerror",
+    "timeout", "timed out", "temporarily unavailable",
+    "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+    "rate limit", "429",
+    "500 internal server error",
+)
+
+
+def is_retryable_error(error: Exception) -> bool:
+    """识别适合自动重试的传输/服务端错误。"""
+    if httpx is not None and isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    error_lower = str(error or "").lower()
+    return any(marker in error_lower for marker in _RETRYABLE_MARKERS)
 
 
 @dataclass

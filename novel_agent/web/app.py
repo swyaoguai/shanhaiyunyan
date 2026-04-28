@@ -23,13 +23,14 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import config
-from ..workflow import NovelCoordinator
 from ..agents import RouterAgent
 from ..constants import TIMEOUTS
 from .dependencies import set_coordinator, set_router_agent
+from .runtime_refresh import create_runtime_coordinator
 from .routes import register_routes
 from .routes.pages import set_templates
 from .middleware import RateLimitMiddleware, RateLimitConfig
+from .websocket import setup_websocket_routes
 from ..utils.log_sanitizer import setup_sanitizing_logging
 from .config_validator import validate_startup_config, print_startup_info
 
@@ -110,7 +111,13 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
         if has_api_key:
             kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
             router_agent.set_knowledge_base(kb)
-            logger.info("[Router] ✓ 知识库已配置（使用真实向量存储）")
+
+            from .dependencies import get_coordinator
+            coordinator = get_coordinator()
+            if coordinator and hasattr(coordinator, "set_knowledge_base"):
+                coordinator.set_knowledge_base(kb)
+
+            logger.info("[Router] ✓ 知识库已配置，并已同步到协调器子Agent（使用真实向量存储）")
         else:
             logger.info("[Router] 未配置向量化API Key，跳过知识库功能")
             
@@ -138,15 +145,8 @@ async def lifespan(app: FastAPI):
     # 启动后台缓存清理任务
     cache_cleanup_task = asyncio.create_task(_cache_cleanup_loop())
 
-    # 创建WebSocket进度回调
-    from .websocket import WebSocketProgressCallback
-    ws_callback = WebSocketProgressCallback()
-
     # 创建协调器并设置回调
-    coordinator = NovelCoordinator(
-        config.paths.output_dir,
-        progress_callback=ws_callback
-    )
+    coordinator = create_runtime_coordinator()
     set_coordinator(coordinator)
 
     # 创建路由智能体，并关联协调器
@@ -298,6 +298,7 @@ def create_app() -> FastAPI:
     
     # 注册所有路由
     register_routes(app)
+    setup_websocket_routes(app)
     
     return app
 

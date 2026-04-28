@@ -11,6 +11,7 @@ import json
 import time
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, Any, List, AsyncGenerator, Callable, Awaitable, Union
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from ..agent_config import AgentModelConfig, get_config_manager
 from ..utils.retry import async_retry, RetryConfig
 from ..utils.metrics import get_metrics_collector, MetricsContext
 from ..utils.token_stats import record_token_usage
+from ..utils.llm_params import normalize_max_tokens
 from ..constants import TIMEOUTS, RETRY_DEFAULTS
+from ..timeout_settings import get_llm_timeout_settings
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +33,23 @@ logger = logging.getLogger(__name__)
 
 # 回调处理器类型
 CallbackHandler = Callable[[Dict[str, Any]], Awaitable[Optional[Any]]]
+
+
+@dataclass
+class AgentCapability:
+    """Agent能力声明。"""
+
+    agent_name: str
+    capabilities: List[str] = field(default_factory=list)
+    accept_task_types: List[str] = field(default_factory=list)
+    required_inputs: List[str] = field(default_factory=list)
+    produced_outputs: List[str] = field(default_factory=list)
+    priority: int = 50
+    max_concurrency: int = 1
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 class BaseAgent(ABC):
@@ -43,13 +63,28 @@ class BaseAgent(ABC):
     - 消息总线：支持Agent间通信
     """
     
+    # Agent名称 → PromptManager agent_type 映射表
+    # 子类可通过覆盖此属性或设置 prompt_manager_key 来自定义映射
+    _PROMPT_MANAGER_KEY_MAP: Dict[str, str] = {
+        "ChapterWriter": "chapter_writer",
+        "Worldbuilder": "worldbuilder",
+        "Evaluator": "evaluator",
+        "Polisher": "polisher",
+        "Communicator": "communicator",
+        "ContinuousWriter": "continuous_writer",
+        "Outliner": "outliner",
+        "Router": "router",
+        "copilot": "copilot",
+    }
+
     def __init__(
         self,
         name: str,
         prompt_file: Optional[str] = None,
         model_config: Optional[AgentModelConfig] = None,
         callback_handler: Optional[CallbackHandler] = None,
-        retry_config: Optional[RetryConfig] = None
+        retry_config: Optional[RetryConfig] = None,
+        prompt_manager_key: Optional[str] = None,
     ):
         """
         初始化Agent
@@ -60,9 +95,11 @@ class BaseAgent(ABC):
             model_config: 可选的模型配置，如果不提供则从配置管理器加载
             callback_handler: 回调处理器，用于请求用户输入等
             retry_config: 重试配置
+            prompt_manager_key: PromptManager中的agent_type键名，用于获取用户自定义提示词
         """
         self.name = name
         self.prompt_file = prompt_file
+        self.prompt_manager_key = prompt_manager_key or self._PROMPT_MANAGER_KEY_MAP.get(name, "")
         self.system_prompt = self._load_system_prompt()
         
         # 加载或使用提供的模型配置
@@ -104,17 +141,24 @@ class BaseAgent(ABC):
         # 优先使用Agent独立配置，否则使用全局配置
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
+        llm_timeouts = get_llm_timeout_settings()
         
-        # 设置较长的超时时间，适合大模型生成场景
-        # connect: 连接超时, read: 读取超时, write: 写入超时, pool: 连接池超时
         timeout_config = httpx.Timeout(
-            connect=60.0,      # 连接超时60秒
-            read=600.0,        # 读取超时600秒（10分钟），适合长文本生成
-            write=120.0,       # 写入超时120秒
-            pool=60.0          # 连接池超时60秒
+            connect=float(llm_timeouts["connect"]),
+            read=float(llm_timeouts["read"]),
+            write=float(llm_timeouts["write"]),
+            pool=float(llm_timeouts["pool"]),
         )
         
-        logger.info(f"[{self.name}] Creating OpenAI client: base_url={api_base}, timeout=read:600s, max_retries=0")
+        logger.info(
+            "[%s] Creating OpenAI client: base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss, max_retries=0",
+            self.name,
+            api_base,
+            llm_timeouts["connect"],
+            llm_timeouts["read"],
+            llm_timeouts["write"],
+            llm_timeouts["pool"],
+        )
         
         return AsyncOpenAI(
             api_key=api_key,
@@ -225,9 +269,14 @@ class BaseAgent(ABC):
                 # 处理任务分配
                 task_data = message.payload.get("task_data", {})
                 context = message.payload.get("context")
-                
-                # 执行任务
-                result = await self.execute(task_data, context)
+
+                previous_callback = self.callback_handler
+                self.callback_handler = self._create_task_callback_proxy(message, previous_callback)
+                try:
+                    # 执行任务
+                    result = await self.execute(task_data, context)
+                finally:
+                    self.callback_handler = previous_callback
                 
                 # 创建完成响应
                 response = AgentMessage(
@@ -298,6 +347,43 @@ class BaseAgent(ABC):
             return error_response
         
         return None
+
+    def _create_task_callback_proxy(
+        self,
+        message: 'AgentMessage',
+        previous_handler: Optional[CallbackHandler]
+    ) -> CallbackHandler:
+        """为总线任务包装回调，将过程事件回传给请求方。"""
+
+        async def proxy(data: Dict[str, Any]) -> Optional[Any]:
+            await self._publish_task_callback_event(message, data)
+            if previous_handler:
+                return await previous_handler(data)
+            return None
+
+        return proxy
+
+    async def _publish_task_callback_event(self, message: 'AgentMessage', data: Optional[Dict[str, Any]]) -> None:
+        """将子 Agent 回调事件转发为消息总线事件。"""
+        if not data:
+            return
+
+        from .message_bus import AgentMessage, MessageType
+
+        payload = dict(data)
+        payload.setdefault("task_id", message.id)
+
+        event_type = str(payload.get("type") or "").strip()
+        msg_type = MessageType.USER_INPUT_REQUIRED if event_type == "user_input_required" else MessageType.TASK_PROGRESS
+
+        progress_message = AgentMessage(
+            msg_type=msg_type,
+            sender=self.name,
+            receiver=message.sender,
+            payload=payload,
+            reply_to=message.id
+        )
+        await self.message_bus.publish(progress_message)
     
     async def _get_context(self, key: str) -> Any:
         """
@@ -323,7 +409,26 @@ class BaseAgent(ABC):
         pass
     
     def _load_system_prompt(self) -> str:
-        """加载系统提示词"""
+        """加载系统提示词
+        
+        优先级：
+        1. PromptManager 中的用户自定义提示词（通过前端设置页面修改）
+        2. prompts/*.md 文件（与 BaseAgent 运行时一致的文件提示词）
+        3. 代码内置默认提示词（_get_default_prompt fallback）
+        """
+        # 优先从 PromptManager 获取（包含用户自定义配置）
+        if self.prompt_manager_key:
+            try:
+                from ..prompts.prompt_manager import get_prompt_manager
+                pm = get_prompt_manager()
+                prompt = pm.get_system_prompt(self.prompt_manager_key, inject_security=True)
+                if prompt:
+                    logger.info(f"[{self.name}] 使用 PromptManager 提示词 (key={self.prompt_manager_key})")
+                    return prompt
+            except Exception as e:
+                logger.warning(f"[{self.name}] 从 PromptManager 加载提示词失败: {e}")
+        
+        # 回退到文件提示词
         if not self.prompt_file:
             return self._get_default_prompt()
         
@@ -374,6 +479,9 @@ class BaseAgent(ABC):
     ) -> Union[str, AsyncGenerator[str, None]]:
         """带重试的LLM调用"""
         import asyncio
+
+        if stream:
+            return self._stream_response_with_retry(messages, temperature, max_tokens)
         
         last_error = None
         current_delay = self.retry_config.delay
@@ -383,8 +491,11 @@ class BaseAgent(ABC):
                 return await self._call_llm_internal(messages, temperature, max_tokens, stream)
             except Exception as e:
                 last_error = e
-                
+
                 if attempt >= self.retry_config.max_retries:
+                    break
+
+                if not self._is_retryable_error(e):
                     break
                 
                 # 计算延迟
@@ -405,6 +516,75 @@ class BaseAgent(ABC):
         # 所有重试失败
         logger.error(f"[{self.name}] LLM call failed after {self.retry_config.max_retries + 1} attempts")
         raise last_error
+
+    async def _stream_response_with_retry(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+    ) -> AsyncGenerator[str, None]:
+        """对流式响应在建立阶段和传输阶段都提供重试与续传兜底。"""
+        last_error: Optional[Exception] = None
+        current_delay = self.retry_config.delay
+        max_retries = max(int(self.retry_config.max_retries or 0), 1)
+        base_messages = [dict(message) for message in messages]
+        visible_text = ""
+
+        for attempt in range(max_retries + 1):
+            try:
+                attempt_base_text = visible_text
+                stream = await self._call_llm_internal(
+                    base_messages if not visible_text else self._build_stream_resume_messages(base_messages, visible_text),
+                    temperature,
+                    max_tokens,
+                    True,
+                )
+
+                continuation_raw = ""
+                continuation_visible = ""
+                async for chunk in stream:
+                    if not chunk:
+                        continue
+
+                    if not attempt_base_text:
+                        visible_text += chunk
+                        yield chunk
+                        continue
+
+                    continuation_raw += chunk
+                    candidate_visible = self._strip_stream_overlap(attempt_base_text, continuation_raw)
+                    delta = candidate_visible[len(continuation_visible):]
+                    if not delta:
+                        continue
+
+                    continuation_visible = candidate_visible
+                    visible_text = attempt_base_text + continuation_visible
+                    yield delta
+
+                return
+            except Exception as e:
+                last_error = e
+                if attempt >= max_retries or not self._is_retryable_stream_error(e):
+                    logger.error(
+                        f"[{self.name}] Stream failed after {attempt + 1}/{max_retries + 1} attempts: {e}"
+                    )
+                    raise
+
+                wait_time = min(current_delay, self.retry_config.max_delay)
+                if self.retry_config.jitter:
+                    import random
+                    jitter_min, jitter_max = RETRY_DEFAULTS.JITTER_RANGE
+                    wait_time *= random.uniform(jitter_min, jitter_max)
+
+                retry_mode = "resume" if visible_text else "restart"
+                logger.warning(
+                    f"[{self.name}] Stream failed (attempt {attempt + 1}/{max_retries + 1}, mode={retry_mode}): {e}. "
+                    f"Retrying in {wait_time:.2f}s..."
+                )
+                await asyncio.sleep(wait_time)
+                current_delay *= self.retry_config.backoff
+
+        raise last_error  # pragma: no cover
     
     async def _call_llm_internal(
         self,
@@ -425,7 +605,10 @@ class BaseAgent(ABC):
             "model": self._get_model_name(),
             "messages": full_messages,
             "temperature": temperature if temperature is not None else self._get_temperature(),
-            "max_tokens": max_tokens if max_tokens is not None else self._get_max_tokens(),
+            "max_tokens": normalize_max_tokens(
+                max_tokens if max_tokens is not None else self._get_max_tokens(),
+                source=self.name,
+            ),
             "stream": stream
         }
         
@@ -442,7 +625,72 @@ class BaseAgent(ABC):
             if stream:
                 return self._stream_response(params)
             else:
-                response = await self.client.chat.completions.create(**params)
+                if self._should_prefer_streaming_requests():
+                    content = await self._collect_stream_response_text(
+                        params,
+                        emit_callback=True,
+                    )
+                    duration = time.time() - start_time
+                    self.metrics.record_call(
+                        agent_name=self.name,
+                        tokens_in=0,
+                        tokens_out=0,
+                        duration=duration,
+                        success=True,
+                        method="call_llm_stream_aggregated"
+                    )
+                    try:
+                        record_token_usage(
+                            agent_name=self.name,
+                            model=params['model'],
+                            tokens_in=0,
+                            tokens_out=0,
+                            success=True,
+                            method="call_llm_stream_aggregated",
+                            duration=duration
+                        )
+                    except Exception as sqlite_err:
+                        logger.warning(f"[{self.name}] Failed to record token usage to SQLite: {sqlite_err}")
+                    logger.info(
+                        f"[{self.name}] Received aggregated streamed response: {len(content)} chars, "
+                        f"time: {duration:.2f}s"
+                    )
+                    return content
+                try:
+                    response = await self.client.chat.completions.create(**params)
+                except Exception as create_error:
+                    if self._should_force_stream_fallback(create_error, stream=stream):
+                        logger.warning(
+                            f"[{self.name}] Non-stream request rejected by provider, retrying with streaming fallback"
+                        )
+                        content = await self._collect_stream_response_text(params)
+                        duration = time.time() - start_time
+                        self.metrics.record_call(
+                            agent_name=self.name,
+                            tokens_in=0,
+                            tokens_out=0,
+                            duration=duration,
+                            success=True,
+                            method="call_llm_stream_fallback"
+                        )
+                        try:
+                            record_token_usage(
+                                agent_name=self.name,
+                                model=params['model'],
+                                tokens_in=0,
+                                tokens_out=0,
+                                success=True,
+                                method="call_llm_stream_fallback",
+                                duration=duration
+                            )
+                        except Exception as sqlite_err:
+                            logger.warning(f"[{self.name}] Failed to record token usage to SQLite: {sqlite_err}")
+                        logger.info(
+                            f"[{self.name}] Received streamed fallback response: {len(content)} chars, "
+                            f"time: {duration:.2f}s"
+                        )
+                        return content
+                    raise
                 
                 # 验证响应格式
                 if isinstance(response, str):
@@ -454,6 +702,19 @@ class BaseAgent(ABC):
                     raise Exception(f"API响应格式错误，缺少choices字段")
                 
                 content = response.choices[0].message.content
+                
+                # 处理content为None的情况（某些模型可能返回None，如refusal/tool_calls）
+                if content is None:
+                    # 尝试从refusal字段获取内容
+                    refusal = getattr(response.choices[0].message, 'refusal', None)
+                    if refusal:
+                        content = refusal
+                    else:
+                        content = ""
+                    logger.warning(
+                        f"[{self.name}] LLM returned None content, using fallback: "
+                        f"'{content[:100] if content else '(empty)'}'"
+                    )
                 
                 # 计算token使用
                 usage = getattr(response, 'usage', None)
@@ -535,6 +796,87 @@ class BaseAgent(ABC):
             if user_friendly_msg:
                 raise Exception(user_friendly_msg) from e
             raise
+
+    def _should_prefer_streaming_requests(self) -> bool:
+        """在存在上游回调时优先使用 provider 流式请求。"""
+        return self.callback_handler is not None
+
+    @staticmethod
+    def _should_force_stream_fallback(error: Exception, *, stream: bool) -> bool:
+        """识别需要改用流式请求的提供商错误。"""
+        if stream:
+            return False
+        error_lower = str(error or "").lower()
+        return (
+            "streaming is required" in error_lower
+            or ("longer than 10 minutes" in error_lower and "stream" in error_lower)
+        )
+
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        """识别适合自动重试的传输/服务端错误。"""
+        from ..utils.retry import is_retryable_error
+        return is_retryable_error(error)
+
+    _is_retryable_stream_error = _is_retryable_error
+
+    @staticmethod
+    def _strip_stream_overlap(existing_text: str, incoming_text: str, max_overlap: int = 256) -> str:
+        """去掉续传内容与已输出尾部的重叠前缀，避免重复显示。"""
+        if not existing_text or not incoming_text:
+            return incoming_text
+
+        search_limit = min(len(existing_text), len(incoming_text), max_overlap)
+        for overlap in range(search_limit, 0, -1):
+            if existing_text.endswith(incoming_text[:overlap]):
+                return incoming_text[overlap:]
+        return incoming_text
+
+    @staticmethod
+    def _build_stream_resume_messages(
+        messages: List[Dict[str, str]],
+        partial_text: str,
+        *,
+        tail_chars: int = 2000,
+    ) -> List[Dict[str, str]]:
+        """构造续传提示，让模型从已输出内容后自然接写。"""
+        safe_partial = (partial_text or "")[-tail_chars:]
+        resume_instruction = (
+            "上一次回答因流式传输中断。请严格从上面 assistant 已输出内容的末尾自然继续，"
+            "不要重复已有文字，不要重写开头，也不要解释中断原因，直接继续输出剩余内容。"
+        )
+        resumed_messages = [dict(message) for message in messages]
+        if safe_partial:
+            resumed_messages.append({"role": "assistant", "content": safe_partial})
+        resumed_messages.append({"role": "user", "content": resume_instruction})
+        return resumed_messages
+
+    async def _collect_stream_response_text(self, params: Dict[str, Any], emit_callback: bool = False) -> str:
+        """将流式响应聚合成普通文本，供非流式调用兜底使用。"""
+        stream_params = dict(params)
+        stream_params["stream"] = True
+        chunks: List[str] = []
+        async for chunk in self._stream_response(stream_params):
+            if chunk:
+                chunks.append(chunk)
+                if emit_callback:
+                    await self._emit_callback_event({
+                        "type": "llm_chunk",
+                        "agent": self.name,
+                        "content": chunk,
+                        "delta": chunk,
+                    })
+        return "".join(chunks)
+
+    async def _emit_callback_event(self, data: Dict[str, Any]) -> Optional[Any]:
+        """向回调处理器发送任意事件。"""
+        if not self.callback_handler:
+            return None
+        try:
+            return await self.callback_handler(data)
+        except Exception as e:
+            logger.warning(f"[{self.name}] Callback event failed: {e}")
+            return None
     
     def _parse_api_error(self, error_msg: str, model_name: str, api_base: str) -> Optional[str]:
         """
@@ -721,6 +1063,92 @@ class BaseAgent(ABC):
             执行结果
         """
         pass
+
+    # ==================== 能力声明接口 ====================
+
+    def get_capabilities(self) -> AgentCapability:
+        """
+        获取Agent标准能力声明。
+        
+        默认实现尽量保守，保证现有子类不改代码也可接入能力注册表。
+        子类后续可按需重写，补充更准确的任务类型、输入输出与优先级。
+        """
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=[],
+            accept_task_types=[],
+            required_inputs=[],
+            produced_outputs=[],
+            priority=50,
+            max_concurrency=1,
+            metadata={
+                "prompt_file": self.prompt_file or "",
+                "agent_class": self.__class__.__name__,
+            },
+        )
+
+    def accepts_task(self, task: Dict[str, Any]) -> bool:
+        """
+        判断当前Agent是否接受某类任务。
+        
+        默认规则：
+        - 若能力声明未配置 `accept_task_types`，返回 False，避免误接单
+        - 支持匹配 `task_type`
+        """
+        capability = self.get_capabilities()
+        task_type = str((task or {}).get("task_type") or "").strip()
+        if not task_type:
+            return False
+        accepted_types = {
+            str(item).strip()
+            for item in capability.accept_task_types
+            if str(item).strip()
+        }
+        return task_type in accepted_types
+
+    def estimate_cost(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        估算任务执行成本。
+        
+        当前为轻量默认实现，后续可被具体Agent覆盖。
+        """
+        capability = self.get_capabilities()
+        task_type = str((task or {}).get("task_type") or "").strip()
+        return {
+            "agent_name": self.name,
+            "task_type": task_type,
+            "priority": capability.priority,
+            "max_concurrency": capability.max_concurrency,
+            "estimated_tokens": 0,
+            "estimated_seconds": 0,
+            "confidence": 0.3 if self.accepts_task(task) else 0.0,
+        }
+
+    def requires_inputs(self, task: Optional[Dict[str, Any]] = None) -> List[str]:
+        """
+        返回任务所需输入字段。
+        
+        默认直接读取能力声明。
+        """
+        capability = self.get_capabilities()
+        return [
+            str(item).strip()
+            for item in capability.required_inputs
+            if str(item).strip()
+        ]
+
+    def produces_outputs(self, task: Optional[Dict[str, Any]] = None) -> List[str]:
+        """
+        返回任务产出字段。
+        
+        默认直接读取能力声明。
+        """
+        capability = self.get_capabilities()
+        return [
+            str(item).strip()
+            for item in capability.produced_outputs
+            if str(item).strip()
+        ]
     
     # ==================== 回调机制 ====================
     
@@ -774,17 +1202,13 @@ class BaseAgent(ABC):
             progress: 进度百分比 (0-100)
             data: 附加数据
         """
-        if self.callback_handler:
-            try:
-                await self.callback_handler({
-                    "type": "progress_update",
-                    "agent": self.name,
-                    "message": message,
-                    "progress": progress,
-                    "data": data
-                })
-            except Exception as e:
-                logger.warning(f"[{self.name}] Progress notification failed: {e}")
+        await self._emit_callback_event({
+            "type": "progress_update",
+            "agent": self.name,
+            "message": message,
+            "progress": progress,
+            "data": data
+        })
     
     # ==================== 消息总线集成 ====================
     
@@ -863,6 +1287,49 @@ class BaseAgent(ABC):
         
         logger.warning(f"[{self.name}] Task to {receiver} timed out after {timeout}s")
         return None
+
+    async def send_task_stream(
+        self,
+        receiver: str,
+        task_type: str,
+        task_data: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        timeout: float = TIMEOUTS.AGENT_DEFAULT
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        发送任务并流式接收中间事件与最终结果。
+
+        Yields:
+            dict: 标准化后的消息总线事件
+        """
+        from .message_bus import MessageType, create_task_message
+
+        await self.ensure_subscribed()
+
+        message = create_task_message(
+            sender=self.name,
+            receiver=receiver,
+            task_type=task_type,
+            task_data=task_data
+        )
+
+        if context:
+            message.payload["context"] = context
+
+        async for response in self.message_bus.request_stream(message, timeout=timeout):
+            yield {
+                "message_id": response.id,
+                "reply_to": response.reply_to,
+                "sender": response.sender,
+                "receiver": response.receiver,
+                "msg_type": response.msg_type.value,
+                "payload": dict(response.payload or {}),
+                "is_terminal": response.msg_type in {
+                    MessageType.TASK_COMPLETED,
+                    MessageType.TASK_FAILED,
+                    MessageType.CONTEXT_UPDATED,
+                }
+            }
     
     async def broadcast(self, msg_type: str, payload: Dict[str, Any]) -> None:
         """

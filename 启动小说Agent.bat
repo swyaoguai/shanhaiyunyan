@@ -13,16 +13,25 @@ echo   Multi-Agent Architecture
 echo ================================================================
 echo.
 
-:: Check Python
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.9+
-    goto :end
-)
-
 :: Change to script directory
 cd /d "%~dp0"
 echo [INFO] Working directory: %CD%
+
+:: Select interpreter
+set "PYTHON_CMD=python"
+if exist ".venv\Scripts\python.exe" (
+    set "PYTHON_CMD=%CD%\.venv\Scripts\python.exe"
+    echo [INFO] Using project virtual environment: !PYTHON_CMD!
+) else (
+    echo [INFO] Project virtual environment not found. Using system Python from PATH.
+)
+
+:: Check Python
+"%PYTHON_CMD%" --version >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Python not found or interpreter is invalid: %PYTHON_CMD%
+    goto :end
+)
 
 :: Check .env file
 if not exist ".env" (
@@ -50,10 +59,10 @@ if !PORT_IN_USE! equ 1 (
 
 :: Check dependencies
 echo [2/3] Checking dependencies...
-pip show fastapi >nul 2>&1
+"%PYTHON_CMD%" -c "import fastapi, uvicorn, dotenv" >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] Installing dependencies...
-    pip install -r requirements.txt
+    echo [INFO] Required packages missing for this interpreter. Installing dependencies...
+    "%PYTHON_CMD%" -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [ERROR] Failed to install dependencies
         goto :end
@@ -72,7 +81,7 @@ echo.
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 
-python run.py
+"%PYTHON_CMD%" run.py
 set EXITCODE=!errorlevel!
 
 if !EXITCODE! neq 0 (

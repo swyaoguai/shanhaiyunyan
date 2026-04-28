@@ -14,8 +14,7 @@ const trendsState = {
         autoRefresh: false,
         refreshInterval: 300,
         defaultPlatforms: ['douban', 'weread', 'zhihu', 'toutiao', 'bilibili', 'douyin'],
-        showInInfiniteWrite: true,
-        showInMultiAgent: true
+        showInInfiniteWrite: true
     },
     platforms: [],
     lastFetch: null,
@@ -86,8 +85,7 @@ async function loadTrendsConfig() {
             autoRefresh: config.auto_refresh || false,
             refreshInterval: config.refresh_interval || 300,
             defaultPlatforms: config.default_platforms || [],  // 使用空数组作为回退值，不预选任何平台
-            showInInfiniteWrite: config.show_in_infinite_write !== false,
-            showInMultiAgent: config.show_in_multi_agent !== false
+            showInInfiniteWrite: config.show_in_infinite_write !== false
         };
         trendsState.enabled = trendsState.config.enabled;
     } catch (e) {
@@ -165,14 +163,12 @@ async function saveTrendsConfig(config) {
 }
 
 // ===== 保存显示开关 =====
-async function saveTrendsVisibility(showInInfiniteWrite, showInMultiAgent) {
+async function saveTrendsVisibility(showInInfiniteWrite) {
     try {
         await apiCall('/api/trends/visibility', 'POST', {
-            show_in_infinite_write: showInInfiniteWrite,
-            show_in_multi_agent: showInMultiAgent
+            show_in_infinite_write: showInInfiniteWrite
         });
         trendsState.config.showInInfiniteWrite = showInInfiniteWrite;
-        trendsState.config.showInMultiAgent = showInMultiAgent;
         showToast('热点显示设置已保存');
     } catch (e) {
         console.error('[Trends] 保存显示设置失败:', e);

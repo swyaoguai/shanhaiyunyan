@@ -23,6 +23,7 @@ from .prompts import router as prompts_router
 from .token_stats import router as token_stats_router
 from .trends import router as trends_router
 from .aux_memory import router as aux_memory_router
+from .short_story import router as short_story_router
 from .novel_to_script import router as novel_to_script_router
 from .skills import router as skills_router
 from ..api.backup import router as backup_router
@@ -39,13 +40,17 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
 
     Args:
         app: FastAPI应用实例
-        use_versioned_api: 是否使用版本化API前缀
+        use_versioned_api: 是否注册版本化API前缀
+
+    Notes:
+        - 推荐前端与外部调用统一使用 `/api/v1`
+        - `/api` 当前仅作为兼容层保留
     """
     # 页面路由（无前缀）
     app.include_router(pages_router)
 
     # API路由
-    # 使用版本化前缀 /api/v1，同时保持 /api 向后兼容
+    # 推荐使用版本化前缀 /api/v1，同时保持 /api 兼容层
     api_routers = [
         (novel_router, "小说创作"),
         (settings_router, "设置"),
@@ -58,6 +63,7 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
         (token_stats_router, "Token统计"),
         (trends_router, "热点搜索"),
         (aux_memory_router, "辅助记忆"),
+        (short_story_router, "短篇创作"),
         (novel_to_script_router, "小说转剧本"),
         (skills_router, "Skills管理"),
         (backup_router, "备份管理"),

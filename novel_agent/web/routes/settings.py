@@ -17,15 +17,16 @@ from ..models.requests import (
     FetchModelsRequest,
     TestConnectionRequest,
     GlobalAPIConfigRequest,
+    TimeoutSettingsRequest,
     AddAPIConfigRequest,
     UpdateAPIConfigRequest,
     SetActiveConfigRequest,
     AddModelRequest
 )
-from ..dependencies import get_coordinator, set_coordinator, get_router_agent
+from ..runtime_refresh import refresh_runtime_after_config_reload
 from ...config import config
-from ...workflow import NovelCoordinator
 from ...constants import TIMEOUTS, LLM_DEFAULTS, SERVER_DEFAULTS
+from ...timeout_settings import get_timeout_setting_ranges, get_timeout_settings, save_timeout_settings
 from ...utils.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,199 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _sync_router_coordinator(new_coordinator: NovelCoordinator) -> None:
-    """Keep RouterAgent coordinator in sync."""
-    router_agent = get_router_agent()
-    if router_agent and hasattr(router_agent, "set_coordinator"):
-        router_agent.set_coordinator(new_coordinator)
+def _normalize_openai_base_url(api_base: str) -> str:
+    base_url = str(api_base or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    last_segment = base_url.rsplit("/", 1)[-1].lower() if base_url else ""
+    if not re.fullmatch(r"v\d+(\.\d+)?", last_segment):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _extract_model_ids(payload: object) -> list[str]:
+    models: list[str] = []
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        source = payload.get("data", [])
+    elif isinstance(payload, list):
+        source = payload
+    else:
+        source = []
+
+    for item in source:
+        if isinstance(item, str) and item.strip():
+            models.append(item.strip())
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or "").strip()
+            if model_id:
+                models.append(model_id)
+    return models
+
+
+async def _fetch_remote_models(api_base: str, api_key: str) -> tuple[int, list[str], str]:
+    base_url = _normalize_openai_base_url(api_base)
+    async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+        response = await client.get(
+            f"{base_url}/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+        )
+    body_preview = (response.text or "")[:200]
+    if response.status_code != 200:
+        return response.status_code, [], body_preview
+    try:
+        payload = response.json()
+    except Exception:
+        return response.status_code, [], body_preview
+    return response.status_code, _extract_model_ids(payload), body_preview
+
+
+TEST_CONNECTION_ERROR_RULES = {
+    401: [
+        {
+            "match": ("missing_api_key", "missing api key", "authorization"),
+            "error_code": "missing_api_key",
+            "title": "没带 Key",
+            "solution": "添加 Authorization 头，或者先把 API Key 保存进去。",
+        },
+        {
+            "match": ("expired", "api_key_expired"),
+            "error_code": "api_key_expired",
+            "title": "Key 已过期",
+            "solution": "联系管理员续期，或者换一把还有效的 Key。",
+        },
+        {
+            "match": (),
+            "error_code": "invalid_api_key",
+            "title": "Key 不对",
+            "solution": "检查 Key 是否正确，有没有多空格，必要时重新生成。",
+        },
+    ],
+    403: [
+        {
+            "match": ("disabled", "api_key_disabled"),
+            "error_code": "api_key_disabled",
+            "title": "Key 被禁用了",
+            "solution": "联系管理员启用，或者换一把可用的 Key。",
+        },
+        {
+            "match": (),
+            "error_code": "model_not_allowed",
+            "title": f"模型 {{model}} 没开权限",
+            "solution": "检查模型白名单，或者换成这个接口已授权的模型。",
+        },
+    ],
+    429: [
+        {
+            "match": ("quota", "额度", "insufficient_quota", "quota exceeded"),
+            "error_code": "quota_exceeded",
+            "title": "配额已经用完了",
+            "solution": "联系管理员补额度，或者等额度重置。",
+        },
+        {
+            "match": ("rpd", "per day", "daily"),
+            "error_code": "rate_limit_rpd",
+            "title": "今天的调用次数用完了",
+            "solution": "等第二天重置。",
+        },
+        {
+            "match": ("concurrent", "并发"),
+            "error_code": "concurrent_limit",
+            "title": "同时请求太多了",
+            "solution": "减少同时请求数，再试一次。",
+        },
+        {
+            "match": (),
+            "error_code": "rate_limit_rpm",
+            "title": "请求太快了",
+            "solution": "降低请求频率，稍等一会儿再试。",
+        },
+    ],
+    400: [
+        {
+            "match": ("max_tokens", "maximum context", "too many tokens"),
+            "error_code": "max_tokens_exceeded",
+            "title": "单次 Token 设得太大了",
+            "solution": "把 max_tokens 调低一点再试。",
+        },
+        {
+            "match": (),
+            "error_code": "bad_request",
+            "title": "请求参数不对",
+            "solution": "检查模型名、API 地址和请求参数格式。",
+        },
+    ],
+    404: [
+        {
+            "match": (),
+            "error_code": "model_or_endpoint_not_found",
+            "title": "模型名或接口地址不对",
+            "solution": "先确认 API Base 对不对，再确认模型名是否真实存在。",
+        },
+    ],
+    503: [
+        {
+            "match": (),
+            "error_code": "no_available_accounts",
+            "title": "服务暂时不可用",
+            "solution": "稍后重试；如果一直这样，联系管理员检查上游服务。",
+        },
+    ],
+}
+
+
+def _render_test_connection_mapping(rule: dict, test_model: str) -> dict:
+    return {
+        "error_code": str(rule["error_code"]),
+        "title": str(rule["title"]).replace("{model}", test_model or "当前模型"),
+        "solution": str(rule["solution"]).replace("{model}", test_model or "当前模型"),
+    }
+
+
+def _map_test_connection_error(status_code: int, error_detail: str, test_model: str) -> dict:
+    detail = str(error_detail or "").strip()
+    lower = detail.lower()
+    for rule in TEST_CONNECTION_ERROR_RULES.get(status_code, []):
+        needles = tuple(str(item).lower() for item in rule.get("match", ()) if str(item).strip())
+        if not needles or any(needle in lower for needle in needles):
+            return _render_test_connection_mapping(rule, test_model)
+    return {
+        "error_code": "unknown_error",
+        "title": f"接口返回了 {status_code}",
+        "solution": "先看返回详情，再确认 API 地址、模型和账户权限。",
+    }
+
+
+def _build_test_connection_response(
+    *,
+    success: bool,
+    error_code: str = "",
+    title: str = "",
+    solution: str = "",
+    error: str = "",
+    detail: str = "",
+    status_code: int | None = None,
+    model_tested: str = "",
+    response_time: int | None = None,
+) -> JSONResponse:
+    payload = {
+        "success": success,
+        "error_code": error_code,
+        "title": title,
+        "solution": solution,
+        "error": error,
+    }
+    if detail:
+        payload["detail"] = detail
+    if status_code is not None:
+        payload["status_code"] = status_code
+    if model_tested:
+        payload["model_tested"] = model_tested
+    if response_time is not None:
+        payload["response_time"] = response_time
+    return JSONResponse(payload)
 
 
 @router.get("/settings")
@@ -99,6 +288,8 @@ async def save_settings(request: APIConfigRequest):
                 "success": False,
                 "error": "Failed to reload configuration"
             }, status_code=500)
+
+        refresh_runtime_after_config_reload()
     except (OSError, IOError, PermissionError) as e:
         logger.error(f"Failed to write .env file: {e}")
         return JSONResponse({
@@ -106,15 +297,6 @@ async def save_settings(request: APIConfigRequest):
             "error": f"Failed to save settings: {e}"
         }, status_code=500)
 
-    from ..websocket import WebSocketProgressCallback
-    ws_callback = WebSocketProgressCallback()
-    new_coordinator = NovelCoordinator(
-        config.paths.output_dir,
-        progress_callback=ws_callback
-    )
-    set_coordinator(new_coordinator)
-    _sync_router_coordinator(new_coordinator)
-    
     return JSONResponse({"success": True, "message": "配置已保存"})
 
 
@@ -130,14 +312,7 @@ async def reload_settings():
             "error": "Failed to reload configuration"
         }, status_code=500)
 
-    from ..websocket import WebSocketProgressCallback
-    ws_callback = WebSocketProgressCallback()
-    new_coordinator = NovelCoordinator(
-        config.paths.output_dir,
-        progress_callback=ws_callback
-    )
-    set_coordinator(new_coordinator)
-    _sync_router_coordinator(new_coordinator)
+    refresh_runtime_after_config_reload()
 
     return JSONResponse({
         "success": True,
@@ -196,7 +371,7 @@ async def fetch_models(request: FetchModelsRequest):
                 "models": []
             })
         
-        base_url = api_base.rstrip("/")
+        base_url = _normalize_openai_base_url(api_base)
         models_url = f"{base_url}/models"
         
         async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_SHORT) as client:
@@ -365,55 +540,53 @@ async def test_connection(request: TestConnectionRequest):
             error_detail = (error_detail or "").strip()[:200]
 
             if response.status_code == 200:
-                return JSONResponse({
-                    "success": True,
-                    "message": "Connection successful.",
-                    "model_tested": test_model,
-                    "response_time": response_time
-                })
-            if response.status_code == 401:
-                suffix = f": {error_detail}" if error_detail else ""
-                return JSONResponse({
-                    "success": False,
-                    "error": f"Authentication failed (possible invalid key or account/model access issue){suffix}"
-                })
-            if response.status_code == 403:
-                suffix = f": {error_detail}" if error_detail else ""
-                return JSONResponse({
-                    "success": False,
-                    "error": f"Access denied (insufficient permission for this model or account){suffix}"
-                })
-            if response.status_code == 404:
-                return JSONResponse({
-                    "success": False,
-                    "error": f"Model '{test_model}' not found or API endpoint is incorrect."
-                })
-            if response.status_code == 429:
-                return JSONResponse({
-                    "success": False,
-                    "error": "Rate limited. Please retry later."
-                })
-
-            return JSONResponse({
-                "success": False,
-                "error": f"Connection failed (HTTP {response.status_code}): {error_detail or error_text[:200]}"
-            })
+                return _build_test_connection_response(
+                    success=True,
+                    title="可以正常用",
+                    solution="这套配置已经通过测试，可以直接拿来创作。",
+                    error="连通，模型也能正常回话。",
+                    model_tested=test_model,
+                    response_time=response_time,
+                    status_code=response.status_code,
+                )
+            mapped = _map_test_connection_error(response.status_code, error_detail, test_model)
+            return _build_test_connection_response(
+                success=False,
+                error_code=mapped["error_code"],
+                title=mapped["title"],
+                solution=mapped["solution"],
+                error=f"{mapped['title']}。{mapped['solution']}",
+                detail=error_detail or error_text[:200],
+                status_code=response.status_code,
+                model_tested=test_model,
+            )
 
     except httpx.TimeoutException:
-        return JSONResponse({
-            "success": False,
-                "error": "Connection timeout. Check API base URL and network."
-        })
+        return _build_test_connection_response(
+            success=False,
+            error_code="timeout",
+            title="连接超时",
+            solution="检查 API 地址、代理、网络和防火墙设置。",
+            error="连超时了。先看看 API 地址对不对、网络通不通。",
+        )
     except httpx.ConnectError as e:
-        return JSONResponse({
-            "success": False,
-            "error": f"Failed to connect to server: {str(e)}"
-        })
+        return _build_test_connection_response(
+            success=False,
+            error_code="connect_error",
+            title="服务器连不上",
+            solution="检查 API Base、网络出口、代理和防火墙。",
+            error="根本没连上目标服务器。",
+            detail=str(e),
+        )
     except Exception as e:
-        return JSONResponse({
-            "success": False,
-            "error": f"Connection failed: {str(e)}"
-        })
+        return _build_test_connection_response(
+            success=False,
+            error_code="unexpected_error",
+            title="测试失败",
+            solution="根据详细报错继续排查 API 地址、模型、权限或网络。",
+            error="测试没跑通，先看看详细报错。",
+            detail=str(e),
+        )
 
 # ========== API?==========
 
@@ -468,6 +641,39 @@ async def save_global_api_config(request: GlobalAPIConfigRequest):
     )
     
     return JSONResponse({"success": True, "message": "API"})
+
+
+@router.get("/timeout-settings")
+async def get_global_timeout_settings():
+    return JSONResponse(
+        {
+            "success": True,
+            "data": {
+                **get_timeout_settings(),
+                "ranges": get_timeout_setting_ranges(),
+            },
+        }
+    )
+
+
+@router.post("/timeout-settings")
+async def save_global_timeout_settings(request: TimeoutSettingsRequest):
+    try:
+        payload = request.model_dump(exclude_none=True)
+        settings = save_timeout_settings(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return JSONResponse(
+        {
+            "success": True,
+            "message": "超时设置已保存",
+            "data": {
+                **settings,
+                "ranges": get_timeout_setting_ranges(),
+            },
+        }
+    )
 
 
 # ===== PI =====
@@ -560,14 +766,71 @@ async def set_active_api_config(request: SetActiveConfigRequest):
     """ API """
     from ...agent_config import get_config_manager
     manager = get_config_manager()
+    target_config = next(
+        (cfg for cfg in manager.get_multi_config().configs if cfg.id == request.config_id),
+        None,
+    )
+    if target_config is None:
+        raise HTTPException(status_code=404, detail="")
 
-    if manager.set_active_config(request.config_id, request.model):
+    api_base = str(target_config.api_base or "").strip()
+    api_key = str(target_config.api_key or "").strip()
+    if not api_base or not api_key:
+        return JSONResponse({
+            "success": False,
+            "error": "所选 API 配置缺少 api_base 或 api_key，无法激活。",
+        }, status_code=400)
+
+    try:
+        status_code, remote_models, body_preview = await _fetch_remote_models(api_base, api_key)
+    except httpx.TimeoutException:
+        return JSONResponse({
+            "success": False,
+            "error": "目标 API 连接超时，无法激活该配置。",
+        }, status_code=400)
+    except Exception as exc:
+        return JSONResponse({
+            "success": False,
+            "error": f"目标 API 不可达，无法激活该配置: {exc}",
+        }, status_code=400)
+
+    if status_code != 200:
+        return JSONResponse({
+            "success": False,
+            "error": f"目标 API /models 返回 {status_code}，无法激活该配置。",
+            "body_preview": body_preview,
+        }, status_code=400)
+
+    requested_model = str(request.model or "").strip()
+    chosen_model = requested_model
+    if not chosen_model:
+        config_models = [str(item).strip() for item in (target_config.models or []) if str(item).strip()]
+        chosen_model = next((model for model in config_models if model in remote_models), "")
+
+    if not chosen_model:
+        return JSONResponse({
+            "success": False,
+            "error": "目标 API 可达，但当前配置中没有任何模型与远端模型列表匹配，无法激活。",
+            "remote_model_count": len(remote_models),
+        }, status_code=400)
+
+    if chosen_model not in remote_models:
+        return JSONResponse({
+            "success": False,
+            "error": f"模型 '{chosen_model}' 不在远端模型列表中，无法激活。",
+            "remote_model_count": len(remote_models),
+        }, status_code=400)
+
+    if manager.set_active_config(request.config_id, chosen_model):
         return JSONResponse({
             "success": True,
-            "message": ""
+            "message": "",
+            "active_model": chosen_model,
+            "remote_model_count": len(remote_models),
         })
-    else:
-        raise HTTPException(status_code=404, detail="")
+    raise HTTPException(status_code=404, detail="")
+
+
 
 
 @router.post("/api-configs/{config_id}/models")

@@ -1,11 +1,13 @@
 """Tests for AgentConfigManager effective config resolution."""
 
+import json
 from pathlib import Path
 import tempfile
 
 import pytest
 
 from novel_agent.agent_config import AgentConfigManager
+from novel_agent.utils.llm_params import PROVIDER_SAFE_MAX_TOKENS
 
 
 @pytest.fixture
@@ -222,3 +224,82 @@ def test_effective_config_keeps_selected_model_with_api_config_id(manager):
     assert effective.api_base == "https://api.doubao.example/v1"
     assert effective.api_key == "doubao-key"
     assert effective.model == "doubao-seed-2.0-code"
+
+
+def test_set_global_config_caps_oversized_max_tokens(manager):
+    manager.set_global_config(
+        api_base="https://global.example.com/v1",
+        api_key="global-key",
+        model="global-model",
+        temperature=0.31,
+        max_tokens=18888,
+    )
+
+    effective = manager.get_global_config()
+
+    assert effective.max_tokens == PROVIDER_SAFE_MAX_TOKENS
+
+
+def test_update_agent_config_caps_oversized_max_tokens(manager):
+    manager.update_config(
+        "Communicator",
+        use_global=False,
+        api_base="https://agent.example.com/v1",
+        api_key="agent-key",
+        model="agent-model",
+        temperature=0.88,
+        max_tokens=8888,
+    )
+
+    effective = manager.get_effective_config("Communicator")
+
+    assert effective.max_tokens == PROVIDER_SAFE_MAX_TOKENS
+
+
+def test_loading_existing_config_files_caps_oversized_max_tokens(tmp_path):
+    (tmp_path / "agent_configs.json").write_text(
+        json.dumps(
+            {
+                "Communicator": {
+                    "agent_name": "Communicator",
+                    "use_global": False,
+                    "api_base": "https://agent.example.com/v1",
+                    "api_key": "agent-key",
+                    "model": "agent-model",
+                    "temperature": 0.7,
+                    "max_tokens": 99999,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "global_api_config.json").write_text(
+        json.dumps(
+            {
+                "configs": [
+                    {
+                        "id": "cfg1",
+                        "name": "default",
+                        "api_base": "https://global.example.com/v1",
+                        "api_key": "global-key",
+                        "models": ["global-model"],
+                        "temperature": 0.7,
+                        "max_tokens": 18888,
+                        "created_at": "2026-03-25T00:00:00",
+                    }
+                ],
+                "active_config_id": "cfg1",
+                "active_model": "global-model",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = AgentConfigManager(config_dir=tmp_path)
+
+    assert manager.get_config("Communicator").max_tokens == PROVIDER_SAFE_MAX_TOKENS
+    assert manager.get_global_config().max_tokens == PROVIDER_SAFE_MAX_TOKENS

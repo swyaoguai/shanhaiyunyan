@@ -1,0 +1,175 @@
+// @vitest-environment jsdom
+
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const ROOT = process.cwd();
+
+function loadBrowserScript(relativePath) {
+  const absolutePath = path.join(ROOT, relativePath);
+  const source = readFileSync(absolutePath, 'utf8');
+  window.eval(source);
+}
+
+function resetGlobals() {
+  window.apiCall = vi.fn();
+  window.showToast = vi.fn();
+  window.loadProjects = vi.fn().mockResolvedValue(undefined);
+  window.loadSavedSettings = vi.fn().mockResolvedValue(undefined);
+  window.restoreSidebarState = vi.fn();
+  window.checkGlobalAPIConfig = vi.fn().mockResolvedValue(undefined);
+  window.switchModule = vi.fn();
+  window.loadKnowledgeCategories = vi.fn();
+  window.openChapterEditor = vi.fn();
+}
+
+beforeAll(() => {
+  loadBrowserScript('novel_agent/web/static/app-utils.js');
+  loadBrowserScript('novel_agent/web/static/app-core.js');
+  loadBrowserScript('novel_agent/web/static/app-copilot.js');
+});
+
+beforeEach(() => {
+  document.body.innerHTML = `
+    <div id="copilot-messages"></div>
+    <div id="copilot-workflow-panel" class="hidden"></div>
+    <div id="modal-container" class="hidden"></div>
+    <span id="copilot-session-mode"></span>
+    <span id="copilot-session-agent"></span>
+    <button id="copilot-session-list-btn"></button>
+    <div id="copilot-session-menu" class="hidden"></div>
+    <div class="copilot-input">
+      <div id="mention-popup" class="mention-popup hidden"></div>
+      <div class="copilot-input-wrapper">
+        <textarea id="copilot-input-text"></textarea>
+        <button id="copilot-send-btn"></button>
+      </div>
+    </div>
+  `;
+  localStorage.clear();
+  vi.restoreAllMocks();
+  resetGlobals();
+  window.initUIReferences();
+  window.store.projectData = {
+    characters: [],
+    outline: [],
+    worldbuilding: [],
+    items: [],
+    eventlines: [],
+    outline_settings: [],
+    detail_settings: [],
+    chapter_settings: [],
+    custom_knowledge: []
+  };
+  window.initCopilotEnhancements();
+});
+
+describe('copilot slash command prompts', () => {
+  it('keeps command prompts hidden by default and reveals them only after slash input', () => {
+    const input = document.getElementById('copilot-input-text');
+    const promptBar = document.querySelector('.copilot-command-prompts');
+    expect(promptBar?.classList.contains('hidden')).toBe(true);
+
+    input.value = '/';
+    input.setSelectionRange(1, 1);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(promptBar?.classList.contains('hidden')).toBe(false);
+    expect(document.querySelectorAll('.mention-item').length).toBeLessThanOrEqual(3);
+    const commandLinks = Array.from(document.querySelectorAll('.copilot-command-text'));
+    expect(commandLinks.length).toBeGreaterThan(0);
+    expect(commandLinks.some((item) => item.textContent?.includes('续写章节'))).toBe(true);
+    commandLinks.find((item) => item.textContent?.includes('续写章节'))?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(input?.value).toBe('/chapter 1 ');
+    expect(input?.selectionStart).toBe('/chapter '.length);
+    expect(input?.selectionEnd).toBe('/chapter 1'.length);
+  });
+
+  it('shows slash autocomplete results and renders plain-text helper for the active command', () => {
+    const input = document.getElementById('copilot-input-text');
+    input.value = '/wo';
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const popup = document.getElementById('mention-popup');
+    expect(popup?.classList.contains('hidden')).toBe(false);
+    expect(popup?.textContent).toContain('生成世界观');
+    expect(popup?.textContent).toContain('世界观');
+    expect(popup?.textContent).not.toContain('/worldbuild');
+
+    const helper = document.querySelector('.copilot-command-helper');
+    expect(document.querySelector('.copilot-command-prompts')?.classList.contains('hidden')).toBe(false);
+    expect(helper?.classList.contains('hidden')).toBe(false);
+    expect(helper?.textContent).toContain('生成世界观');
+    expect(helper?.textContent).not.toContain('/worldbuild');
+    expect(helper?.textContent).not.toContain('快速填写');
+  });
+
+  it('offers chapter commands, accepts keyboard selection, and shows parameter guidance', () => {
+    window.store.projectData.outline = [
+      { title: '雾港来信' },
+      { title: '铁雨将至' }
+    ];
+    window.updateMentionData();
+
+    const input = document.getElementById('copilot-input-text');
+    input.value = '/ch';
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const popup = document.getElementById('mention-popup');
+    expect(popup?.textContent).toContain('续写第1章');
+    expect(document.querySelector('.copilot-command-helper')?.textContent).toContain('参数：章节号');
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(input.value).toBe('/chapter 1 ');
+    expect(input.selectionStart).toBe('/chapter '.length);
+    expect(input.selectionEnd).toBe('/chapter 1'.length);
+    expect(popup?.classList.contains('hidden')).toBe(true);
+  });
+
+  it('confirms creation contract and appends task pool summary card', async () => {
+    window.apiCall.mockResolvedValueOnce({
+      creation_contract: {
+        contract_id: 'contract-2',
+        user_confirmed: true,
+        scope: { novel_type: '玄幻' }
+      },
+      task_pool: {
+        tasks: [
+          { title: '上下文规划', status: 'pending', candidate_agents: ['ContextStrategy'] }
+        ],
+        metadata: {
+          contract_id: 'contract-2',
+          source: 'contract_confirmation'
+        }
+      }
+    });
+
+    const html = window.renderCreationContractCard({
+      contract_id: 'contract-2',
+      user_confirmed: false,
+      scope: { novel_type: '玄幻' },
+      constraints: {},
+      deliverables: [],
+      task_graph: []
+    });
+    window.appendMessage(html, 'ai');
+
+    const button = document.querySelector('.copilot-contract-confirm-btn');
+    expect(button).not.toBeNull();
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/v1/contract/confirm', 'POST', expect.objectContaining({
+      contract_id: 'contract-2',
+      approved: true
+    }));
+    expect(window.store.currentTaskPool?.metadata?.contract_id).toBe('contract-2');
+    expect(document.body.textContent).toContain('任务池摘要');
+  });
+});

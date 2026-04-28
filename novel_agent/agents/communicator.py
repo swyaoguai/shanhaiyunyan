@@ -38,6 +38,28 @@ AUTO_TOOL_PATTERNS = {
 }
 
 
+def _strip_technical_markers(text: str) -> str:
+    """移除技术标记，并从JSON格式中提取reply字段"""
+    text = str(text or "").replace("[INFO_COMPLETE]", "").strip()
+    
+    # 如果文本看起来像JSON，尝试提取reply字段
+    if text.startswith('{') and '"reply"' in text:
+        try:
+            import json as _json
+            # 尝试解析JSON
+            json_match = __import__('re').search(r'\{[\s\S]*\}', text)
+            if json_match:
+                data = _json.loads(json_match.group())
+                if isinstance(data, dict) and "reply" in data:
+                    reply = str(data["reply"] or "").strip()
+                    if reply:
+                        return reply
+        except (ValueError, KeyError, TypeError):
+            pass
+    
+    return text
+
+
 class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
     """
     沟通智能体
@@ -73,6 +95,114 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         
         # 共享知识上下文（用于多Agent协作）
         self._shared_context: Optional[SharedKnowledgeContext] = None
+
+    def _get_runtime_progress_callback(self, runtime_context: Optional[Dict[str, Any]]) -> Optional[Any]:
+        """从运行时上下文中提取临时进度回调。"""
+        if not isinstance(runtime_context, dict):
+            return None
+        callback = runtime_context.get("progress_callback")
+        return callback if callback else None
+
+    def _install_runtime_progress_callback(self, runtime_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        将 runtime_context 中的 progress_callback 临时并入当前 callback_handler。
+
+        返回旧 handler，供调用方在 finally 中恢复。
+        """
+        progress_callback = self._get_runtime_progress_callback(runtime_context)
+        if not progress_callback:
+            return {"installed": False, "previous_handler": self.callback_handler}
+
+        previous_handler = self.callback_handler
+
+        async def combined_handler(data: Dict[str, Any]) -> Optional[Any]:
+            result: Optional[Any] = None
+            for handler in (progress_callback, previous_handler):
+                if not handler:
+                    continue
+                current = handler(data)
+                if hasattr(current, "__await__"):
+                    current = await current
+                if current is not None:
+                    result = current
+            return result
+
+        self.set_callback_handler(combined_handler)
+        return {"installed": True, "previous_handler": previous_handler}
+
+    def _restore_runtime_progress_callback(self, callback_state: Optional[Dict[str, Any]]) -> None:
+        """恢复临时安装前的 callback_handler。"""
+        if not isinstance(callback_state, dict) or not callback_state.get("installed"):
+            return
+        self.set_callback_handler(callback_state.get("previous_handler"))
+
+    async def _forward_stream_task_event(self, receiver: str, payload: Optional[Dict[str, Any]]) -> None:
+        """将消息总线流式任务事件转发给上游 callback。"""
+        if not isinstance(payload, dict) or not payload:
+            return
+
+        forwarded = dict(payload)
+        forwarded.setdefault("agent", str(payload.get("agent") or receiver).strip() or receiver)
+        forwarded.setdefault("current_agent", receiver)
+
+        if forwarded.get("type") == "llm_chunk" and not forwarded.get("content"):
+            forwarded["content"] = str(forwarded.get("delta") or "")
+
+        await self._emit_callback_event(forwarded)
+
+    async def _run_streaming_task_fallback(
+        self,
+        receiver: str,
+        task_type: str,
+        task_data: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        timeout: float = TIMEOUTS.AGENT_LONG,
+    ) -> Dict[str, Any]:
+        """通过消息总线流式执行子任务，并把过程事件向上游透传。"""
+        final_result: Optional[Dict[str, Any]] = None
+
+        async for event in self.send_task_stream(
+            receiver=receiver,
+            task_type=task_type,
+            task_data=task_data,
+            context=context,
+            timeout=timeout,
+        ):
+            msg_type = str(event.get("msg_type") or "").strip()
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+
+            if msg_type in {"task_progress", "user_input_required"}:
+                await self._forward_stream_task_event(receiver, payload)
+                continue
+
+            if msg_type == "task_completed":
+                result_payload = payload.get("result")
+                if isinstance(result_payload, dict):
+                    final_result = result_payload
+                else:
+                    final_result = {"result": result_payload}
+                break
+
+            if msg_type == "task_failed":
+                error_text = str(
+                    payload.get("error")
+                    or payload.get("message")
+                    or (payload.get("result") or {}).get("error")
+                    or f"{receiver} 执行失败"
+                ).strip()
+                await self._forward_stream_task_event(receiver, {
+                    "type": "agent_task_failed",
+                    "agent": receiver,
+                    "current_agent": receiver,
+                    "message": error_text,
+                    "error": error_text,
+                    "content": error_text,
+                })
+                return {"error": error_text}
+
+        if final_result is not None:
+            return final_result
+        return {"error": f"{receiver} 超时未完成"}
     
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import COMMUNICATOR_AGENT_PROMPT
@@ -104,7 +234,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         
         return opening
     
-    async def chat(self, user_message: str) -> Dict[str, Any]:
+    async def chat(self, user_message: str, runtime_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         处理用户消息，返回回复
         
@@ -116,6 +246,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         
         Args:
             user_message: 用户输入
+            runtime_context: 路由器或外部执行链注入的运行时上下文
             
         Returns:
             {
@@ -124,24 +255,62 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 "collected_info": {}  # 已收集的信息
             }
         """
+        runtime_context = runtime_context or {}
+        response_mode = str(runtime_context.get("response_mode") or "lightweight").strip() or "lightweight"
+
         # 添加用户消息到历史
         self.conversation_history.append({
             "role": "user",
             "content": user_message
         })
         
+        callback_state = self._install_runtime_progress_callback(runtime_context)
         try:
             # === 步骤1: 检测自动工具调用需求 ===
             auto_tool_result = await self._check_auto_tool_call(user_message)
+
+            external_tool_result = runtime_context.get("tool_results") if isinstance(runtime_context, dict) else None
+            if (
+                (not auto_tool_result or not auto_tool_result.get("success"))
+                and isinstance(external_tool_result, dict)
+                and external_tool_result.get("success")
+            ):
+                auto_tool_result = external_tool_result
             
             # === 步骤2: 知识库检索 ===
             kb_context = await self._retrieve_knowledge_context(user_message)
+            external_knowledge = runtime_context.get("knowledge") if isinstance(runtime_context, dict) else None
+            if isinstance(external_knowledge, list) and external_knowledge:
+                merged_kb_context = []
+                seen_keys = set()
+
+                for item in list(external_knowledge) + list(kb_context):
+                    if isinstance(item, dict):
+                        content = str(item.get("content") or "").strip()
+                        score = item.get("score", 0.0)
+                        normalized_item = dict(item)
+                    else:
+                        content = str(item).strip()
+                        score = 0.0
+                        normalized_item = {"content": content, "score": score}
+
+                    if not content:
+                        continue
+
+                    dedup_key = (content[:200], str(score))
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+                    merged_kb_context.append(normalized_item)
+
+                kb_context = merged_kb_context
             
             # === 步骤3: 构建增强提示 ===
             analysis_prompt = self._build_analysis_prompt(
                 user_message,
                 auto_tool_result,
-                kb_context
+                kb_context,
+                response_mode=response_mode,
             )
             
             messages = self.conversation_history.copy()
@@ -173,7 +342,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                         reply = f"{reply}\n\n{tool_text}"
             
             # 移除技术标记（不应该显示给用户），再写入对话历史
-            reply_clean = reply.replace("[INFO_COMPLETE]", "").strip()
+            reply_clean = _strip_technical_markers(reply)
             self.conversation_history.append({
                 "role": "assistant",
                 "content": reply_clean
@@ -202,8 +371,14 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 "collected_info": self.collected_info,
                 "error": str(e)
             }
+        finally:
+            self._restore_runtime_progress_callback(callback_state)
 
-    async def chat_stream(self, user_message: str) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self,
+        user_message: str,
+        runtime_context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
         """
         流式处理用户消息，逐块返回SSE事件
 
@@ -219,14 +394,18 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             "content": user_message
         })
 
+        callback_state = self._install_runtime_progress_callback(runtime_context)
         try:
+            runtime_context = runtime_context or {}
+            response_mode = str(runtime_context.get("response_mode") or "lightweight").strip() or "lightweight"
+
             # === 预处理（同步） ===
             auto_tool_result = await self._check_auto_tool_call(user_message)
             kb_context = await self._retrieve_knowledge_context(user_message)
 
             # 构建流式提示（不要求JSON格式）
             analysis_prompt = self._build_stream_prompt(
-                user_message, auto_tool_result, kb_context
+                user_message, auto_tool_result, kb_context, response_mode=response_mode
             )
 
             messages = self.conversation_history.copy()
@@ -239,11 +418,43 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             )
 
             full_text = ""
+            visible_text = ""
             chunk_count = 0
+            marker = "[INFO_COMPLETE]"
+            json_extracted_reply = ""
+            
             async for chunk in stream:
                 chunk_count += 1
                 full_text += chunk
-                yield f"data: {_json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
+
+                # 检测LLM是否输出了JSON格式（而非纯文本）
+                if not json_extracted_reply:
+                    json_match = re.search(r'\{[\s\S]*"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', full_text)
+                    if json_match:
+                        json_extracted_reply = json_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                        logger.info(f"[{self.name}] 检测到JSON格式输出，提取reply字段")
+                
+                # 如果已提取到reply，使用提取的内容
+                if json_extracted_reply:
+                    current_visible_text = json_extracted_reply.replace(marker, "")
+                else:
+                    # 正常模式：过滤技术标记
+                    current_visible_text = full_text.replace(marker, "")
+                    # 如果文本以JSON开头，等待更多内容再决定是否输出
+                    stripped = current_visible_text.lstrip()
+                    if stripped.startswith('{') and '"reply"' not in stripped[:200]:
+                        visible_text = current_visible_text
+                        continue
+                
+                visible_delta = current_visible_text[len(visible_text):]
+                visible_text = current_visible_text
+
+                if visible_delta:
+                    yield f"data: {_json.dumps({'type': 'chunk', 'content': visible_delta}, ensure_ascii=False)}\n\n"
+            
+            # 如果从JSON中提取了reply，更新full_text
+            if json_extracted_reply:
+                full_text = json_extracted_reply
             
             logger.info(f"[{self.name}] 流式输出完成，共 {chunk_count} 个chunk，总长度 {len(full_text)} 字符")
 
@@ -253,19 +464,20 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             # 2. LLM的回复已经流式输出给用户
             # 3. 不应该在流式输出后再修改回复内容
             
-            reply = full_text  # 直接使用LLM的完整输出
+            reply = full_text  # 原始完整输出，仅用于完成标记判断
+            reply_clean = _strip_technical_markers(reply)
 
             # 添加AI回复到历史
             self.conversation_history.append({
                 "role": "assistant",
-                "content": reply
+                "content": reply_clean
             })
 
             # 发送完成事件
             done_data = {
                 "type": "done",
-                "reply": reply,
-                "is_complete": "[INFO_COMPLETE]" in reply,
+                "reply": reply_clean,
+                "is_complete": marker in reply,
                 "collected_info": self.collected_info,
                 "knowledge_used": bool(kb_context),
                 "auto_tool_called": bool(auto_tool_result)
@@ -273,14 +485,40 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             yield f"data: {_json.dumps(done_data, ensure_ascii=False)}\n\n"
 
         except Exception as e:
-            logger.error(f"Chat stream error: {e}", exc_info=True)
-            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            if visible_text:
+                logger.warning(
+                    f"[{self.name}] Chat stream interrupted after partial output, returning partial reply: {e}",
+                    exc_info=True,
+                )
+                reply = full_text
+                reply_clean = _strip_technical_markers(reply)
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": reply_clean
+                })
+                done_data = {
+                    "type": "done",
+                    "reply": reply_clean,
+                    "is_complete": marker in reply,
+                    "collected_info": self.collected_info,
+                    "knowledge_used": bool(kb_context),
+                    "auto_tool_called": bool(auto_tool_result),
+                    "interrupted": True,
+                    "warning": "回复在流式传输阶段中断，已返回已生成内容。",
+                }
+                yield f"data: {_json.dumps(done_data, ensure_ascii=False)}\n\n"
+            else:
+                logger.error(f"Chat stream error: {e}", exc_info=True)
+                yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            self._restore_runtime_progress_callback(callback_state)
 
     def _build_stream_prompt(
         self,
         user_message: str,
         auto_tool_result: Optional[Dict[str, Any]],
-        kb_context: List[Dict[str, Any]]
+        kb_context: List[Dict[str, Any]],
+        response_mode: str = "lightweight",
     ) -> str:
         """构建流式模式的分析提示（不要求JSON格式）"""
         parts = []
@@ -322,8 +560,18 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 if tool_text:
                     parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
 
-        parts.append("""
-请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
+        parts.append(f"""
+当前回复模式：{response_mode}
+
+回复模式要求：
+- lightweight：自然追问或轻量回应，不要过度分块
+- summary：用结构化 Markdown 总结已知信息
+- confirmation：用结构化 Markdown 给出确认稿与下一步
+- comparison：如涉及方案对比，优先表格
+- planning：如涉及执行路径，优先有序列表
+
+**重要**：请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
+**绝对不要**输出JSON格式、代码块、或任何技术标记。
 结合知识库内容和工具结果给出准确、有条理的回复。
 如果信息已经足够，在回复末尾加上 [INFO_COMPLETE]。""")
 
@@ -421,7 +669,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         self,
         user_message: str,
         auto_tool_result: Optional[Dict[str, Any]],
-        kb_context: List[Dict[str, Any]]
+        kb_context: List[Dict[str, Any]],
+        response_mode: str = "lightweight",
     ) -> str:
         """构建增强分析提示"""
         parts = []
@@ -467,20 +716,30 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                     parts.append(f"\n【工具调用结果】\n{tool_text[:500]}...")
         
         # 指令
-        parts.append("""
+        parts.append(f"""
+当前回复模式：{response_mode}
+
+回复模式要求：
+- lightweight：自然、简洁、像聊天，不强制大段结构化
+- summary：适合需求总结，使用分块与列表
+- confirmation：适合定稿确认，先总结，再给下一步
+- comparison：适合多方案比较，优先表格
+- planning：适合执行计划，优先有序列表
+
 请：
 1. 从用户的回复中提取有用的信息
 2. 结合知识库内容和工具结果，给出更准确的回复
 3. 判断还缺少哪些关键信息
 4. 如果信息足够，在回复末尾加上 [INFO_COMPLETE]
 5. 如果还需要更多信息，友好地继续提问
+6. 严格遵守当前回复模式，不要在 lightweight 模式下过度结构化
 
 以JSON格式返回：
-{
-    "extracted_info": {"字段名": "提取的值"},
+{{
+    "extracted_info": {{"字段名": "提取的值"}},
     "reply": "你的回复内容",
     "is_complete": true/false
-}""")
+}}""")
         
         return "\n".join(parts)
     
@@ -583,8 +842,12 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         if search_match:
             platform = search_match.group(1).lower()
         elif self._is_trends_request(user_message):
-            # 用户询问热点，默认搜索微博
-            platform = self._detect_platform(user_message) or "weibo"
+            # 用户询问热点，默认使用当前正式支持的平台
+            platform = self._detect_platform(user_message) or "toutiao"
+
+        if platform and platform not in TRENDS_PLATFORMS:
+            logger.info(f"[Communicator] 热点平台 {platform} 当前未纳入正式支持列表，回退到 toutiao")
+            platform = "toutiao"
         
         if platform and platform in TRENDS_PLATFORMS:
             try:
@@ -629,14 +892,10 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         return is_match
     
     def _detect_platform(self, message: str) -> Optional[str]:
-        """从用户消息中检测平台"""
+        """从用户消息中检测平台（仅返回当前正式支持的平台）。"""
         platform_keywords = {
-            "weibo": ["微博", "weibo"],
-            "zhihu": ["知乎", "zhihu"],
             "douyin": ["抖音", "tiktok", "douyin"],
-            "bilibili": ["b站", "bilibili", "哔哩哔哩"],
-            "baidu": ["百度", "baidu"],
-            "toutiao": ["头条", "今日头条", "toutiao"]
+            "toutiao": ["头条", "今日头条", "toutiao"],
         }
         message_lower = message.lower()
         for platform, keywords in platform_keywords.items():
@@ -644,7 +903,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 return platform
         return None
     
-    async def search_trends(self, platform: str = "weibo", limit: int = 20) -> List[Dict[str, Any]]:
+    async def search_trends(self, platform: str = "toutiao", limit: int = 20) -> List[Dict[str, Any]]:
         """
         搜索热点话题（使用内置Skill服务）
 
@@ -766,12 +1025,61 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
     
     def _is_web_search_request(self, message: str) -> bool:
         """检测用户是否需要网络搜索（冷门梗等）"""
+        blocked_phrases = [
+            "搜索结果出来了吗",
+            "搜到了吗",
+            "怎么样了",
+            "好了吗",
+            "随便",
+            "你自己选",
+            "快点",
+        ]
+        if any(phrase in message for phrase in blocked_phrases):
+            return False
+
         keywords = ["搜索", "查一下", "查询", "找一下", "什么是", "解释", "冷门梗", "冷梗", "网络梗"]
         is_match = any(kw in message for kw in keywords)
         # 排除热点请求
         if self._is_trends_request(message):
             return False
         return is_match
+
+    def _extract_search_query_from_message(self, message: str) -> str:
+        """从用户消息中提取适合搜索的简短查询词。"""
+        query = str(message or "").strip()
+        prefixes = [
+            "帮我搜索一下",
+            "帮我查一下",
+            "帮我查询一下",
+            "帮我找一下",
+            "搜索一下",
+            "查一下",
+            "查询一下",
+            "找一下",
+            "搜索",
+            "查询",
+            "解释一下",
+            "解释",
+            "什么是",
+        ]
+        for prefix in prefixes:
+            if query.startswith(prefix):
+                query = query[len(prefix):].strip()
+                break
+        return query or str(message or "").strip()
+
+    def _fallback_search_intent(self, message: str) -> Optional[Dict[str, Any]]:
+        """LLM 搜索意图判定失败时的保守兜底。"""
+        if not self._is_web_search_request(message):
+            return None
+        query = self._extract_search_query_from_message(message)
+        if not query:
+            return None
+        return {
+            "need_search": True,
+            "query": query,
+            "source": "heuristic_fallback",
+        }
     
     async def _detect_search_intent(self, message: str) -> Optional[Dict[str, Any]]:
         """
@@ -830,9 +1138,15 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             )
             
             logger.info(f"[{self.name}] 意图检测响应类型: {type(response)}, 长度: {len(str(response))}")
-            
+
+            if not str(response or "").strip():
+                raise ValueError("empty_intent_response")
+
             # 解析JSON响应
             result = self._parse_response(response)
+            if not isinstance(result.get("need_search"), bool):
+                raise ValueError(f"invalid_intent_payload: {result}")
+
             if result.get("need_search"):
                 logger.info(f"[{self.name}] LLM判断需要搜索: {result.get('query', '')}")
                 return result
@@ -842,7 +1156,10 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             
         except Exception as e:
             logger.warning(f"[{self.name}] LLM意图检测失败: {e}", exc_info=True)
-            return None
+            fallback_intent = self._fallback_search_intent(message)
+            if fallback_intent:
+                logger.info(f"[{self.name}] 启发式兜底判定需要搜索: {fallback_intent.get('query', '')}")
+            return fallback_intent
     
     def _format_web_results(self, results: List[Dict], query: str) -> str:
         """格式化网络搜索结果"""
@@ -940,7 +1257,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         requirements: str = ""
     ) -> Dict[str, Any]:
         """
-        请求世界观构建（通过消息总线）
+        请求世界观构建（优先走主协调器，回退到消息总线）
         
         Args:
             novel_type: 小说类型
@@ -950,7 +1267,18 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         Returns:
             世界观数据
         """
-        result = await self.send_task(
+        coordinator = getattr(self.router_agent, "coordinator", None) if self.router_agent else None
+        if coordinator and hasattr(coordinator, "generate_world"):
+            try:
+                return await coordinator.generate_world(
+                    novel_type=novel_type,
+                    theme=theme,
+                    requirements=requirements,
+                )
+            except Exception as exc:
+                logger.warning(f"[{self.name}] 协调器世界观构建失败，回退消息总线: {exc}")
+
+        result = await self._run_streaming_task_fallback(
             receiver="Worldbuilder",
             task_type="build_world",
             task_data={
@@ -974,7 +1302,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         chapters_per_volume: int = 10
     ) -> Dict[str, Any]:
         """
-        请求大纲生成（通过消息总线）
+        请求大纲生成（优先走主协调器，回退到消息总线）
         
         Args:
             world: 世界观数据
@@ -986,9 +1314,22 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         Returns:
             大纲数据
         """
-        result = await self.send_task(
+        coordinator = getattr(self.router_agent, "coordinator", None) if self.router_agent else None
+        if coordinator and hasattr(coordinator, "generate_outline"):
+            try:
+                return await coordinator.generate_outline(
+                    world=world,
+                    protagonist=protagonist,
+                    plot_idea=plot_idea,
+                    volume_count=volume_count,
+                    chapters_per_volume=chapters_per_volume,
+                )
+            except Exception as exc:
+                logger.warning(f"[{self.name}] 协调器大纲生成失败，回退消息总线: {exc}")
+
+        result = await self._run_streaming_task_fallback(
             receiver="Outliner",
-            task_type="create_outline",
+            task_type="build_outline",
             task_data={
                 "protagonist": protagonist,
                 "plot_idea": plot_idea,
@@ -1011,7 +1352,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        请求章节撰写（通过消息总线）
+        请求章节撰写（优先走主协调器，回退到消息总线）
         
         Args:
             chapter_number: 章节号
@@ -1022,7 +1363,18 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         Returns:
             章节内容
         """
-        result = await self.send_task(
+        coordinator = getattr(self.router_agent, "coordinator", None) if self.router_agent else None
+        if coordinator and hasattr(coordinator, "write_single_chapter"):
+            try:
+                return await coordinator.write_single_chapter(
+                    chapter_number=chapter_number,
+                    chapter_outline=chapter_outline,
+                    chapter_title=chapter_title or f"第{chapter_number}章",
+                )
+            except Exception as exc:
+                logger.warning(f"[{self.name}] 协调器章节写作失败，回退消息总线: {exc}")
+
+        result = await self._run_streaming_task_fallback(
             receiver="ChapterWriter",
             task_type="write_chapter",
             task_data={
@@ -1051,8 +1403,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         """
         协作完成完整创作流程
         
-        这个方法展示了如何通过消息总线协调多个Agent工作
-        使用共享知识上下文确保各Agent间状态一致
+        优先复用主协调器执行链，避免形成与当前产品主路径脱节的悬空协作模式。
+        若主协调器不可用，再回退到消息总线分阶段协作。
         
         Args:
             novel_type: 小说类型
@@ -1072,6 +1424,54 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             "dead_characters": [],
             "constraints": []
         }
+
+        coordinator = getattr(self.router_agent, "coordinator", None) if self.router_agent else None
+        if coordinator and hasattr(coordinator, "create_novel"):
+            try:
+                await self.notify_progress("正在调用主协调器执行完整创作流程...", 5)
+                latest_payload: Dict[str, Any] = {}
+                async for payload in coordinator.create_novel(
+                    novel_type=novel_type,
+                    theme=theme,
+                    requirements=requirements,
+                    protagonist=protagonist,
+                    plot_idea=plot_idea,
+                    volume_count=volume_count,
+                    chapters_per_volume=chapters_per_volume,
+                ):
+                    if isinstance(payload, dict):
+                        latest_payload = payload
+                        stage = str(payload.get("stage") or "").strip()
+                        if stage and stage not in results["stages_completed"] and stage not in {"init", "completed"}:
+                            results["stages_completed"].append(stage)
+
+                if latest_payload.get("stage") == "failed":
+                    results["errors"].append(str(latest_payload.get("error") or latest_payload.get("message") or "协作创作失败"))
+                else:
+                    results["project"] = latest_payload.get("project", {})
+                    results["file_path"] = latest_payload.get("file_path", "")
+                    if "completed" not in results["stages_completed"]:
+                        results["stages_completed"].append("completed")
+
+                if self.has_knowledge_base:
+                    try:
+                        results["dead_characters"] = self.knowledge_base.get_dead_characters()
+                    except Exception:
+                        results["dead_characters"] = []
+                    try:
+                        constraints = self.knowledge_base.get_active_constraints()
+                        results["constraints"] = [
+                            {"type": c.constraint_type, "description": c.title, "entities": c.entities}
+                            for c in constraints
+                        ]
+                    except Exception:
+                        results["constraints"] = []
+
+                await self.notify_progress("主协调器创作完成", 100)
+                return results
+            except Exception as exc:
+                logger.warning(f"[{self.name}] 主协调器完整创作失败，回退消息总线协作: {exc}")
+                results["errors"].append(f"主协调器回退: {exc}")
         
         # 初始化共享知识上下文
         if not self._shared_context and self.has_knowledge_base:

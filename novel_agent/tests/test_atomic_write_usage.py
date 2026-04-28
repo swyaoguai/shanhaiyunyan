@@ -22,3 +22,10 @@ def test_aux_memory_uses_atomic_temp_builder():
 
     assert "atomic_write_json" in content
     assert "with_suffix(f\"{path.suffix}.tmp\")" not in content
+
+
+def test_session_store_uses_atomic_write_json():
+    content = Path("novel_agent/agents/session_store.py").read_text(encoding="utf-8")
+
+    assert "atomic_write_json" in content
+    assert "temp_path.replace(path)" not in content

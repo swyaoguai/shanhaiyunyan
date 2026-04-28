@@ -10,6 +10,7 @@
 
 import logging
 import uuid
+from collections import defaultdict
 from typing import Optional, Any
 from dataclasses import dataclass
 
@@ -224,16 +225,62 @@ class KnowledgeAPI:
         
         # 如果内容更新，需要重建索引
         if content is not None:
-            # 删除旧的分块
-            self.delete_chapter(chapter_id)
+            # 先备份旧内容，避免“先删后加”失败导致数据丢失
+            backup_title = existing.title
+            backup_number = existing.chapter_number
+            backup_metadata = existing.metadata
+            backup_content = self.get_chapter_content(chapter_id)
+            if backup_content is None:
+                return AddChapterResult(
+                    chapter_id=chapter_id,
+                    title=title or existing.title,
+                    word_count=0,
+                    chunk_count=0,
+                    success=False,
+                    error="无法读取旧章节内容，已拒绝执行高风险更新"
+                )
+
+            deleted = self.delete_chapter(chapter_id)
+            if not deleted:
+                return AddChapterResult(
+                    chapter_id=chapter_id,
+                    title=title or existing.title,
+                    word_count=0,
+                    chunk_count=0,
+                    success=False,
+                    error="删除旧章节失败，未执行更新"
+                )
             
-            # 重新添加
-            return self.add_chapter(
+            # 重新添加；若失败则尽力回滚
+            updated_result = self.add_chapter(
                 chapter_id=chapter_id,
                 title=title or existing.title,
                 content=content,
                 chapter_number=chapter_number or existing.chapter_number,
                 metadata=metadata or existing.metadata
+            )
+            if updated_result.success:
+                return updated_result
+
+            logger.error(f"更新章节失败，开始回滚: {chapter_id}, error={updated_result.error}")
+            rollback_result = self.add_chapter(
+                chapter_id=chapter_id,
+                title=backup_title,
+                content=backup_content,
+                chapter_number=backup_number,
+                metadata=backup_metadata
+            )
+            rollback_error = ""
+            if not rollback_result.success:
+                rollback_error = f"，且回滚失败: {rollback_result.error}"
+
+            return AddChapterResult(
+                chapter_id=chapter_id,
+                title=title or existing.title,
+                word_count=0,
+                chunk_count=0,
+                success=False,
+                error=f"更新失败: {updated_result.error}{rollback_error}"
             )
         
         # 只更新元数据
@@ -412,6 +459,124 @@ class KnowledgeAPI:
         
         return results
     
+    def search_nodes(
+        self,
+        query: str,
+        limit: int = 10,
+        node_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """搜索知识节点。"""
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        metadata_hits = self._search_metadata_nodes(query, node_type=node_type, limit=limit)
+        vector_hits = self._search_vector_nodes(query, limit=limit)
+        merged = self._merge_search_hits(metadata_hits, vector_hits, limit=limit)
+        return merged
+
+    def get_node_neighbors(self, node_id: str, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
+        """获取节点的邻居关系。"""
+        node_id = (node_id or "").strip()
+        if not node_id:
+            return {"incoming": [], "outgoing": []}
+
+        chapter = self.metadata_store.get_chapter(node_id)
+        if chapter:
+            node = self._chapter_to_node(chapter)
+        else:
+            node = self.get_node(node_id)
+        if not node:
+            return {"incoming": [], "outgoing": []}
+
+        outgoing = node.get("links_out", [])[:limit]
+        incoming = self._find_incoming_neighbors(node_id, limit=limit)
+        return {"incoming": incoming, "outgoing": outgoing}
+
+    def get_node(self, node_id: str) -> Optional[dict[str, Any]]:
+        """按节点 ID 获取知识节点。"""
+        node_id = (node_id or "").strip()
+        if not node_id:
+            return None
+
+        chapter = self.metadata_store.get_chapter(node_id)
+        if chapter:
+            return self._chapter_to_node(chapter)
+
+        hits = self._search_metadata_nodes(node_id, limit=1)
+        return hits[0] if hits else None
+
+    def _search_metadata_nodes(self, query: str, node_type: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        query_lower = query.lower()
+        for chapter in self.metadata_store.list_chapters(limit=None):
+            node = self._chapter_to_node(chapter)
+            if node_type and node.get("type") != node_type:
+                continue
+            haystack = " ".join([
+                node.get("id", ""),
+                node.get("title", ""),
+                node.get("summary", ""),
+                " ".join(node.get("links_out", [])),
+                " ".join(node.get("tags", [])),
+            ]).lower()
+            if query_lower in haystack:
+                node["score"] = 1.0
+                hits.append(node)
+        return hits[:limit]
+
+    def _search_vector_nodes(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        try:
+            results = self.vector_store.search(query, limit=limit)
+        except Exception:
+            return []
+        nodes: list[dict[str, Any]] = []
+        for item in results or []:
+            meta = item.get("metadata") or {}
+            nodes.append({
+                "id": meta.get("chapter_id") or meta.get("node_id") or item.get("id"),
+                "type": meta.get("type") or "chapter_summary",
+                "title": meta.get("title") or item.get("id", ""),
+                "summary": item.get("document") or "",
+                "score": item.get("score", 0.0),
+                "links_out": meta.get("links", []),
+                "metadata": meta,
+            })
+        return nodes
+
+    def _merge_search_hits(self, metadata_hits: list[dict[str, Any]], vector_hits: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for hit in vector_hits + metadata_hits:
+            hit_id = str(hit.get("id") or "").strip()
+            if not hit_id:
+                continue
+            if hit_id not in merged or hit.get("score", 0.0) > merged[hit_id].get("score", 0.0):
+                merged[hit_id] = hit
+        return sorted(merged.values(), key=lambda x: x.get("score", 0.0), reverse=True)[:limit]
+
+    def _find_incoming_neighbors(self, node_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        incoming: list[dict[str, Any]] = []
+        for chapter in self.metadata_store.list_chapters(limit=None):
+            node = self._chapter_to_node(chapter)
+            if node_id in node.get("links_out", []):
+                incoming.append({"id": node["id"], "title": node["title"], "type": node["type"]})
+            if len(incoming) >= limit:
+                break
+        return incoming[:limit]
+
+    def _chapter_to_node(self, chapter: ChapterInfo) -> dict[str, Any]:
+        metadata = chapter.metadata or {}
+        return {
+            "id": chapter.chapter_id,
+            "type": "chapter_summary",
+            "title": chapter.title,
+            "summary": metadata.get("summary_text") or metadata.get("summary") or "",
+            "links_out": metadata.get("links", []),
+            "links_in": metadata.get("links_in", []),
+            "tags": metadata.get("tags", []),
+            "metadata": metadata,
+        }
+
     def get_statistics(self) -> dict[str, Any]:
         """
         获取知识库统计信息

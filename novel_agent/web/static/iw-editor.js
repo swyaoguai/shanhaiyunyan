@@ -17,129 +17,125 @@ let iwCurrentMatchIndex = -1;
 
 // ===== 显示章节编辑器（替换原有的预览功能） =====
 function showInfiniteWriteChapterEditor(chapter) {
+    if (typeof loadInfiniteWriteDataForCurrentProject === 'function') {
+        loadInfiniteWriteDataForCurrentProject();
+    }
+
+    if (currentEditingIWChapter.modified && currentEditingIWChapter.chapter?.chapter_number !== chapter.chapter_number) {
+        const confirmed = confirm('当前章节有未保存的修改，确定要切换章节吗？');
+        if (!confirmed) return;
+    }
+
     const chapterIndex = infiniteWriteState.chapters.findIndex(ch => ch.chapter_number === chapter.chapter_number);
     currentEditingIWChapter = {
         index: chapterIndex,
         chapter: chapter,
         modified: false
     };
-    
-    const modal = document.getElementById('modal-container');
-    if (!modal) return;
-    
-    modal.classList.remove('hidden');
-    
-    modal.innerHTML = `
-        <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: stretch; justify-content: center; z-index: 1000; padding: 20px;">
-            <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 95%; max-width: 1200px; display: flex; flex-direction: column;">
-                <!-- 标题栏 -->
-                <div style="padding: 16px 20px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 12px;">
-                    <span style="color: var(--text-secondary); font-size: 14px;">第${chapter.chapter_number}章</span>
-                    <input type="text" id="iw-edit-chapter-title" value="${escapeHtml(chapter.title || '')}" 
-                        placeholder="章节标题"
-                        style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 8px 12px; color: var(--text-primary); border-radius: 6px; font-size: 16px; font-weight: 500;">
-                    <span id="iw-edit-word-count" style="font-size: 13px; color: var(--text-secondary);">${(chapter.word_count || 0).toLocaleString()} 字</span>
-                    <span id="iw-edit-save-status" style="font-size: 12px; color: #10b981; display: none;">已保存</span>
-                    <button id="close-iw-editor" style="background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; padding: 4px;" title="关闭">
+
+    if (typeof setInfiniteWriteActiveView === 'function') {
+        setInfiniteWriteActiveView('chapter', chapter.chapter_number);
+    }
+    if (typeof saveInfiniteWriteData === 'function') {
+        saveInfiniteWriteData();
+    }
+    if (typeof renderInfiniteWriteNavPanel === 'function') {
+        renderInfiniteWriteNavPanel();
+    }
+    if (typeof updateBreadcrumbs === 'function') {
+        updateBreadcrumbs(['无限续写', `第${chapter.chapter_number}章 ${chapter.title || '未命名章节'}`]);
+    }
+
+    const workspace = ui?.workspace || document.getElementById('main-view');
+    if (!workspace) return;
+
+    workspace.innerHTML = `
+        <div class="editor-container" style="display: flex; flex-direction: column; height: 100%; padding: 24px; position: relative;">
+            <button id="iw-open-panel-fab" class="icon-btn" style="position: absolute; right: 24px; bottom: 24px; width: 52px; height: 52px; border-radius: 999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 16px 32px rgba(0,0,0,0.35); background: rgba(139, 92, 246, 0.18) !important; border: 1px solid rgba(139, 92, 246, 0.35) !important; color: #c4b5fd;" title="返回创作面板">
+                <i class="ri-layout-right-2-line" style="font-size: 20px;"></i>
+            </button>
+            <div class="editor-header" style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap;">
+                <span style="color: var(--text-secondary); font-size: 14px;">第${chapter.chapter_number}章</span>
+                <input type="text" id="iw-edit-chapter-title" value="${escapeHtml(chapter.title || '')}" placeholder="章节标题" style="flex: 1; min-width: 260px; background: transparent; border: none; color: var(--text-primary); font-size: 24px; font-weight: 600; outline: none;">
+                <div style="display: flex; align-items: center; gap: 12px; color: var(--text-secondary); font-size: 13px;">
+                    <span id="iw-edit-word-count">${(chapter.word_count || 0).toLocaleString()} 字</span>
+                    <span id="iw-edit-save-status" style="color: #10b981; display: none;">已保存</span>
+                </div>
+                <button id="close-iw-editor" style="padding: 8px 14px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #c4b5fd; border-radius: 8px; cursor: pointer;">
+                    <i class="ri-layout-right-2-line"></i> 创作面板
+                </button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+                <button id="iw-edit-find-replace-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="查找替换 (Ctrl+H)">
+                    <i class="ri-search-line"></i> 查找替换
+                </button>
+                <button id="iw-edit-word-check-btn" style="padding: 8px 12px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #a78bfa; border-radius: 6px; cursor: pointer; font-size: 13px;" title="高频词检测与正则替换">
+                    <i class="ri-search-eye-line"></i> 词汇检测
+                </button>
+                <button id="iw-edit-polish-btn" style="padding: 8px 12px; background: rgba(34, 197, 94, 0.15); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 6px; cursor: pointer; font-size: 13px;" title="AI润色">
+                    <i class="ri-magic-line"></i> AI润色
+                </button>
+                <div style="flex: 1;"></div>
+                <button id="iw-edit-undo-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="撤销 (Ctrl+Z)">
+                    <i class="ri-arrow-go-back-line"></i>
+                </button>
+                <button id="iw-edit-redo-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="重做 (Ctrl+Y)">
+                    <i class="ri-arrow-go-forward-line"></i>
+                </button>
+                <button id="iw-regenerate-btn" style="padding: 8px 14px; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; border-radius: 6px; cursor: pointer; font-size: 13px;">
+                    <i class="ri-refresh-line"></i> 重新生成
+                </button>
+                <button id="iw-save-changes-btn" style="padding: 8px 16px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 13px;">
+                    <i class="ri-save-line"></i> 保存修改
+                </button>
+            </div>
+            <div id="iw-find-replace-panel" style="display: none; padding: 12px 16px; margin-bottom: 12px; border: 1px solid var(--border-color); border-radius: 10px; background: rgba(0,0,0,0.18);">
+                <div style="display: flex; gap: 12px; align-items: flex-start;">
+                    <div style="flex: 1;">
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <input type="text" id="iw-find-input" placeholder="查找内容..." style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 8px 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
+                            <button id="iw-find-prev-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="上一个">
+                                <i class="ri-arrow-up-line"></i>
+                            </button>
+                            <button id="iw-find-next-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="下一个">
+                                <i class="ri-arrow-down-line"></i>
+                            </button>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="iw-replace-input" placeholder="替换为..." style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 8px 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
+                            <button id="iw-replace-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="替换">
+                                替换
+                            </button>
+                            <button id="iw-replace-all-btn" style="padding: 8px 12px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 6px; cursor: pointer;" title="全部替换">
+                                全部替换
+                            </button>
+                        </div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 6px; min-width: 150px;">
+                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                            <input type="checkbox" id="iw-find-regex" style="width: 14px; height: 14px;">
+                            使用正则表达式
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                            <input type="checkbox" id="iw-find-case" style="width: 14px; height: 14px;">
+                            区分大小写
+                        </label>
+                        <span id="iw-find-count" style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;"></span>
+                    </div>
+                    <button id="iw-close-find-panel" style="background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; padding: 4px;">
                         <i class="ri-close-line"></i>
                     </button>
                 </div>
-                
-                <!-- 工具栏 -->
-                <div style="padding: 12px 20px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                    <button id="iw-edit-find-replace-btn" style="padding: 6px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="查找替换 (Ctrl+H)">
-                        <i class="ri-search-line"></i> 查找替换
-                    </button>
-                    <button id="iw-edit-word-check-btn" style="padding: 6px 12px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #a78bfa; border-radius: 6px; cursor: pointer; font-size: 13px;" title="高频词检测与正则替换">
-                        <i class="ri-search-eye-line"></i> 词汇检测
-                    </button>
-                    <button id="iw-edit-polish-btn" style="padding: 6px 12px; background: rgba(34, 197, 94, 0.15); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 6px; cursor: pointer; font-size: 13px;" title="AI润色">
-                        <i class="ri-magic-line"></i> AI润色
-                    </button>
-                    <div style="flex: 1;"></div>
-                    <button id="iw-edit-undo-btn" style="padding: 6px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="撤销 (Ctrl+Z)">
-                        <i class="ri-arrow-go-back-line"></i>
-                    </button>
-                    <button id="iw-edit-redo-btn" style="padding: 6px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="重做 (Ctrl+Y)">
-                        <i class="ri-arrow-go-forward-line"></i>
-                    </button>
+            </div>
+            <textarea id="iw-edit-content" style="flex: 1; width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px; color: var(--text-primary); font-size: 15px; line-height: 2; resize: none; outline: none;" placeholder="开始编辑章节内容...">${chapter.content || ''}</textarea>
+            <div style="display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-top: 16px; flex-wrap: wrap;">
+                <div style="font-size: 12px; color: var(--text-secondary);">
+                    ${chapter.important_events ? `<span style="margin-right: 16px;"><strong>重要事件：</strong>${chapter.important_events}</span>` : ''}
+                    ${chapter.new_characters && chapter.new_characters !== '无' ? `<span><strong>新增角色：</strong>${chapter.new_characters}</span>` : ''}
                 </div>
-                
-                <!-- 查找替换面板（默认隐藏） -->
-                <div id="iw-find-replace-panel" style="display: none; padding: 12px 20px; border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
-                    <div style="display: flex; gap: 12px; align-items: flex-start;">
-                        <div style="flex: 1;">
-                            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                                <input type="text" id="iw-find-input" placeholder="查找内容..." 
-                                    style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 8px 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
-                                <button id="iw-find-prev-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="上一个">
-                                    <i class="ri-arrow-up-line"></i>
-                                </button>
-                                <button id="iw-find-next-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="下一个">
-                                    <i class="ri-arrow-down-line"></i>
-                                </button>
-                            </div>
-                            <div style="display: flex; gap: 8px;">
-                                <input type="text" id="iw-replace-input" placeholder="替换为..." 
-                                    style="flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 8px 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
-                                <button id="iw-replace-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="替换">
-                                    替换
-                                </button>
-                                <button id="iw-replace-all-btn" style="padding: 8px 12px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 6px; cursor: pointer;" title="全部替换">
-                                    全部替换
-                                </button>
-                            </div>
-                        </div>
-                        <div style="display: flex; flex-direction: column; gap: 6px; min-width: 150px;">
-                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
-                                <input type="checkbox" id="iw-find-regex" style="width: 14px; height: 14px;">
-                                使用正则表达式
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
-                                <input type="checkbox" id="iw-find-case" style="width: 14px; height: 14px;">
-                                区分大小写
-                            </label>
-                            <span id="iw-find-count" style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;"></span>
-                        </div>
-                        <button id="iw-close-find-panel" style="background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; padding: 4px;">
-                            <i class="ri-close-line"></i>
-                        </button>
-                    </div>
-                </div>
-                
-                <!-- 编辑区域 -->
-                <div style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
-                    <textarea id="iw-edit-content" 
-                        style="flex: 1; width: 100%; background: rgba(0,0,0,0.2); border: none; padding: 24px; color: var(--text-primary); font-size: 15px; line-height: 2; resize: none; outline: none;"
-                        placeholder="开始编辑章节内容...">${chapter.content || ''}</textarea>
-                </div>
-                
-                <!-- 章节信息 -->
-                ${chapter.important_events || chapter.new_characters ? `
-                <div style="padding: 12px 20px; border-top: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
-                    <div style="font-size: 12px; color: var(--text-secondary);">
-                        ${chapter.important_events ? `<span style="margin-right: 16px;"><strong>重要事件：</strong>${chapter.important_events}</span>` : ''}
-                        ${chapter.new_characters && chapter.new_characters !== '无' ? `<span><strong>新增角色：</strong>${chapter.new_characters}</span>` : ''}
-                    </div>
-                </div>
-                ` : ''}
-                
-                <!-- 底部操作栏 -->
-                <div style="padding: 16px 20px; border-top: 1px solid var(--border-color); display: flex; gap: 12px; justify-content: space-between;">
-                    <div style="display: flex; gap: 12px;">
-                        <button id="iw-delete-chapter-btn" style="padding: 10px 20px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer;">
-                            <i class="ri-delete-bin-line"></i> 删除章节
-                        </button>
-                    </div>
-                    <div style="display: flex; gap: 12px;">
-                        <button id="iw-save-changes-btn" style="padding: 10px 20px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                            <i class="ri-save-line"></i> 保存修改
-                        </button>
-                        <button id="iw-regenerate-btn" style="padding: 10px 20px; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                            <i class="ri-refresh-line"></i> 重新生成
-                        </button>
-                    </div>
-                </div>
+                <button id="iw-delete-chapter-btn" style="padding: 10px 18px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer;">
+                    <i class="ri-delete-bin-line"></i> 删除章节
+                </button>
             </div>
         </div>
     `;
@@ -150,7 +146,6 @@ function showInfiniteWriteChapterEditor(chapter) {
 
 // ===== 绑定编辑器事件 =====
 function bindIWEditorEvents(chapter) {
-    const modal = document.getElementById('modal-container');
     const titleInput = document.getElementById('iw-edit-chapter-title');
     const contentTextarea = document.getElementById('iw-edit-content');
     const wordCountEl = document.getElementById('iw-edit-word-count');
@@ -158,6 +153,9 @@ function bindIWEditorEvents(chapter) {
     
     // 关闭编辑器
     document.getElementById('close-iw-editor')?.addEventListener('click', () => {
+        closeIWEditor();
+    });
+    document.getElementById('iw-open-panel-fab')?.addEventListener('click', () => {
         closeIWEditor();
     });
     
@@ -334,28 +332,37 @@ function bindIWEditorEvents(chapter) {
             }
         }
     });
-    
-    // 点击背景关闭
-    modal?.addEventListener('click', (e) => {
-        if (e.target === modal.firstElementChild) {
-            closeIWEditor();
-        }
-    });
 }
 
 // ===== 关闭编辑器 =====
-function closeIWEditor() {
-    const modal = document.getElementById('modal-container');
-    
+function confirmLeaveInfiniteWriteEditor(actionLabel = '离开当前章节') {
     if (currentEditingIWChapter.modified) {
-        if (!confirm('有未保存的修改，确定要关闭吗？')) {
-            return;
+        if (!confirm(`有未保存的修改，确定要${actionLabel}吗？`)) {
+            return false;
         }
     }
-    
-    modal.classList.add('hidden');
-    modal.innerHTML = '';
+    return true;
+}
+
+function closeIWEditor() {
+    if (!confirmLeaveInfiniteWriteEditor('返回创作面板')) {
+        return false;
+    }
+
+    if (typeof setInfiniteWriteActiveView === 'function') {
+        setInfiniteWriteActiveView('panel');
+    }
+    if (typeof saveInfiniteWriteData === 'function') {
+        saveInfiniteWriteData();
+    }
     currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+    if (typeof renderInfiniteWriteNavPanel === 'function') {
+        renderInfiniteWriteNavPanel();
+    }
+    if (typeof renderInfiniteWriteInterface === 'function') {
+        renderInfiniteWriteInterface();
+    }
+    return true;
 }
 
 // ===== 保存章节修改 =====
@@ -378,6 +385,9 @@ async function saveIWChapterChanges(showNotification) {
         chapter.content = newContent;
         chapter.word_count = newWordCount;
         chapter.summary = newContent.substring(0, 200) + (newContent.length > 200 ? '...' : '');
+        if (typeof setInfiniteWriteActiveView === 'function') {
+            setInfiniteWriteActiveView('chapter', chapter.chapter_number);
+        }
         
         // 更新总字数
         infiniteWriteState.totalWords = infiniteWriteState.chapters.reduce(
@@ -401,10 +411,18 @@ async function saveIWChapterChanges(showNotification) {
         if (wordCountEl) {
             wordCountEl.textContent = newWordCount.toLocaleString() + ' 字';
         }
-        
+
+        if (typeof updateBreadcrumbs === 'function') {
+            updateBreadcrumbs(['无限续写', `第${chapter.chapter_number}章 ${newTitle || '未命名章节'}`]);
+        }
+
         // 刷新列表
         renderInfiniteWriteChaptersList();
-        loadInfiniteWriteNavChapterList();
+        if (typeof renderInfiniteWriteNavPanel === 'function') {
+            renderInfiniteWriteNavPanel();
+        } else {
+            loadInfiniteWriteNavChapterList();
+        }
         
         if (showNotification) {
             showToast('章节已保存 ✓');
@@ -425,35 +443,74 @@ async function saveIWChapterChanges(showNotification) {
 }
 
 // ===== 删除章节 =====
-function deleteIWChapter() {
-    if (currentEditingIWChapter.index < 0) return;
-    
-    const chapter = currentEditingIWChapter.chapter;
-    if (!confirm(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`)) {
-        return;
+async function deleteIWChapterByNumber(chapterNumber, options = {}) {
+    const chapterIndex = infiniteWriteState.chapters.findIndex((item) => item.chapter_number === chapterNumber);
+    if (chapterIndex < 0) return false;
+
+    const chapter = infiniteWriteState.chapters[chapterIndex];
+    const shouldConfirm = options.confirmed === true;
+    if (!shouldConfirm && !confirm(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`)) {
+        return false;
     }
-    
-    // 从列表中移除
-    infiniteWriteState.chapters.splice(currentEditingIWChapter.index, 1);
-    
-    // 更新总字数
+
+    const deletingActiveChapter = infiniteWriteState.activeView === 'chapter'
+        && infiniteWriteState.activeChapterNumber === chapter.chapter_number;
+
+    infiniteWriteState.chapters.splice(chapterIndex, 1);
     infiniteWriteState.totalWords = infiniteWriteState.chapters.reduce(
-        (sum, ch) => sum + (ch.word_count || 0), 0
+        (sum, item) => sum + (item.word_count || 0), 0
     );
-    
-    // 保存到本地存储
-    saveInfiniteWriteData();
-    
-    // 关闭编辑器
+    infiniteWriteState.currentChapter = infiniteWriteState.chapters.reduce(
+        (max, item) => Math.max(max, item.chapter_number || 0), 0
+    );
+
+    const replacementChapter = infiniteWriteState.chapters[chapterIndex] || infiniteWriteState.chapters[chapterIndex - 1] || null;
     currentEditingIWChapter.modified = false;
-    closeIWEditor();
-    
-    // 刷新界面
+
+    if (deletingActiveChapter) {
+        if (replacementChapter) {
+            if (typeof setInfiniteWriteActiveView === 'function') {
+                setInfiniteWriteActiveView('chapter', replacementChapter.chapter_number);
+            }
+        } else if (typeof setInfiniteWriteActiveView === 'function') {
+            setInfiniteWriteActiveView('panel');
+        }
+    }
+
+    saveInfiniteWriteData();
     updateInfiniteWriteUI();
     renderInfiniteWriteChaptersList();
-    loadInfiniteWriteNavChapterList();
-    
+
+    if (typeof renderInfiniteWriteNavPanel === 'function') {
+        renderInfiniteWriteNavPanel();
+    } else {
+        loadInfiniteWriteNavChapterList();
+    }
+
+    if (deletingActiveChapter) {
+        if (replacementChapter) {
+            showInfiniteWriteChapterEditor(replacementChapter);
+        } else if (typeof renderInfiniteWriteInterface === 'function') {
+            currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+            renderInfiniteWriteInterface();
+        }
+    } else if (currentEditingIWChapter.chapter?.chapter_number === chapter.chapter_number) {
+        currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+    }
+
+    if (typeof syncInfiniteWriteSession === 'function') {
+        await syncInfiniteWriteSession([chapter.chapter_number]);
+    }
+
     showToast('章节已删除');
+    return true;
+}
+
+function deleteIWChapter() {
+    if (currentEditingIWChapter.index < 0) return;
+    const chapterNumber = currentEditingIWChapter.chapter?.chapter_number;
+    if (!chapterNumber) return;
+    deleteIWChapterByNumber(chapterNumber);
 }
 
 // ===== 切换查找替换面板 =====
@@ -665,8 +722,10 @@ window.showInfiniteWriteChapterPreview = showInfiniteWriteChapterEditor;
 // 导出函数
 window.showInfiniteWriteChapterEditor = showInfiniteWriteChapterEditor;
 window.closeIWEditor = closeIWEditor;
+window.confirmLeaveInfiniteWriteEditor = confirmLeaveInfiniteWriteEditor;
 window.saveIWChapterChanges = saveIWChapterChanges;
 window.deleteIWChapter = deleteIWChapter;
+window.deleteIWChapterByNumber = deleteIWChapterByNumber;
 window.toggleIWFindReplacePanel = toggleIWFindReplacePanel;
 window.replaceIWAll = replaceIWAll;
 window.replaceIWCurrent = replaceIWCurrent;

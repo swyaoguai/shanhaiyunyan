@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from novel_agent.web.app import create_app
 from novel_agent.web.routes import trends as trends_routes
+from skills.trends_search.scripts import trends_service
 
 
 class _FakeText:
@@ -17,6 +18,21 @@ class _FakeResult:
     def __init__(self, content=None, is_error: bool = False):
         self.content = content or []
         self.isError = is_error
+
+
+class _FakeResponse:
+    def __init__(self, payload=None, text: str = "", status_code: int = 200):
+        self._payload = payload
+        self.text = text
+        self.status_code = status_code
+        self.encoding = "utf-8"
+        self.headers = {"Content-Type": "application/json"}
+        self.content = text.encode("utf-8") if text else json.dumps(payload or {}).encode("utf-8")
+
+    def json(self):
+        if self._payload is None:
+            raise json.JSONDecodeError("no json", self.text, 0)
+        return self._payload
 
 
 def test_trends_search_uses_underscore_tool_and_parses_xml(monkeypatch):
@@ -87,3 +103,45 @@ def test_trends_search_parses_json_payload(monkeypatch):
     assert payload["success"] is True
     assert payload["count"] == 1
     assert payload["trends"][0]["title"] == "测试热点B"
+
+
+def test_trends_service_json_platforms_work_without_bs4(monkeypatch):
+    service = trends_service.TrendsSearchService()
+
+    monkeypatch.setattr(trends_service, "BeautifulSoup", None)
+    monkeypatch.setattr(
+        service,
+        "_make_request",
+        lambda url, method="GET", headers=None, **kwargs: _FakeResponse(
+            payload={
+                "data": [
+                    {"Title": "头条测试热点", "HotValue": 321, "Url": "https://example.com/toutiao"}
+                ]
+            }
+        ),
+    )
+
+    result = service.get_toutiao_trending(limit=1)
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["data"][0]["title"] == "头条测试热点"
+
+
+def test_trends_service_html_platforms_return_clear_error_without_bs4(monkeypatch):
+    service = trends_service.TrendsSearchService()
+
+    monkeypatch.setattr(trends_service, "BeautifulSoup", None)
+    monkeypatch.setattr(
+        service,
+        "_make_request",
+        lambda url, method="GET", headers=None, **kwargs: _FakeResponse(
+            payload=None,
+            text="<html><body><a>test</a></body></html>",
+        ),
+    )
+
+    result = service.get_baidu_trending(limit=1)
+
+    assert result["success"] is False
+    assert "beautifulsoup4" in result["error"]

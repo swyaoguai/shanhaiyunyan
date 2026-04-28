@@ -239,6 +239,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         "/",
         "/health",
         "/favicon.ico",
+        # 设置类只读接口不受限
+        "/api/settings",
+        "/api/global-config",
+        "/api/agents",
+        "/api/api-configs",
+        "/api/timeout-settings",
+        "/api/knowledge-base/config",
+        "/api/knowledge-base/stats",
+        "/api/chapter-summary-config",
+        "/api/skills",
+        "/api/project-state",
+        "/api/project-data",
+        "/api/projects",
+        "/api/aux-memory",
     }
 
     # 需要更严格限制的路径（LLM调用等）

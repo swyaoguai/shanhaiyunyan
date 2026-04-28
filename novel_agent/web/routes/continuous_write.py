@@ -4,14 +4,18 @@
 包含无限续写的开始、继续、同步、重新生成等功能。
 """
 
+import io
 import re
 import json
 import logging
 import asyncio
+import zipfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
+from urllib.parse import quote
+from xml.sax.saxutils import escape as xml_escape
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from ..models.requests import (
     ContinuousWriteStartRequest,
@@ -22,7 +26,8 @@ from ..models.requests import (
     ContinuousWriteCorrectionRequest,
     UpdateInfiniteWriteChapterRequest,
     AddDeadCharacterRequest,
-    RegexReplaceRequest
+    RegexReplaceRequest,
+    ContinuousWriteExportRequest,
 )
 from ...constants import LLM_DEFAULTS
 
@@ -34,8 +39,115 @@ router = APIRouter()
 continuous_writers = {}
 _continuous_writer_locks = {}
 _continuous_locks_guard = asyncio.Lock()
+_MAX_WRITERS_POOL = 200
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NOVEL_IMPORT_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _wire_character_manager(writer, pm) -> None:
+    """为 ContinuousWriter 注入 CharacterManager（静默失败）。"""
+    try:
+        from ...context.character_manager import CharacterManager
+        project_dir = pm._get_project_dir(pm.current_project_id)
+        cm = CharacterManager(project_dir)
+        writer.set_character_manager(cm)
+    except Exception as e:
+        logger.warning(f"[ContinuousWriter] CharacterManager初始化失败: {e}")
+_EXPORT_CHAPTER_HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s*)?第\s*\d+\s*章[^\n\r]*[\r\n]+")
+CONTINUOUS_WRITE_MAX_TOKENS_LIMIT = 8192
+
+
+def _safe_export_filename(name: str) -> str:
+    cleaned = "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in (name or "").strip())
+    return cleaned or "continuous_write"
+
+
+def _clean_export_chapter_content(content: Any) -> str:
+    text = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    return _EXPORT_CHAPTER_HEADING_RE.sub("", text, count=1).strip()
+
+
+def _normalize_export_title(title: str) -> str:
+    normalized = re.sub(r"\s+", " ", (title or "").strip())
+    return normalized or "无限续写"
+
+
+def _build_continuous_write_export_lines(title: str, chapters: List[Dict[str, Any]]) -> List[str]:
+    ordered = sorted(
+        [chapter for chapter in chapters if isinstance(chapter, dict)],
+        key=lambda chapter: int(chapter.get("chapter_number", 0) or 0),
+    )
+    if not ordered:
+        raise HTTPException(status_code=400, detail="当前没有可导出的章节。")
+
+    lines: List[str] = [_normalize_export_title(title), ""]
+    for index, chapter in enumerate(ordered):
+        chapter_number = int(chapter.get("chapter_number", index + 1) or (index + 1))
+        lines.append(f"{chapter_number}.")
+        content = _clean_export_chapter_content(chapter.get("content", ""))
+        if content:
+            lines.extend(content.split("\n"))
+        if index != len(ordered) - 1:
+            lines.append("")
+    return lines
+
+
+def _render_continuous_write_export_text(title: str, chapters: List[Dict[str, Any]]) -> str:
+    return "\n".join(_build_continuous_write_export_lines(title, chapters)).strip() + "\n"
+
+
+def _build_continuous_write_docx_bytes(title: str, chapters: List[Dict[str, Any]]) -> bytes:
+    paragraphs = _build_continuous_write_export_lines(title, chapters)
+
+    xml_paragraphs = []
+    for paragraph in paragraphs:
+        text = paragraph if paragraph else ""
+        xml_paragraphs.append(
+            f"<w:p><w:r><w:t xml:space=\"preserve\">{xml_escape(text)}</w:t></w:r></w:p>"
+        )
+
+    document_xml = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<w:document xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" "
+        "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
+        "xmlns:o=\"urn:schemas-microsoft-com:office:office\" "
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
+        "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" "
+        "xmlns:v=\"urn:schemas-microsoft-com:vml\" "
+        "xmlns:wp14=\"http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing\" "
+        "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
+        "xmlns:w10=\"urn:schemas-microsoft-com:office:word\" "
+        "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+        "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" "
+        "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
+        "xmlns:wpi=\"http://schemas.microsoft.com/office/word/2010/wordprocessingInk\" "
+        "xmlns:wne=\"http://schemas.microsoft.com/office/2006/wordml\" "
+        "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" mc:Ignorable=\"w14 wp14\">"
+        f"<w:body>{''.join(xml_paragraphs)}<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"708\" w:footer=\"708\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>"
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+            "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+            "</Types>",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>"
+            "</Relationships>",
+        )
+        archive.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
 
 
 def _normalize_session_id(session_id: str) -> str:
@@ -46,16 +158,104 @@ def _normalize_session_id(session_id: str) -> str:
         raise HTTPException(status_code=400, detail="session_id 包含非法字符")
     return value
 
+
+def _cap_continuous_write_max_tokens(max_tokens: int | None) -> int:
+    """Clamp continuous-write max_tokens to a provider-safe range."""
+    parsed = int(max_tokens or LLM_DEFAULTS.MAX_TOKENS)
+    capped = max(1, min(parsed, CONTINUOUS_WRITE_MAX_TOKENS_LIMIT))
+    if capped != parsed:
+        logger.warning(
+            "[ContinuousWrite] max_tokens %s exceeds safe limit, capped to %s",
+            parsed,
+            capped,
+        )
+    return capped
+
 async def _get_writer_lock(writer_key: str) -> asyncio.Lock:
     async with _continuous_locks_guard:
         lock = _continuous_writer_locks.get(writer_key)
         if lock is None:
+            if len(_continuous_writer_locks) >= _MAX_WRITERS_POOL:
+                for old_key in list(_continuous_writer_locks):
+                    old_lock = _continuous_writer_locks[old_key]
+                    if not old_lock.locked():
+                        _continuous_writer_locks.pop(old_key, None)
+                        continuous_writers.pop(old_key, None)
+                        break
             lock = asyncio.Lock()
             _continuous_writer_locks[writer_key] = lock
         return lock
 
 def _writer_key(project_id: str, session_id: str) -> str:
     return f"{project_id}::{session_id}"
+
+
+def clear_project_runtime(project_id: str) -> int:
+    """清理指定项目的无限续写内存态实例与锁。"""
+    prefix = f"{str(project_id or '').strip()}::"
+    if not prefix or prefix == "::":
+        return 0
+
+    removed = 0
+    for key in list(continuous_writers.keys()):
+        if key.startswith(prefix):
+            continuous_writers.pop(key, None)
+            removed += 1
+
+    for key in list(_continuous_writer_locks.keys()):
+        if key.startswith(prefix):
+            _continuous_writer_locks.pop(key, None)
+
+    logger.info(f"[ContinuousWrite] Cleared runtime writers for project={project_id}, removed={removed}")
+    return removed
+
+
+def resolve_continuous_write_model_config(model: str = "", api_config_id: str = "") -> tuple[Any, str]:
+    """统一解析无限续写模型配置，处理指定配置与全局配置回退。"""
+    from ...agent_config import AgentModelConfig, get_config_manager
+
+    config_manager = get_config_manager()
+    requested_model = str(model or "").strip()
+    selected_config = None
+
+    if api_config_id:
+        multi_config = config_manager.get_multi_config()
+        for cfg in multi_config.configs:
+            if cfg.id == api_config_id:
+                selected_config = cfg
+                break
+
+    if selected_config:
+        api_base = selected_config.api_base
+        api_key = selected_config.api_key
+        temperature = selected_config.temperature
+        max_tokens = selected_config.max_tokens
+        model_name = requested_model or (selected_config.models[0] if selected_config.models else "")
+        logger.info(f"[ContinuousWrite] 使用指定的API配置: {selected_config.name} ({selected_config.id})")
+    else:
+        global_config = config_manager.get_global_config()
+        api_base = global_config.api_base
+        api_key = global_config.api_key
+        temperature = global_config.temperature
+        max_tokens = global_config.max_tokens
+        model_name = requested_model or global_config.model
+        logger.info("[ContinuousWrite] 使用激活的全局API配置")
+
+    max_tokens = _cap_continuous_write_max_tokens(max_tokens)
+
+    if not model_name:
+        return None, ""
+
+    model_config = AgentModelConfig(
+        agent_name="ContinuousWriter",
+        api_base=api_base,
+        api_key=api_key,
+        model=model_name,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        use_global=False
+    )
+    return model_config, model_name
 
 
 async def _refresh_infinite_memory(
@@ -168,7 +368,6 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
     """开始无限续写"""
     from ...agents import ContinuousWriter, ContinuousWriteConfig
     from ...agents.session_store import get_session_store
-    from ...agent_config import AgentModelConfig, get_config_manager
     from ...project_manager import get_project_manager
     
     session_id = _normalize_session_id(request.session_id)
@@ -189,48 +388,10 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
         trends_platforms=request.trends_platforms if request.trends_platforms else ["toutiao", "douyin"]
     )
     
-    config_manager = get_config_manager()
-    
-    api_base = ""
-    api_key = ""
-    temperature = LLM_DEFAULTS.TEMPERATURE
-    max_tokens = LLM_DEFAULTS.MAX_TOKENS
-    model_name = request.model
-    
-    if request.api_config_id:
-        multi_config = config_manager.get_multi_config()
-        for cfg in multi_config.configs:
-            if cfg.id == request.api_config_id:
-                api_base = cfg.api_base
-                api_key = cfg.api_key
-                temperature = cfg.temperature
-                max_tokens = cfg.max_tokens
-                if not model_name and cfg.models:
-                    model_name = cfg.models[0]
-                logger.info(f"[ContinuousWrite] 使用指定的API配置: {cfg.name} ({cfg.id})")
-                break
-    
-    if not api_base or not api_key:
-        global_config = config_manager.get_global_config()
-        api_base = global_config.api_base
-        api_key = global_config.api_key
-        temperature = global_config.temperature
-        max_tokens = global_config.max_tokens
-        if not model_name:
-            model_name = global_config.model
-        logger.info("[ContinuousWrite] 使用激活的全局API配置")
-    
-    model_config = None
-    if model_name:
-        model_config = AgentModelConfig(
-            agent_name="ContinuousWriter",
-            api_base=api_base,
-            api_key=api_key,
-            model=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            use_global=False
-        )
+    model_config, model_name = resolve_continuous_write_model_config(
+        model=request.model,
+        api_config_id=request.api_config_id,
+    )
     
     writer = ContinuousWriter(
         write_config=write_config,
@@ -273,7 +434,9 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
             logger.warning(f"[ContinuousWriter] 知识库配置错误: {e}")
         except Exception as e:
             logger.warning(f"[ContinuousWriter] 知识库初始化失败: {e}")
-    
+
+        _wire_character_manager(writer, pm)
+
     writer_key = _writer_key(project_id, session_id)
     lock = await _get_writer_lock(writer_key)
     async with lock:
@@ -306,7 +469,6 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
 @router.post("/continuous-write/continue")
 async def continue_continuous_write(request: ContinuousWriteContinueRequest):
     """继续续写下一章"""
-    from ...agent_config import AgentModelConfig, get_config_manager
     from ...agents.session_store import get_session_store
     from ...project_manager import get_project_manager
     
@@ -337,80 +499,45 @@ async def continue_continuous_write(request: ContinuousWriteContinueRequest):
                     session_id=session_id,
                     project_id=project_id
                 )
-                
+
+                if pm.current_project_id:
+                    _wire_character_manager(writer, pm)
+
                 continuous_writers[writer_key] = writer
             else:
                 raise HTTPException(status_code=404, detail="续写会话不存在，请先开始新故事")
         
         writer = continuous_writers[writer_key]
-    
-    if request.model or request.api_config_id:
-        config_manager = get_config_manager()
-        
-        api_base = ""
-        api_key = ""
-        temperature = LLM_DEFAULTS.TEMPERATURE
-        max_tokens = LLM_DEFAULTS.MAX_TOKENS
-        
-        if request.api_config_id:
-            multi_config = config_manager.get_multi_config()
-            for cfg in multi_config.configs:
-                if cfg.id == request.api_config_id:
-                    api_base = cfg.api_base
-                    api_key = cfg.api_key
-                    temperature = cfg.temperature
-                    max_tokens = cfg.max_tokens
-                    logger.info(f"[ContinuousWrite] 续写使用指定的API配置: {cfg.name}")
-                    break
-        
-        if not api_base or not api_key:
-            global_config = config_manager.get_global_config()
-            api_base = global_config.api_base
-            api_key = global_config.api_key
-            temperature = global_config.temperature
-            max_tokens = global_config.max_tokens
-        
-        model_to_use = request.model
-        if not model_to_use and request.api_config_id:
-            multi_config = config_manager.get_multi_config()
-            for cfg in multi_config.configs:
-                if cfg.id == request.api_config_id and cfg.models:
-                    model_to_use = cfg.models[0]
-                    break
-        
-        if model_to_use:
-            model_config = AgentModelConfig(
-                agent_name="ContinuousWriter",
-                api_base=api_base,
-                api_key=api_key,
-                model=model_to_use,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                use_global=False
-            )
-            writer.model_config = model_config
-            writer.client = writer._create_client()
-            writer.set_model(model_to_use)
-    
-    execute_params = {
-        "action": "continue",
-        "content": request.inspiration
-    }
-    
-    if request.enable_trends:
-        execute_params["trends_query"] = request.inspiration or "热门话题"
-        if request.trends_platforms:
-            execute_params["trends_platforms"] = request.trends_platforms
 
-    result = await writer.execute(execute_params)
-    await _refresh_infinite_memory(
-        project_id=project_id,
-        session_id=session_id,
-        chapters=writer.get_all_chapters(),
-        source_file="runtime_continue",
-        data_dir=pm.data_dir,
-    )
-    return JSONResponse(result)
+        if request.model or request.api_config_id:
+            model_config, model_to_use = resolve_continuous_write_model_config(
+                model=request.model,
+                api_config_id=request.api_config_id,
+            )
+            if model_to_use:
+                writer.model_config = model_config
+                writer.client = writer._create_client()
+                writer.set_model(model_to_use)
+
+        execute_params = {
+            "action": "continue",
+            "content": request.inspiration
+        }
+
+        if request.enable_trends:
+            execute_params["trends_query"] = request.inspiration or "热门话题"
+            if request.trends_platforms:
+                execute_params["trends_platforms"] = request.trends_platforms
+
+        result = await writer.execute(execute_params)
+        await _refresh_infinite_memory(
+            project_id=project_id,
+            session_id=session_id,
+            chapters=writer.get_all_chapters(),
+            source_file="runtime_continue",
+            data_dir=pm.data_dir,
+        )
+        return JSONResponse(result)
 
 
 @router.post("/continuous-write/inspiration")
@@ -545,6 +672,35 @@ async def get_continuous_write_chapter(chapter_number: int, session_id: str = "d
         result = writer._get_chapter(chapter_number)
         
         return JSONResponse(result)
+
+
+@router.post("/continuous-write/export")
+async def export_continuous_write(request: ContinuousWriteExportRequest, format: str = "txt"):
+    normalized_format = (format or "txt").strip().lower()
+    if normalized_format not in {"txt", "md", "docx"}:
+        raise HTTPException(status_code=400, detail="导出格式仅支持 txt、md、docx。")
+
+    title = _normalize_export_title(request.title)
+    chapters = [chapter for chapter in request.chapters if isinstance(chapter, dict)]
+    if normalized_format == "txt":
+        content = _render_continuous_write_export_text(title, chapters)
+        filename = f"{_safe_export_filename(title)}.txt"
+        media_type = "text/plain; charset=utf-8"
+        data = content.encode("utf-8")
+    elif normalized_format == "md":
+        content = _render_continuous_write_export_text(title, chapters)
+        filename = f"{_safe_export_filename(title)}.md"
+        media_type = "text/markdown; charset=utf-8"
+        data = content.encode("utf-8")
+    else:
+        filename = f"{_safe_export_filename(title)}.docx"
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        data = _build_continuous_write_docx_bytes(title, chapters)
+
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+    }
+    return Response(content=data, media_type=media_type, headers=headers)
 
 
 @router.put("/continuous-write/chapter")
@@ -682,7 +838,6 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
 @router.post("/continuous-write/regenerate")
 async def regenerate_continuous_write(request: ContinuousWriteRegenerateRequest):
     """重新生成指定章节"""
-    from ...agent_config import AgentModelConfig, get_config_manager
     from ...agents.session_store import get_session_store
     from ...project_manager import get_project_manager
     
@@ -714,7 +869,10 @@ async def regenerate_continuous_write(request: ContinuousWriteRegenerateRequest)
                     session_id=session_id,
                     project_id=project_id
                 )
-                
+
+                if pm.current_project_id:
+                    _wire_character_manager(writer, pm)
+
                 continuous_writers[writer_key] = writer
             else:
                 raise HTTPException(status_code=404, detail="续写会话不存在，请先开始新故事")
@@ -722,49 +880,11 @@ async def regenerate_continuous_write(request: ContinuousWriteRegenerateRequest)
         writer = continuous_writers[writer_key]
     
     if request.model or request.api_config_id:
-        config_manager = get_config_manager()
-        
-        api_base = ""
-        api_key = ""
-        temperature = LLM_DEFAULTS.TEMPERATURE
-        max_tokens = LLM_DEFAULTS.MAX_TOKENS
-        
-        if request.api_config_id:
-            multi_config = config_manager.get_multi_config()
-            for cfg in multi_config.configs:
-                if cfg.id == request.api_config_id:
-                    api_base = cfg.api_base
-                    api_key = cfg.api_key
-                    temperature = cfg.temperature
-                    max_tokens = cfg.max_tokens
-                    logger.info(f"[ContinuousWrite] 重新生成使用指定的API配置: {cfg.name}")
-                    break
-        
-        if not api_base or not api_key:
-            global_config = config_manager.get_global_config()
-            api_base = global_config.api_base
-            api_key = global_config.api_key
-            temperature = global_config.temperature
-            max_tokens = global_config.max_tokens
-        
-        model_to_use = request.model
-        if not model_to_use and request.api_config_id:
-            multi_config = config_manager.get_multi_config()
-            for cfg in multi_config.configs:
-                if cfg.id == request.api_config_id and cfg.models:
-                    model_to_use = cfg.models[0]
-                    break
-        
+        model_config, model_to_use = resolve_continuous_write_model_config(
+            model=request.model,
+            api_config_id=request.api_config_id,
+        )
         if model_to_use:
-            model_config = AgentModelConfig(
-                agent_name="ContinuousWriter",
-                api_base=api_base,
-                api_key=api_key,
-                model=model_to_use,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                use_global=False
-            )
             writer.model_config = model_config
             writer.client = writer._create_client()
             writer.set_model(model_to_use)

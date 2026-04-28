@@ -7,12 +7,21 @@ import pytest
 import asyncio
 import os
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from typing import Dict, Any
 
 # 导入被测试的模块
-from novel_agent.workflow.coordinator import NovelCoordinator
+from novel_agent.workflow.coordinator import NovelCoordinator, WorkflowState
 from novel_agent.agent_config import AgentModelConfig, get_config_manager
+from novel_agent.project_manager import Project
+from novel_agent.workflow.task_pool import TaskStatus
+from novel_agent.agents.collab_sub_agents import (
+    ContentExpansionAgent,
+    ContentReaderAgent,
+    FileNamingAgent,
+    SummaryOrchestratorAgent,
+)
 
 
 # ==================== Fixtures ====================
@@ -362,6 +371,428 @@ def test_coordinator_aux_memory_injection_context_without_project():
     payload = coordinator._get_aux_memory_injection_context("测试")
     assert payload["enabled"] is False
     assert payload["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_content_reader_loads_project_files_and_marks_permanent_memory(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "worldbuilding.json").write_text(
+        json.dumps({"world": {"world_name": "测试世界", "rules": ["规则1"]}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (project_dir / "characters.json").write_text(
+        json.dumps({"characters": [{"name": "林渡", "role": "主角"}]}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    client_state_dir = project_dir / "client_state"
+    client_state_dir.mkdir(parents=True, exist_ok=True)
+    (client_state_dir / "collab_permanent_memory.json").write_text(
+        json.dumps(
+            {
+                "loaded_keys": ["knowledge_base"],
+                "items": {"knowledge_base": {"note": "cached"}},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    agent = ContentReaderAgent()
+    result = await agent.execute(
+        {
+            "strategy": {
+                "read_plan": [
+                    {"key": "world", "label": "世界观"},
+                    {"key": "characters", "label": "角色档案"},
+                    {"key": "knowledge_base", "label": "知识库"},
+                ]
+            }
+        },
+        context={"project_dir": str(project_dir)},
+    )
+
+    assert result["loaded_context"]["world"]["world_name"] == "测试世界"
+    assert result["loaded_context"]["characters"][0]["name"] == "林渡"
+    report_by_key = {item["key"]: item for item in result["report"]}
+    assert report_by_key["world"]["source"] == "project_file"
+    assert report_by_key["characters"]["source"] == "project_file"
+    assert report_by_key["knowledge_base"]["source"] == "permanent_memory"
+    assert "knowledge_base" in result["permanent_memory"]["loaded_keys"]
+    assert result["permanent_memory"]["items"]["knowledge_base"]["note"] == "cached"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_persists_collab_permanent_memory_to_client_state(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator.project_manager.current_project_id = "proj-memory"
+    coordinator.project_manager.projects["proj-memory"] = Project(
+        id="proj-memory",
+        name="永久记忆测试项目",
+        description="验证协作永久记忆落盘",
+    )
+    coordinator.project_dir = tmp_path
+    coordinator._init_managers()
+
+    task_pool = coordinator._build_chapter_autonomous_task_pool(
+        chapter_num=1,
+        chapter_title="第一章",
+        chapter_outline_text="旧城归来",
+        base_context={
+            "world": {"era": "玄幻"},
+            "characters": [{"name": "林渊"}],
+            "chapter_outline": "旧城归来",
+            "project_dir": str(tmp_path),
+        },
+    )
+
+    coordinator.capability_registry.register_many([
+        coordinator.context_strategy,
+        coordinator.content_reader,
+        coordinator.chapter_writer,
+        coordinator.evaluator,
+        coordinator.content_expansion,
+    ])
+
+    coordinator.context_strategy.execute = AsyncMock(return_value={
+        "success": True,
+        "strategy": {"read_plan": [{"key": "knowledge_base", "label": "知识库"}]},
+    })
+    coordinator.content_reader.execute = AsyncMock(return_value={
+        "success": True,
+        "loaded_context": {"chapter_outline": "旧城归来"},
+        "report": [{"key": "knowledge_base", "loaded": True, "source": "runtime", "skipped_reason": ""}],
+        "permanent_memory": {
+            "loaded_keys": ["knowledge_base", "anti_ai_rules"],
+            "items": {"knowledge_base": {"note": "cached"}},
+        },
+    })
+    coordinator.chapter_writer.execute = AsyncMock(return_value={"success": True, "content": "正文内容", "word_count": 1000})
+    coordinator.evaluator.execute = AsyncMock(return_value={"success": True, "evaluation": {"passed": True, "suggestions": []}})
+    coordinator.content_expansion.execute = AsyncMock(return_value={"success": True, "content": "正文内容", "expanded": False, "word_count": 1000})
+
+    result = await coordinator._execute_chapter_task_market(
+        chapter_num=1,
+        task_pool=task_pool,
+        base_context={
+            "world": {"era": "玄幻"},
+            "characters": [{"name": "林渊"}],
+            "chapter_outline": "旧城归来",
+            "project_dir": str(tmp_path),
+        },
+        fallback_agents={},
+    )
+
+    memory_path = coordinator.project_dir / "client_state" / "collab_permanent_memory.json"
+    assert result["results"]["content_reader"]["result"]["permanent_memory"]["loaded_keys"] == ["knowledge_base", "anti_ai_rules"]
+    assert memory_path.exists()
+    payload = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert payload["loaded_keys"] == ["knowledge_base", "anti_ai_rules"]
+    assert payload["items"]["knowledge_base"]["note"] == "cached"
+
+
+@pytest.mark.asyncio
+async def test_content_expansion_expands_short_content_with_context():
+    agent = ContentExpansionAgent()
+    result = await agent.execute(
+        {
+            "content": "林渡推门而入。",
+            "target_words": 50,
+            "chapter_title": "旧城归来",
+            "chapter_outline": "主角回到旧城，准备追查真相",
+        },
+        context={"previous_summary": "上一章他刚拿到关键线索"},
+    )
+
+    assert result["expanded"] is True
+    assert result["word_count"] > len("林渡推门而入。")
+    assert "旧城" in result["content"] or "真相" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_file_naming_agent_returns_standard_filename():
+    agent = FileNamingAgent()
+    result = await agent.execute(
+        {
+            "chapter_number": 3,
+            "chapter_title": "第3章 旧城归来",
+            "content": "林渡回到旧城，发现旧案并未结束。",
+        }
+    )
+
+    assert result["filename"].startswith("第3章-")
+    assert result["filename"].endswith("字.md")
+    assert "旧城归来" in result["filename"]
+
+
+@pytest.mark.asyncio
+async def test_summary_orchestrator_returns_structured_payload():
+    agent = SummaryOrchestratorAgent()
+    result = await agent.execute(
+        {
+            "start_chapter": 1,
+            "end_chapter": 10,
+            "chapters": [
+                {"chapter_number": 1, "title": "归来", "content": "林渡归来，开始调查旧案。"},
+                {"chapter_number": 2, "title": "追索", "content": "他沿着线索继续追查。"},
+            ],
+        }
+    )
+
+    assert "第1-10章剧情总结" in result["summary"]
+    assert result["summary_payload"]["start_chapter"] == 1
+    assert result["summary_payload"]["end_chapter"] == 10
+    assert result["summary_payload"]["chapter_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_coordinator_write_single_chapter_persists_stage_summary_and_state(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator.project_manager.current_project_id = "proj-test"
+    coordinator.project_manager.projects["proj-test"] = Project(
+        id="proj-test",
+        name="测试项目",
+        description="协作模式测试项目",
+    )
+    coordinator.project_dir = tmp_path
+    coordinator._init_managers()
+
+    coordinator.chapter_writer.execute = AsyncMock(return_value={"content": "正文内容"})
+    coordinator.evaluator.execute = AsyncMock(return_value={"evaluation": {"passed": True, "suggestions": []}})
+    coordinator.polisher.execute = AsyncMock(return_value={"content": "润色后正文"})
+    coordinator.context_strategy.execute = AsyncMock(return_value={"strategy": {"read_plan": []}})
+    coordinator.content_reader.execute = AsyncMock(return_value={"loaded_context": {}, "report": [], "permanent_memory": {"loaded_keys": []}})
+    coordinator.content_expansion.execute = AsyncMock(return_value={"content": "正文内容扩写版", "expanded": True, "word_count": 120})
+    coordinator.file_naming.execute = AsyncMock(return_value={"filename": "第10章-终局-120字.md", "word_count": 120})
+    coordinator.summary_orchestrator.execute = AsyncMock(return_value={
+        "summary": "第1-10章剧情总结\n- 第10章《终局》：正文内容扩写版",
+        "summary_payload": {
+            "start_chapter": 1,
+            "end_chapter": 10,
+            "chapter_count": 10,
+            "chapters": [{"chapter_number": 10, "title": "终局", "summary": "正文内容扩写版"}],
+            "summary": "第1-10章剧情总结\n- 第10章《终局》：正文内容扩写版",
+        },
+    })
+
+    previous_chapters = [
+        {"number": idx, "title": f"第{idx}章", "content": f"第{idx}章内容"}
+        for idx in range(1, 10)
+    ]
+
+    result = await coordinator._write_single_chapter_internal(
+        chapter_num=10,
+        chapter_outline={"title": "终局", "summary": "最终对决"},
+        previous_chapters=previous_chapters,
+    )
+
+    assert result["suggested_filename"] == "第10章-终局-120字.md"
+    assert result["stage_summary"].startswith("第1-10章剧情总结")
+
+    summary_file = Path(result["stage_summary_file"])
+    assert summary_file.exists()
+    assert "第1-10章剧情总结" in summary_file.read_text(encoding="utf-8")
+
+    stage_summaries = coordinator.project_manager.load_project_state("collab_stage_summaries", default=[])
+    assert isinstance(stage_summaries, list)
+    assert stage_summaries[-1]["end_chapter"] == 10
+
+
+def test_phase3_project_stage_summary_persistence_replaces_duplicate_range(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator.project_manager.current_project_id = "phase3-summary-test"
+    coordinator.project_manager.projects["phase3-summary-test"] = Project(
+        id="phase3-summary-test",
+        name="Phase3 Summary Test",
+        description="隔离阶段总结状态",
+    )
+    coordinator.project_dir = tmp_path
+    coordinator._init_managers()
+
+    first = coordinator._persist_project_stage_summary_result(
+        {
+            "summary": "第1-10章剧情总结\n- 第一版",
+            "summary_payload": {
+                "start_chapter": 1,
+                "end_chapter": 10,
+                "summary": "第1-10章剧情总结\n- 第一版",
+            },
+        }
+    )
+    second = coordinator._persist_project_stage_summary_result(
+        {
+            "summary": "第1-10章剧情总结\n- 第二版",
+            "summary_payload": {
+                "start_chapter": 1,
+                "end_chapter": 10,
+                "summary": "第1-10章剧情总结\n- 第二版",
+            },
+        }
+    )
+
+    stage_summaries = coordinator.project_manager.load_project_state("collab_stage_summaries", default=[])
+    summary_path = Path(second["summary_path"])
+
+    assert first["summary_status"] in {"created", "updated"}
+    assert second["summary_status"] == "updated"
+    matched = [item for item in stage_summaries if isinstance(item, dict)]
+    assert len(matched) == 1
+    assert matched[0]["summary"].endswith("第二版")
+    assert summary_path.exists()
+    assert summary_path.read_text(encoding="utf-8").endswith("第二版")
+
+
+def test_phase3_memory_sync_manager_writes_meta_and_reports_diagnostics(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator._append_memory_event("phase3_test", {"ok": True})
+    diagnostics = coordinator.get_memory_diagnostics()
+
+    assert diagnostics["meta_exists"] is True
+    assert diagnostics["contract"]["contract_version"] == coordinator._memory_contract_version
+    assert diagnostics["meta"]["events"][-1]["type"] == "phase3_test"
+
+
+def test_phase3_checkpoint_manager_persists_and_reloads_checkpoint(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator._update_checkpoint(state=WorkflowState.WRITING, current_chapter=3, add_stage="writing")
+
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        restored = NovelCoordinator(project_dir=tmp_path)
+
+    assert restored.checkpoint is not None
+    assert restored.checkpoint.current_chapter == 3
+    assert restored.checkpoint.state == WorkflowState.WRITING
+    assert "writing" in restored.checkpoint.completed_stages
+
+
+@pytest.mark.asyncio
+async def test_phase4_create_novel_routes_world_character_outline_via_dispatcher(tmp_path, mock_model_config):
+    with patch('novel_agent.agent_config.get_config_manager') as mock_manager:
+        mock_manager.return_value.get_effective_config.return_value = mock_model_config
+        coordinator = NovelCoordinator(project_dir=tmp_path)
+
+    coordinator._ensure_message_bus_started = AsyncMock()
+    coordinator._subscribe_all_agents = AsyncMock()
+    coordinator._sync_memory_stage = AsyncMock()
+    coordinator._export_memory_snapshot = AsyncMock()
+    coordinator._check_pause_cancel = AsyncMock(return_value=False)
+
+    coordinator.worldbuilder.execute = AsyncMock(
+        return_value={
+            "success": True,
+            "world": {
+                "world_name": "玄荒界",
+                "power_system": {"levels": ["炼体", "筑基"]},
+                "geography": {"zones": ["旧城"]},
+                "factions": [{"name": "归墟司"}],
+                "rules": ["夜禁"],
+                "culture": {"tone": "压抑"},
+            },
+        }
+    )
+    coordinator.character_builder.execute = AsyncMock(
+        return_value={
+            "success": True,
+            "characters": [
+                {
+                    "name": "林渊",
+                    "role": "主角",
+                    "identity": "旧城遗孤",
+                    "occupation": "巡夜人学徒",
+                    "description": "从旧城归来的复仇者。",
+                    "personality": ["克制", "执拗"],
+                    "goals": ["追查旧案"],
+                    "relationships": {"沈砚": "盟友"},
+                    "notes": "角色草稿",
+                }
+            ],
+        }
+    )
+    coordinator.outliner.execute = AsyncMock(
+        return_value={
+            "success": True,
+            "outline": {
+                "title": "归墟录",
+                "chapters": [
+                    {"title": "第一章 旧城归来", "summary": "林渊回到旧城。"},
+                ],
+            },
+        }
+    )
+
+    async def fake_write_chapters_serial(chapters, world_data, outline_data):
+        yield {
+            "stage": "chapter_complete",
+            "message": "第 1 章完成",
+            "progress": 80,
+            "chapter": {"title": "第一章 旧城归来", "content": "章节正文"},
+        }
+
+    coordinator._write_chapters_serial = fake_write_chapters_serial
+
+    events = []
+    async for item in coordinator.create_novel(
+        novel_type="玄幻",
+        theme="复仇成长",
+        requirements="压抑递进",
+        protagonist="林渊",
+        plot_idea="从旧城归来开始追查旧案",
+        volume_count=1,
+        chapters_per_volume=1,
+        session_context={"session_id": "sess-phase4"},
+    ):
+        events.append(item)
+
+    runtime_pool = coordinator.project_manager.load_project_state("task_pool", default={})
+    tasks = [item for item in runtime_pool.get("tasks", []) if isinstance(item, dict)]
+    task_by_type = {}
+    for item in tasks:
+        task_by_type.setdefault(item.get("task_type"), []).append(item)
+
+    assert [item["task_type"] for item in tasks[:3]] == ["build_world", "build_characters", "build_outline"]
+    assert all(task_by_type[key][0]["status"] == TaskStatus.COMPLETED for key in ("build_world", "build_characters", "build_outline"))
+    assert task_by_type["build_world"][0]["metadata"]["candidate_source"] == "capability_registry"
+    assert task_by_type["build_characters"][0]["metadata"]["candidate_source"] == "capability_registry"
+    assert task_by_type["build_outline"][0]["metadata"]["candidate_source"] == "capability_registry"
+    assert "@creation_mainline" in task_by_type["build_world"][0]["metadata"]["route_reason"]
+    assert coordinator.worldbuilder.execute.await_count == 1
+    assert coordinator.character_builder.execute.await_count == 1
+    assert coordinator.outliner.execute.await_count == 1
+    assert coordinator.context_manager.get("world", {})["world_name"] == "玄荒界"
+    assert coordinator.project.title == "归墟录"
+    character_stage = next(
+        (
+            item for item in events
+            if item.get("stage") == "character_building"
+            and isinstance(item.get("data"), list)
+            and item.get("data")
+        ),
+        None,
+    )
+    assert character_stage is not None
+    assert character_stage["data"][0]["name"] == "林渊"
+    assert events[-1]["stage"] == "completed"
+
+    outline_rows = coordinator.project_manager.load_project_data("outline")
+    assert isinstance(outline_rows, list)
+    assert outline_rows[0]["title"] == "第一章 旧城归来"
 
 
 # ==================== Message Bus Tests ====================

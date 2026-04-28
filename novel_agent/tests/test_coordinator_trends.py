@@ -22,7 +22,7 @@ class _FakeResult:
 
 
 def test_coordinator_search_trends_balances_multi_platforms(monkeypatch):
-    def fake_use_skill(skill_name: str, method: str, **kwargs):
+    def fake_use_skill(self, skill_name: str, method: str, **kwargs):
         if method == "get_toutiao_trending":
             return {
                 "success": True,
@@ -56,7 +56,7 @@ def test_coordinator_search_trends_balances_multi_platforms(monkeypatch):
 def test_coordinator_search_trends_fallbacks_to_legacy_tool_name(monkeypatch):
     called_methods = []
 
-    def fake_use_skill(skill_name: str, method: str, **kwargs):
+    def fake_use_skill(self, skill_name: str, method: str, **kwargs):
         called_methods.append(method)
         if method == "get_customsource_trending":
             return {"success": False, "error": f"Method not found: {method}"}

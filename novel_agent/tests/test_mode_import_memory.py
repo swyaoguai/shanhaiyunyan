@@ -152,6 +152,153 @@ def test_outline_save_auto_refreshes_collab_memory(client_with_project):
     assert memory_payload["chapter_count"] == 1
 
 
+
+def test_worldbuilding_get_returns_rows_and_raw_data_for_object_payload(client_with_project):
+    client, manager = client_with_project
+    worldbuilding_payload = {
+        "world": {
+            "name": "苍穹界",
+            "world_type": "仙侠",
+            "geography": "九州浮空，云海隔绝",
+            "history": "星陨之后宗门并起",
+            "factions": [
+                {"name": "天衡宗", "description": "镇守天门的古老宗门"},
+            ],
+        },
+        "locations": {
+            "赤霄城": {"description": "悬于火山口的贸易城"},
+        },
+        "items": {
+            "镇魂灯": {"description": "可压制心魔的古灯"},
+        },
+        "events": [
+            {"title": "星陨纪元", "description": "旧王朝在流星雨中覆灭"},
+        ],
+    }
+    manager.save_project_data("worldbuilding", worldbuilding_payload)
+
+    response = client.get("/api/project-data/worldbuilding")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["raw_data"] == worldbuilding_payload
+    assert isinstance(payload["data"], list)
+    assert any(row["name"] == "苍穹界" and row["description"] == "仙侠" for row in payload["data"])
+    assert any(row["name"] == "地理环境" and "九州浮空" in row["description"] for row in payload["data"])
+    assert any(row["name"] == "天衡宗" and "镇守天门" in row["description"] for row in payload["data"])
+    assert any(row["name"] == "赤霄城" and "火山口" in row["description"] for row in payload["data"])
+    assert any(row["name"] == "镇魂灯" and "心魔" in row["description"] for row in payload["data"])
+    assert any(row["name"] == "星陨纪元" and "旧王朝" in row["description"] for row in payload["data"])
+
+
+
+def test_worldbuilding_post_preserves_compatible_object_shape(client_with_project):
+    client, manager = client_with_project
+    existing_payload = {
+        "world": {
+            "name": "旧世界",
+            "world_type": "废土",
+        },
+        "locations": {
+            "黑塔": {"description": "旧时代观测站"},
+        },
+        "items": {
+            "灰烬钥匙": {"description": "通向地下档案库"},
+        },
+        "events": [
+            {"title": "余烬之夜", "description": "天空燃烧整整一夜"},
+        ],
+    }
+    manager.save_project_data("worldbuilding", existing_payload)
+
+    rows = [
+        {"name": "世界名称", "description": "赛博灵境"},
+        {"name": "力量体系", "description": "灵网接入后可施展术式"},
+        {"name": "世界规则", "description": "所有高阶术式都要备案"},
+    ]
+    response = client.post(
+        "/api/project-data/worldbuilding",
+        json={"data": rows},
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+    saved_payload = manager.load_project_data("worldbuilding")
+    assert isinstance(saved_payload, dict)
+    assert isinstance(saved_payload.get("world"), dict)
+    assert saved_payload["world"]["name"] == "赛博灵境"
+    assert saved_payload["world"]["world_name"] == "赛博灵境"
+    assert saved_payload["world"]["power_system"] == "灵网接入后可施展术式"
+    assert "所有高阶术式都要备案" in saved_payload["world"]["rules"]
+    assert saved_payload["locations"] == {}
+    assert saved_payload["items"] == {}
+    assert saved_payload["events"] == []
+
+
+def test_characters_post_preserves_structured_fields(client_with_project):
+    client, manager = client_with_project
+    rows = [
+        {
+            "name": "吴迪",
+            "role": "主角",
+            "identity": "合欢宗外门弟子",
+            "occupation": "杂役弟子",
+            "age": "17",
+            "description": "抽象系修仙主角",
+            "personality": ["抽象", "无厘头"],
+            "abilities": ["吞器修炼"],
+            "motivation": "摆脱追杀并逆袭",
+            "goals": ["活着走出秘境", "在宗门站稳脚跟"],
+            "relationships": "苏青禾：暧昧对象\n赵不凡：死对头",
+            "tags": ["爽文", "修仙"],
+        }
+    ]
+
+    response = client.post(
+        "/api/project-data/characters",
+        json={"data": rows},
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+    saved_payload = manager.load_project_data("characters")
+    assert isinstance(saved_payload, dict)
+    assert saved_payload["吴迪"]["identity"] == "合欢宗外门弟子"
+    assert saved_payload["吴迪"]["goals"] == ["活着走出秘境", "在宗门站稳脚跟"]
+
+    get_response = client.get("/api/project-data/characters")
+    payload = get_response.json()
+    assert payload["data"][0]["relationships"]["赵不凡"] == "死对头"
+    assert payload["data"][0]["tags"] == ["爽文", "修仙"]
+
+
+@pytest.mark.parametrize("data_type", ["eventlines", "outline_settings", "detail_settings", "chapter_settings"])
+def test_generic_builtin_project_data_round_trip(client_with_project, data_type):
+    client, manager = client_with_project
+    rows = [
+        {"name": "条目一", "description": "说明一", "chapter_number": 1},
+        {"name": "条目二", "description": "说明二", "chapter_number": 2},
+    ]
+
+    response = client.post(
+        f"/api/project-data/{data_type}",
+        json={"data": rows},
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+    saved_payload = manager.load_project_data(data_type)
+    assert isinstance(saved_payload, list)
+    assert saved_payload[0]["name"] == "条目一"
+
+    get_response = client.get(f"/api/project-data/{data_type}")
+    assert get_response.status_code == 200
+    payload = get_response.json()
+    assert isinstance(payload["data"], list)
+    assert payload["data"][1]["name"] == "条目二"
+    assert payload["raw_data"][0]["description"] == "说明一"
+
+
 def test_import_rejects_unsupported_format(client_with_project):
     client, _ = client_with_project
     response = client.post(

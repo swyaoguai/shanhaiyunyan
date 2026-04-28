@@ -950,6 +950,7 @@ class AuxMemoryService:
                 "auto_classified": auto_classified,
             }
         )
+        self._mirror_item_to_library(item)
         return item
 
     def update_item(
@@ -1012,6 +1013,7 @@ class AuxMemoryService:
                 self._save_categories(project_id, categories)
 
             self._record_history(project_id, "update_item", {"item_id": item.id})
+            self._mirror_item_to_library(item)
             return item
 
         return None
@@ -1037,6 +1039,7 @@ class AuxMemoryService:
                 self._save_categories(project_id, categories)
 
         self._record_history(project_id, "delete_item", {"item_id": item_id})
+        self._remove_item_from_library(item_id)
         return True
 
     def batch_update_items_enabled(
@@ -1127,6 +1130,8 @@ class AuxMemoryService:
                 "requested_count": len(id_set),
             },
         )
+        for d_item in deleted_items:
+            self._remove_item_from_library(d_item.id)
         return len(deleted_items)
 
     def clear_items(
@@ -1152,6 +1157,51 @@ class AuxMemoryService:
         return {"matched": len(target_ids), "deleted": deleted_count}
 
     # ===== 检索与注入预览 =====
+
+    # ------------------------------------------------------------------
+    #  Library 桥接
+    # ------------------------------------------------------------------
+
+    def _mirror_item_to_library(self, item: AuxMemoryItem) -> None:
+        try:
+            from .library_service import get_library_service
+            from .library_types import LibraryEntry, EntryType, SourceType
+            svc = get_library_service()
+            if svc.is_degraded:
+                return
+            entry = LibraryEntry(
+                id=f"auxmem_{item.id}",
+                entry_type=EntryType.FREE_MEMORY.value,
+                title=(item.summary or "")[:80],
+                summary=(item.details or "")[:200],
+                content_structured={
+                    "memory_type": item.memory_type,
+                    "summary": item.summary,
+                    "details": item.details,
+                    "score": item.score,
+                    "enabled": item.enabled,
+                    "tags": item.tags,
+                    "category_id": item.category_id,
+                },
+                source_type=SourceType.MANUAL.value,
+                score=item.score,
+                tags=item.tags or [],
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            svc.upsert_entry(entry)
+        except Exception as exc:
+            logger.debug("aux_memory → library mirror failed: %s", exc)
+
+    def _remove_item_from_library(self, item_id: str) -> None:
+        try:
+            from .library_service import get_library_service
+            svc = get_library_service()
+            if svc.is_degraded:
+                return
+            svc.delete_entry(f"auxmem_{item_id}")
+        except Exception as exc:
+            logger.debug("aux_memory → library remove failed: %s", exc)
 
     @staticmethod
     def _item_search_text(item: AuxMemoryItem) -> str:

@@ -32,6 +32,7 @@ ENV/
 # VS Code
 .vscode/
 *.code-workspace
+node_modules/
 
 # PyInstaller
 *.manifest

@@ -66,6 +66,26 @@ def test_validate_skills():
     assert isinstance(validator.warnings, list)
 
 
+def test_validate_skills_auto_bootstraps_missing_config(tmp_path):
+    """缺失的 Skill 配置应从示例自动创建。"""
+    app_dir = tmp_path / "novel_agent"
+    (app_dir / "data").mkdir(parents=True, exist_ok=True)
+
+    skill_dir = tmp_path / "skills" / "demo_skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Demo Skill\n", encoding="utf-8")
+    example_content = '{\n  "enabled": true\n}\n'
+    (skill_dir / "config.example.json").write_text(example_content, encoding="utf-8")
+
+    validator = ConfigValidator(app_dir=app_dir, project_root=tmp_path)
+    validator._validate_skills()
+
+    config_path = skill_dir / "config.json"
+    assert config_path.exists()
+    assert config_path.read_text(encoding="utf-8") == example_content
+    assert any("已根据示例自动创建" in warning for warning in validator.warnings)
+
+
 def test_validate_port():
     """测试端口验证"""
     validator = ConfigValidator()

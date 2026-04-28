@@ -27,10 +27,14 @@ async def index(request: Request):
     if _templates is None:
         return HTMLResponse("<h1>模板引擎未初始化</h1>", status_code=500)
     
-    response = _templates.TemplateResponse("index.html", {
-        "request": request,
-        "novel_types": config.novel.novel_types
-    })
+    response = _templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "request": request,
+            "novel_types": config.novel.novel_types,
+        },
+    )
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"

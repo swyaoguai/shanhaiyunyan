@@ -1,14 +1,9 @@
 ﻿# -*- coding: utf-8 -*-
 """
-鏃犻檺缁啓Agent
-鐢ㄤ簬鏍规嵁鐢ㄦ埛鎻愪緵鐨勬晠浜嬪紑澶存垨鐏垫劅杩涜缁啓鍒涗綔
-姣忕珷瀹屾垚鍚庤嚜鍔ㄥ瓨鍏ョ煡璇嗗簱锛岄槻姝㈠墽鎯呴噸澶嶅拰璁惧畾鍐茬獊
+无限续写 Agent。
 
-澧炲己鍔熻兘锛?
-- 浼氳瘽鎸佷箙鍖栵細鏈嶅姟閲嶅惎鍚庡彲鎭㈠缁啓
-- 妯″瀷鍒囨崲淇濇寔杩炶疮锛氭崲妯″瀷鍚庤嚜鍔ㄤ紶閫掑畬鏁翠笂涓嬫枃
-- 绔犺妭杩炶疮鎬т繚璇侊細閫氳繃鎸佷箙鍖栫殑鍓ф儏鎽樿纭繚涓€鑷存€?
-- SeekDB 浼樺寲锛氬姩鎬佹悳绱㈡潈閲嶃€佹櫤鑳介噸鎺掑簭銆佷笂涓嬫枃鍘嬬缉
+根据用户提供的故事开头或灵感持续生成章节，并通过持久化会话、
+知识库检索与一致性约束，尽量保持长程创作的连续性。
 """
 from __future__ import annotations
 
@@ -23,14 +18,41 @@ from dataclasses import dataclass, field
 from .base_agent import BaseAgent
 from .session_store import get_session_store, SessionState
 from ..agent_config import AgentModelConfig
+from ..constants import WRITING_CONFIG
 
-# 寤惰繜瀵煎叆鍓ф儏绾︽潫妯″潡锛岄伩鍏嶅惊鐜緷璧?
+# 延迟导入剧情约束模块，避免循环依赖。
 PlotConstraintStore = None
 ContentValidator = None
 PostGenerationProcessor = None
 
+SUSPICIOUS_MOJIBAKE_FRAGMENTS = (
+    "\u9352\u56e8\u5d32",
+    "\u942d\u30e8\u7611",
+    "\u7ed4\u72ba\u59ad",
+    "\u93ad\u3220\ue632",
+    "\u701b\u6941\u669f",
+    "\u59af\u2033\u7037",
+    "\u6d7c\u6c33\u763d",
+)
+
+NON_CHAPTER_RESPONSE_PATTERNS = (
+    r"请告诉我",
+    r"请把.+告诉我",
+    r"我没有收到",
+    r"目前提供的.+只有",
+    r"比如[:：]",
+    r"题材/类型",
+    r"主角信息",
+    r"世界观/背景",
+    r"核心冲突/主线",
+    r"开篇情境",
+    r"风格偏好",
+    r"基本信息",
+    r"粗略的想法",
+)
+
 def get_plot_constraint_store(knowledge_base):
-    """鑾峰彇鍓ф儏绾︽潫瀛樺偍瀹炰緥"""
+    """获取剧情约束存储实例。"""
     global PlotConstraintStore
     if PlotConstraintStore is None:
         from ..knowledge_base.logic_layer.plot_constraints import PlotConstraintStore as PCS
@@ -38,7 +60,7 @@ def get_plot_constraint_store(knowledge_base):
     return PlotConstraintStore(knowledge_base)
 
 def get_content_validator(constraint_store, knowledge_base):
-    """鑾峰彇鍐呭楠岃瘉鍣ㄥ疄渚?"""
+    """获取内容校验器与后处理器。"""
     global ContentValidator, PostGenerationProcessor
     if ContentValidator is None:
         from .content_validator import ContentValidator as CV, PostGenerationProcessor as PGP
@@ -51,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CharacterState:
-    """瑙掕壊鐘舵€佽拷韪?"""
+    """角色状态跟踪。"""
     name: str
     is_alive: bool = True
     status: str = "姝ｅ父"
@@ -62,7 +84,7 @@ class CharacterState:
 
 @dataclass
 class PlotPoint:
-    """鍓ф儏瑕佺偣杩借釜"""
+    """剧情要点跟踪。"""
     chapter: int
     description: str
     importance: str = "normal"
@@ -71,13 +93,13 @@ class PlotPoint:
 
 @dataclass
 class ContinuousWriteConfig:
-    """鏃犻檺缁啓閰嶇疆"""
+    """无限续写配置。"""
     words_per_chapter: int = 2500
     min_words: int = 2000
     max_words: int = 4000
     auto_save_to_kb: bool = True
     check_consistency: bool = True
-    context_chapters: int = 3
+    context_chapters: int = 5
     kb_search_top_k: int = 5
     kb_summary_top_k: int = 3
     pause_for_user_input: bool = True
@@ -88,19 +110,13 @@ class ContinuousWriteConfig:
 
 class ContinuousWriter(BaseAgent):
     """
-    鏃犻檺缁啓Agent
-    
-    鏍稿績鍔熻兘锛?
-    1. 鏍规嵁鐢ㄦ埛鎻愪緵鐨勬晠浜嬪紑澶存垨鐏垫劅杩涜缁啓
-    2. 姣忕珷鍩轰簬鍓嶄竴绔犲唴瀹圭户缁画鍐?
-    3. 姣忓畬鎴愪竴绔犺嚜鍔ㄥ悜閲忓寲瀛樺叆鐭ヨ瘑搴?
-    4. 閫氳繃鐭ヨ瘑搴撴绱㈤槻姝㈠墽鎯呴噸澶嶅拰璁惧畾鍐茬獊
-    5. 鏀寔鐢ㄦ埛闅忔椂鍔犲叆鐏垫劅鍜岀籂姝ｅ墽鎯?
-    
-    澧炲己鍔熻兘锛?
-    6. 浼氳瘽鎸佷箙鍖?- 鏈嶅姟閲嶅惎鍚庤嚜鍔ㄦ仮澶?
-    7. 妯″瀷鍒囨崲杩炶疮鎬?- 鎹㈡ā鍨嬫椂鑷姩浼犻€掑畬鏁翠笂涓嬫枃
-    8. 璺ㄧ珷鑺備竴鑷存€?- 閫氳繃鎸佷箙鍖栫姸鎬佺‘淇濆墽鎯呰繛璐?
+    无限续写 Agent。
+
+    核心职责：
+    1. 根据故事开头持续生成后续章节。
+    2. 在章节间保持人物、剧情和设定一致性。
+    3. 通过持久化会话支持恢复与跨模型续写。
+    4. 在可用时接入知识库与热点灵感增强创作。
     """
     
     def __init__(
@@ -112,7 +128,7 @@ class ContinuousWriter(BaseAgent):
         project_id: str = "",
         **kwargs
     ):
-        """鍒濆鍖栨棤闄愮画鍐橝gent"""
+        """初始化无限续写 Agent。"""
         super().__init__(
             name="ContinuousWriter",
             prompt_file="continuous_writer.md",
@@ -122,8 +138,9 @@ class ContinuousWriter(BaseAgent):
         
         self.write_config = write_config or ContinuousWriteConfig()
         self.knowledge_base = knowledge_base
+        self._library_service = None
         
-        # 浼氳瘽鏍囪瘑
+        # 会话标识
         self._session_id = session_id
         self._project_id = project_id
         self._session_store = get_session_store()
@@ -137,7 +154,7 @@ class ContinuousWriter(BaseAgent):
         self._written_chapters: List[Dict[str, Any]] = []
         self._story_beginning: str = ""
         self._user_inspirations: List[Dict[str, Any]] = []
-        self._recovered_chapters: List[Dict[str, Any]] = []  # 鎭㈠鐨勭珷鑺傛暟鎹?
+        self._recovered_chapters: List[Dict[str, Any]] = []  # 恢复的章节数据
         self._corrections: List[Dict[str, Any]] = []
         
         self._characters: Dict[str, CharacterState] = {}
@@ -148,47 +165,87 @@ class ContinuousWriter(BaseAgent):
         self._trends_query: str = ""
         self._cached_trends: List[Dict[str, Any]] = []
         
-        # 褰撳墠浣跨敤鐨勬ā鍨嬪悕绉帮紙鐢ㄤ簬杩借釜妯″瀷鍒囨崲锛?
+        # 当前使用的模型名称，用于跟踪模型切换
         self._current_model: str = ""
         
-        # 鍓ф儏绾︽潫瀛樺偍锛堝湪璁剧疆鐭ヨ瘑搴撴椂鍒濆鍖栵級
+        # 剧情约束存储，在设置知识库时初始化
         self._constraint_store = None
+        self._character_manager = None
         
-        # 鍐呭楠岃瘉鍣紙鍚庡鐞嗛獙璇侊級
+        # 内容验证器与后处理器
         self._content_validator = None
         self._post_processor = None
         
-        # 楠岃瘉閰嶇疆
-        self._enable_post_validation = True  # 鏄惁鍚敤鍚庡鐞嗛獙璇?
-        self._auto_fix_violations = True  # 鏄惁鑷姩淇杩濊
-        self._max_regeneration_attempts = 2  # 鏈€澶ч噸鏂扮敓鎴愭鏁?
+        # 验证配置
+        self._enable_post_validation = True
+        self._auto_fix_violations = True
+        self._max_regeneration_attempts = 2
         
-        # 楂樼骇妫€绱㈤厤缃?
-        self._use_advanced_search = True  # 浣跨敤澧炲己鐨勭煡璇嗗簱鎼滅储
-        self._use_dynamic_weights = True  # 鍔ㄦ€佽皟鏁存悳绱㈡潈閲?
-        self._use_reranking = True  # 鍚敤缁撴灉閲嶆帓搴?
-        self._use_context_compression = True  # 鍚敤涓婁笅鏂囧帇缂?
+        # 高级检索配置
+        self._use_advanced_search = True
+        self._use_dynamic_weights = True
+        self._use_reranking = True
+        self._use_context_compression = True
+
+        try:
+            self._content_validator, _ = get_content_validator(None, None)
+        except Exception as exc:
+            logger.warning(f"[{self.name}] 基础内容验证器初始化失败: {exc}")
+            self._content_validator = None
         
     def _get_default_prompt(self) -> str:
-        """鑾峰彇榛樿绯荤粺鎻愮ず璇?"""
-        return """# 鏃犻檺缁啓Agent
+        """获取默认系统提示词。"""
+        prompt = """# 无限续写 Agent
 
-浣犳槸灏忚椤圭洰鐨勯暱绋嬬画鍐橝gent锛岃礋璐ｅ杞繛缁垱浣滃苟淇濇寔璺ㄦā鍨嬭繛璐€?
-## 宸ヤ綔妯″紡
+你负责长程连续创作，目标是在多轮续写中保持剧情推进、人物一致和设定稳定。
 
-### 妯″紡 CW1锛氳捣绔狅紙start锛?- 寤虹珛浜虹墿銆佸啿绐佸拰鍙欎簨鑺傚锛岀珷鏈粰鍑虹画鍐欓挬瀛愩€?
-### 妯″紡 CW2锛氱画绔狅紙continue锛岄粯璁わ級
-- 鍦ㄤ笂涓€绔犲熀纭€涓婃帹杩涳紝涓嶉噸澶嶅墠鏂囷紝涓嶅師鍦扮┖杞€?
-### 妯″紡 CW3锛氶噸鐢熸垚锛坮egenerate锛?- 淇濇寔绔犺妭鐩爣涓庝簨瀹炰笉鍙橈紝閲嶅啓琛ㄨ揪涓庢帹杩涜矾寰勩€?
-### 妯″紡 CW4锛氱籂姝ｆ墽琛岋紙correct / inspiration锛?- 涓嬩竴绔犱紭鍏堣惤瀹炵敤鎴风籂姝ｄ笌鐏垫劅銆?
-## 瀛楁暟涓庝竴鑷存€х‖绾︽潫锛堟渶楂樹紭鍏堢骇锛?
-1. 涓ユ牸鎺у埗鍦ㄧ洰鏍囧瓧鏁扮殑姝ｈ礋15%鑼冨洿鍐呫€?2. 宸叉浜¤鑹蹭笉寰椾互娲讳汉鐘舵€佸洖褰掞紙鍥炲繂/闂洖闄ゅ锛夈€?3. 涓嶇牬鍧忔棦鏈変笘鐣岃銆佽鑹茶瀹氥€佹椂闂寸嚎銆?4. 妯″瀷鍒囨崲鍚庝紭鍏堥伒瀹堝巻鍙蹭笂涓嬫枃涓庢寔涔呭寲鐘舵€併€?
-## 绾跨▼瑙勫垯
+## 工作模式
 
-- 鏀嚎鎺ㄨ繘鏃堕渶淇濈暀鍥炰富绾跨嚎绱€?- 鏀嚎涓嶅彲鏃犻檺寤堕暱锛岃揪鍒扮洰鏍囧悗鍥炴敹銆?- 蹇呰鏃跺彲浣跨敤闅愯棌娉ㄩ噴锛?  - `<!-- PLOT_THREAD:return_main -->`
+### 模式 CW1：起章（start）
+- 根据故事开头建立人物、冲突和叙事节奏，并在章末留下可续写的钩子。
+
+### 模式 CW2：续章（continue，默认）
+- 基于上一章自然推进，不重复前文，不原地打转。
+
+### 模式 CW3：重生成（regenerate）
+- 保持章节目标和关键事实不变，重写表达、节奏与推进路径。
+
+### 模式 CW4：纠正执行（correct / inspiration）
+- 下一章优先吸收用户新增灵感与剧情纠正。
+
+## 强约束
+
+1. 严格控制在目标字数的正负 15% 以内。
+2. 已死亡角色不得以活人状态回归，回忆或闪回除外。
+3. 不破坏既有世界观、角色设定、时间线和关键事实。
+4. 模型切换后优先遵守历史上下文与持久化状态。
+
+## 支线规则
+
+- 支线推进时必须保留回到主线的连接点。
+- 支线不可无限延长，到达目标后应尽快回收。
+- 必要时可使用隐藏注释标记线程：
+  - `<!-- PLOT_THREAD:return_main -->`
   - `<!-- PLOT_THREAD:switch:subplot_a -->`
   - `<!-- PLOT_THREAD:complete -->`
 """
+        return self._ensure_text_integrity(prompt, "默认提示词")
+
+    @staticmethod
+    def _contains_mojibake(text: str) -> bool:
+        """检测常见乱码片段。"""
+        if not text:
+            return False
+        if "\ufffd" in text:
+            return True
+        return any(fragment in text for fragment in SUSPICIOUS_MOJIBAKE_FRAGMENTS)
+
+    def _ensure_text_integrity(self, text: str, label: str) -> str:
+        """在关键提示词发送前阻断明显乱码。"""
+        if self._contains_mojibake(text):
+            logger.error(f"[{self.name}] {label} 检测到疑似乱码，请检查源码编码")
+            raise ValueError(f"{label} 存在疑似乱码")
+        return text
     
     async def execute(
         self,
@@ -225,32 +282,41 @@ class ContinuousWriter(BaseAgent):
         elif action == "regenerate":
             return await self._regenerate_chapter(input_data, context)
         else:
-            return {"success": False, "error": f"鏈煡鍔ㄤ綔: {action}"}
+            return {"success": False, "error": f"未知动作: {action}"}
     
     def _load_or_create_session(self, story_beginning: str = "") -> SessionState:
         """
-        鍔犺浇鎴栧垱寤烘寔涔呭寲浼氳瘽
+        加载或创建持久化会话。
         
-        杩欐槸纭繚鎹㈡ā鍨嬪悗淇濇寔杩炶疮鎬х殑鍏抽敭
+        这是确保切换模型后仍能保持续写连续性的关键。
         """
-        # 灏濊瘯浠庢寔涔呭寲瀛樺偍鍔犺浇
+        # 先尝试从持久化存储恢复
         state = self._session_store.load(self._session_id, self._project_id)
         
         if state:
-            # 鎭㈠宸叉湁浼氳瘽
+            # 恢复已有会话
             logger.info(f"[{self.name}] Recovered persisted session at chapter {state.current_chapter}")
             
-            # 鍚屾鍐呭瓨鐘舵€?
+            # 同步内存状态
             self._story_beginning = state.story_beginning
             self._current_chapter = state.current_chapter
             self._written_chapters = state.chapters.copy()
             self._dead_characters = state.dead_characters.copy()
             self._user_inspirations = state.inspirations.copy()
             self._corrections = state.corrections.copy()
+            self._characters = {
+                name: CharacterState(**payload) if isinstance(payload, dict) else CharacterState(name=name)
+                for name, payload in (state.character_states or {}).items()
+            }
+            self._plot_points = [
+                PlotPoint(**item)
+                for item in (state.plot_points or [])
+                if isinstance(item, dict)
+            ]
             
             return state
         
-        # 鍒涘缓鏂颁細璇?
+        # 创建新会话
         state = SessionState(
             session_id=self._session_id,
             project_id=self._project_id,
@@ -266,9 +332,9 @@ class ContinuousWriter(BaseAgent):
     
     def _sync_to_session(self):
         """
-        灏嗗唴瀛樼姸鎬佸悓姝ュ埌鎸佷箙鍖栦細璇?
+        将当前内存状态同步到持久化会话。
         
-        姣忔绔犺妭瀹屾垚鍚庤皟鐢紝纭繚鏁版嵁涓嶄涪澶?
+        每次章节完成后调用，确保关键数据不会丢失。
         """
         if not self._session_state:
             return
@@ -277,6 +343,26 @@ class ContinuousWriter(BaseAgent):
         self._session_state.current_chapter = self._current_chapter
         self._session_state.chapters = self._written_chapters.copy()
         self._session_state.dead_characters = self._dead_characters.copy()
+        self._session_state.character_states = {
+            name: {
+                "name": state.name,
+                "is_alive": state.is_alive,
+                "status": state.status,
+                "location": state.location,
+                "last_chapter": state.last_chapter,
+                "notes": list(state.notes[-5:]),
+            }
+            for name, state in self._characters.items()
+        }
+        self._session_state.plot_points = [
+            {
+                "chapter": point.chapter,
+                "description": point.description,
+                "importance": point.importance,
+                "resolved": point.resolved,
+            }
+            for point in self._plot_points[-20:]
+        ]
         self._session_state.inspirations = self._user_inspirations.copy()
         self._session_state.corrections = self._corrections.copy()
         self._session_state.is_running = self._is_running
@@ -285,54 +371,50 @@ class ContinuousWriter(BaseAgent):
         self._session_store.save(self._session_state)
     
     def _get_model_switch_context(self) -> str:
-        """
-        鑾峰彇妯″瀷鍒囨崲鏃剁殑棰濆涓婁笅鏂?
-        
-        褰撴娴嬪埌妯″瀷鍒囨崲鏃讹紝鎻愪緵鏇磋缁嗙殑涓婁笅鏂囦互纭繚杩炶疮鎬?
-        """
+        """获取模型切换时需要补充的上下文。"""
         if not self._session_state:
             return ""
         
         last_model = self._session_state.last_model
         if last_model and last_model != self._current_model:
-            logger.info(f"[{self.name}] 妫€娴嬪埌妯″瀷鍒囨崲: {last_model} -> {self._current_model}")
+            logger.info(f"[{self.name}] 检测到模型切换: {last_model} -> {self._current_model}")
             
-            # 鏋勫缓澧炲己鐨勬ā鍨嬪垏鎹笂涓嬫枃
+            # 构建增强的模型切换上下文
             context_parts = []
             
-            # 1. 鍩虹浼氳瘽鎽樿
+            # 1. 基础会话摘要
             session_summary = self._session_state.get_context_summary(max_chapters=5)
             context_parts.append(session_summary)
             
-            # 2. 浠庣煡璇嗗簱鑾峰彇鍏抽敭绾︽潫锛堜娇鐢ㄩ珮绾ф悳绱級
+            # 2. 从知识库补充关键约束
             if self.knowledge_base and self._use_advanced_search:
                 try:
-                    # 鑾峰彇鎵€鏈夋椿璺冪殑涓ラ噸绾︽潫
+                    # 获取关键剧情约束
                     critical_constraints = self.knowledge_base.get_active_constraints()
                     if critical_constraints:
-                        context_parts.append("\n[閲嶈鍓ф儏绾︽潫]")
+                        context_parts.append("\n[重要剧情约束]")
                         for c in critical_constraints[:10]:
                             context_parts.append(f"- {c.title}")
                     
-                    # 鑾峰彇姝讳骸瑙掕壊
+                    # 获取已死亡角色
                     dead_chars = self.knowledge_base.get_dead_characters()
                     if dead_chars:
-                        context_parts.append("\n[宸叉浜¤鑹瞉")
+                        context_parts.append("\n[已死亡角色]")
                         context_parts.append(", ".join(dead_chars))
                         
                 except Exception as e:
-                    logger.warning(f"[{self.name}] 鑾峰彇鐭ヨ瘑搴撶害鏉熷け璐? {e}")
+                    logger.warning(f"[{self.name}] 获取知识库约束失败: {e}")
             
-            # 3. 鏈€鍚庝竴绔犵殑瀹屾暣鍐呭锛堢‘淇濈画鍐欒繛璐級
+            # 3. 提供上一章完整内容，确保续写连贯
             if self._written_chapters:
                 last_ch = self._written_chapters[-1]
                 last_content = last_ch.get('content', '')
                 if last_content:
-                    context_parts.append("\n[涓婁竴绔犲畬鏁村唴瀹筣")
+                    context_parts.append("\n[上一章完整内容]")
                     context_parts.append(
                         f"第{last_ch.get('chapter_number')}章 {last_ch.get('title', '')}"
                     )
-                    # 鎻愪緵鏇村鍐呭浠ョ‘淇濊繛璐?
+                    # 保留更多正文，确保续写稳定
                     context_parts.append(last_content[-2000:] if len(last_content) > 2000 else last_content)
             
             return "\n".join(context_parts)
@@ -344,10 +426,10 @@ class ContinuousWriter(BaseAgent):
         input_data: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """寮€濮嬫柊鏁呬簨鎴栨仮澶嶅凡鏈夋晠浜?"""
+        """开始新故事或恢复已有故事。"""
         story_beginning = input_data.get("content", "")
         if not story_beginning:
-            return {"success": False, "error": "璇锋彁渚涙晠浜嬪紑澶存垨鐏垫劅"}
+            return {"success": False, "error": "请提供故事开头或灵感"}
         
         current_chapter = input_data.get("current_chapter", 0)
         is_recovery = current_chapter > 0
@@ -355,14 +437,14 @@ class ContinuousWriter(BaseAgent):
         self._is_running = True
         self._should_stop = False
         
-        # 鑾峰彇褰撳墠妯″瀷鍚嶇О
+        # 获取当前模型名称
         if self.model_config:
             self._current_model = self.model_config.model
         
-        # 灏濊瘯浠庢寔涔呭寲瀛樺偍鎭㈠锛堜紭鍏堢骇鏈€楂橈級
+        # 优先尝试从持久化存储恢复
         self._session_state = self._load_or_create_session(story_beginning)
         
-        # 濡傛灉鎸佷箙鍖栦細璇濇湁鏁版嵁锛屼紭鍏堜娇鐢?
+        # 若持久化会话已有数据，则优先恢复
         if self._session_state.chapters:
             logger.info(f"[{self.name}] Using persisted chapters: {len(self._session_state.chapters)}")
             is_recovery = True
@@ -372,13 +454,22 @@ class ContinuousWriter(BaseAgent):
             self._dead_characters = self._session_state.dead_characters.copy()
             self._user_inspirations = self._session_state.inspirations.copy()
             self._corrections = self._session_state.corrections.copy()
+            self._characters = {
+                name: CharacterState(**payload) if isinstance(payload, dict) else CharacterState(name=name)
+                for name, payload in (self._session_state.character_states or {}).items()
+            }
+            self._plot_points = [
+                PlotPoint(**item)
+                for item in (self._session_state.plot_points or [])
+                if isinstance(item, dict)
+            ]
         elif is_recovery:
-            # 浠庡墠绔紶鍏ョ殑鏁版嵁鎭㈠锛堝吋瀹规棫閫昏緫锛?
+            # 从前端传入的数据恢复，兼容旧逻辑
             self._current_chapter = current_chapter
             if not self._story_beginning:
                 self._story_beginning = story_beginning
             
-            # 鎭㈠绔犺妭鏁版嵁 - 鍏抽敭淇锛氱‘淇濆悗缁珷鑺傛湁涓婁笅鏂?
+            # 恢复章节数据，确保后续章节有上下文
             recovered_chapters = input_data.get("recovered_chapters", [])
             if recovered_chapters and isinstance(recovered_chapters, list):
                 self._written_chapters = []
@@ -390,17 +481,16 @@ class ContinuousWriter(BaseAgent):
                             "content": ch.get("content", ""),
                             "word_count": ch.get("word_count", len(ch.get("content", "")))
                         })
-                logger.info(f"[{self.name}] 浠庡墠绔仮澶?{len(self._written_chapters)} 绔犺妭鏁版嵁")
+                logger.info(f"[{self.name}] 已从前端恢复 {len(self._written_chapters)} 章数据")
                 
-                # 鍚屾鍒版寔涔呭寲瀛樺偍
+                # 同步到持久化存储
                 self._session_state.chapters = self._written_chapters.copy()
                 self._session_state.current_chapter = current_chapter
                 self._session_store.save(self._session_state)
             else:
-                # 濡傛灉娌℃湁瀹屾暣绔犺妭鏁版嵁锛屽皢 story_beginning 浣滀负铏氭嫙鐨勭涓€绔?
-                logger.warning(f"[{self.name}] 鎭㈠浼氳瘽浣嗘棤瀹屾暣绔犺妭鏁版嵁锛屼娇鐢ㄥ紑澶存枃鏈綔涓轰笂涓嬫枃")
+                logger.warning(f"[{self.name}] 恢复会话时缺少完整章节数据，将使用故事开头作为上下文")
             
-            logger.info(f"[{self.name}] 鎭㈠浼氳瘽锛氬綋鍓嶇珷鑺?{current_chapter}")
+            logger.info(f"[{self.name}] 已恢复会话，当前章节: {current_chapter}")
         else:
             self._current_chapter = 0
             self._written_chapters = []
@@ -411,11 +501,11 @@ class ContinuousWriter(BaseAgent):
             self._plot_points = []
             self._dead_characters = []
             
-            # 鏇存柊鎸佷箙鍖栦細璇?
+            # 更新持久化会话
             self._session_state.story_beginning = story_beginning
             self._session_store.save(self._session_state)
             
-            logger.info(f"[{self.name}] 寮€濮嬫柊鏁呬簨")
+            logger.info(f"[{self.name}] 开始新故事")
         
         return await self._write_chapter(input_data, context)
     
@@ -424,9 +514,9 @@ class ContinuousWriter(BaseAgent):
         input_data: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """缁х画缁啓涓嬩竴绔?"""
+        """继续续写下一章。"""
         if not self._is_running and not self._written_chapters:
-            return {"success": False, "error": "璇峰厛寮€濮嬩竴涓柊鏁呬簨"}
+            return {"success": False, "error": "请先开始一个新故事"}
         
         self._is_running = True
         self._should_stop = False
@@ -442,7 +532,7 @@ class ContinuousWriter(BaseAgent):
         input_data: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """閲嶆柊鐢熸垚鎸囧畾绔犺妭锛堥粯璁や粠璇ョ珷璧烽噸寤猴級"""
+        """重新生成指定章节，默认从该章开始重建。"""
         chapter_number = int(input_data.get("chapter_number", 0) or 0)
         if chapter_number <= 0:
             return {"success": False, "error": "invalid chapter number"}
@@ -465,19 +555,19 @@ class ContinuousWriter(BaseAgent):
         self._written_chapters = self._written_chapters[:target_index]
         self._current_chapter = chapter_number - 1
         
-        # 娓呯悊琚Щ闄ょ珷鑺傜殑鐏垫劅鍜岀籂姝?
+        # 清理被移除章节对应的灵感与纠正
         self._user_inspirations = [i for i in self._user_inspirations if i.get("chapter", 0) < chapter_number]
         self._corrections = [c for c in self._corrections if c.get("chapter", 0) < chapter_number]
         
-        # 鍚屾鐭ヨ瘑搴撳垹闄わ紙濡傛灉鍚敤锛?
+        # 同步删除知识库中的相关章节
         if removed_numbers and self.knowledge_base:
             for num in removed_numbers:
                 try:
                     self.knowledge_base.delete_chapter(f"chapter_{num}")
                 except Exception as e:
-                    logger.warning(f"[{self.name}] 鍒犻櫎鐭ヨ瘑搴撶珷鑺傚け璐? chapter_{num}, {e}")
+                    logger.warning(f"[{self.name}] 删除知识库章节失败: chapter_{num}, {e}")
         
-        # 鍚屾浼氳瘽
+        # 同步会话
         self._sync_to_session()
         
         extra_inspiration = input_data.get("content", "")
@@ -491,31 +581,31 @@ class ContinuousWriter(BaseAgent):
         input_data: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """鍐欎竴涓珷鑺?"""
+        """创作一个章节。"""
         self._current_chapter += 1
         chapter_number = self._current_chapter
         
         await self.notify_progress(f"正在创作第{chapter_number}章...", 0)
         
-        # 妫€娴嬫ā鍨嬪垏鎹紝鑾峰彇棰濆涓婁笅鏂?
+        # 检测模型切换，补充额外上下文
         model_switch_context = self._get_model_switch_context()
         
-        await self.notify_progress("姝ｅ湪璇诲彇鐭ヨ瘑搴?..", 10)
+        await self.notify_progress("正在读取知识库...", 10)
         kb_summaries = await self._retrieve_summaries_from_knowledge_base()
         
-        await self.notify_progress("姝ｅ湪妫€绱㈢浉鍏冲墽鎯?..", 20)
+        await self.notify_progress("正在检索相关剧情...", 20)
         kb_context = await self._retrieve_from_knowledge_base(chapter_number)
         
         trends_data = []
         if self._trends_enabled:
-            await self.notify_progress("姝ｅ湪鎼滅储鐑偣...", 30)
+            await self.notify_progress("正在搜索热点...", 30)
             trends_data = await self._search_trends()
         
         recent_chapters = self._get_recent_chapters()
         chapter_inspirations = [i for i in self._user_inspirations if i.get("chapter") == chapter_number]
         chapter_corrections = [c for c in self._corrections if c.get("chapter") == chapter_number]
         
-        await self.notify_progress("姝ｅ湪鏋勫缓鎻愮ず...", 40)
+        await self.notify_progress("正在构建提示词...", 40)
         
         prompt = self._build_chapter_prompt(
             chapter_number=chapter_number,
@@ -537,7 +627,7 @@ class ContinuousWriter(BaseAgent):
             ])
             
             chapter_data = self._parse_chapter_response(response, chapter_number)
-            chapter_data["model_used"] = self._current_model  # 璁板綍浣跨敤鐨勬ā鍨?
+            chapter_data["model_used"] = self._current_model
             duration = time.time() - start_time
             
             logger.info(
@@ -545,10 +635,10 @@ class ContinuousWriter(BaseAgent):
                 f"{chapter_data['word_count']} words, model={self._current_model}"
             )
             
-            # 鍚庡鐞嗛獙璇侊紙闄ゆ彁绀鸿瘝绾︽潫澶栫殑绗簩閬撻槻绾匡級
+            # 后处理验证，作为提示词约束外的第二道防线
             validation_result = None
             if self._enable_post_validation and self._content_validator:
-                await self.notify_progress("姝ｅ湪楠岃瘉鍐呭涓€鑷存€?..", 85)
+                await self.notify_progress("正在验证内容一致性...", 85)
                 
                 content = chapter_data["content"]
                 validation_result = self._content_validator.validate(
@@ -558,14 +648,14 @@ class ContinuousWriter(BaseAgent):
                 )
                 
                 if validation_result.auto_fixed and validation_result.fixed_content:
-                    # 搴旂敤鑷姩淇
+                    # 应用自动修正
                     chapter_data["content"] = validation_result.fixed_content
                     chapter_data["word_count"] = len(re.sub(r'\s+', '', validation_result.fixed_content))
                     chapter_data["auto_fixed"] = True
-                    logger.info(f"[{self.name}] 搴旂敤鑷姩淇")
+                    logger.info(f"[{self.name}] 已应用自动修正")
                 
                 if validation_result.has_critical:
-                    # 瀛樺湪涓ラ噸杩濊锛岃褰曡鍛?
+                    # 存在严重违规，记录警告
                     chapter_data["validation_warnings"] = [
                         v.description for v in validation_result.violations
                     ]
@@ -574,24 +664,41 @@ class ContinuousWriter(BaseAgent):
             self._update_character_states(chapter_data)
             self._written_chapters.append(chapter_data)
             
-            # 鍚屾鍒版寔涔呭寲瀛樺偍锛堝叧閿細纭繚鏁版嵁涓嶄涪澶憋級
+            # 同步到持久化存储，确保数据不丢失
             self._sync_to_session()
-            
+
             if self.write_config.auto_save_to_kb:
                 await self._save_to_knowledge_base(chapter_data)
-            
+
+            # 自动生成章节摘要
+            try:
+                from novel_agent.chapter_summary_service import (
+                    get_auto_summary_enabled,
+                    generate_chapter_summary,
+                    save_chapter_summary_to_library,
+                )
+                if get_auto_summary_enabled(self._project_id):
+                    summary = await generate_chapter_summary(
+                        chapter_number=chapter_data["chapter_number"],
+                        title=chapter_data.get("title", ""),
+                        content=chapter_data.get("content", ""),
+                    )
+                    save_chapter_summary_to_library(chapter_data["chapter_number"], summary)
+            except Exception as e:
+                logger.warning(f"[ContinuousWriter] Auto chapter summary failed: {e}")
+
             await self.notify_progress(f"第{chapter_number}章创作完成", 100, {"chapter": chapter_data})
             
             result = {
                 "success": True,
                 "chapter": chapter_data,
                 "waiting_for_input": self.write_config.pause_for_user_input,
-                "message": "绔犺妭鍒涗綔瀹屾垚",
+                "message": "章节创作完成",
                 "session_id": self._session_id,
-                "persisted": True  # 鏍囪宸叉寔涔呭寲
+                "persisted": True
             }
             
-            # 娣诲姞楠岃瘉缁撴灉
+            # 附加验证结果
             if validation_result:
                 result["validation"] = {
                     "passed": validation_result.is_valid,
@@ -602,7 +709,7 @@ class ContinuousWriter(BaseAgent):
             return result
             
         except Exception as e:
-            logger.error(f"[{self.name}] 鍒涗綔澶辫触: {e}")
+            logger.error(f"[{self.name}] 创作失败: {e}")
             self._current_chapter -= 1
             return {"success": False, "chapter_number": chapter_number, "error": str(e)}
     
@@ -616,29 +723,29 @@ class ContinuousWriter(BaseAgent):
         trends_data: List[Dict[str, Any]] = None,
         inspirations: List[Dict[str, Any]] = None,
         corrections: List[Dict[str, Any]] = None,
-        model_switch_context: str = ""  # 鏂板锛氭ā鍨嬪垏鎹㈡椂鐨勯澶栦笂涓嬫枃
+        model_switch_context: str = ""
     ) -> str:
-        """鏋勫缓绔犺妭缁啓鎻愮ず璇?"""
+        """构建章节续写提示词。"""
         parts = []
         inspirations = inspirations or []
         corrections = corrections or []
         kb_summaries = kb_summaries or []
         trends_data = trends_data or []
         
-        # 妯″瀷鍒囨崲鏃讹紝娣诲姞瀹屾暣鐨勬晠浜嬩笂涓嬫枃
+        # 模型切换时补充完整故事上下文
         if model_switch_context:
-            parts.append("[閲嶈鎻愮ず锛氭ā鍨嬪凡鍒囨崲锛岃浠旂粏闃呰浠ヤ笅瀹屾暣涓婁笅鏂嘳")
+            parts.append("[重要提示：模型已切换，请仔细阅读以下完整上下文]")
             parts.append(model_switch_context)
             parts.append("")
         
         if kb_summaries:
-            parts.append("[鍓ф儏鎬荤粨]")
+            parts.append("[剧情总结]")
             for s in kb_summaries:
                 parts.append(f"{s.get('chapter_range', '')}: {s.get('content', '')}")
             parts.append("")
         
         if story_beginning:
-            parts.append(f"[鏁呬簨寮€澶碷\n{story_beginning}\n")
+            parts.append(f"[故事开头核心设定]\n{story_beginning[:600]}\n")
         
         if trends_data:
             parts.append("[热点融合要求]")
@@ -658,65 +765,88 @@ class ContinuousWriter(BaseAgent):
                 parts.append(f"- {source}{title}{heat}")
             parts.append("")
         if kb_context.get("relevant_content"):
-            parts.append("[鐭ヨ瘑搴撲俊鎭痌")
+            parts.append("[知识库信息]")
             for item in kb_context["relevant_content"]:
                 parts.append(f"- {item}")
             parts.append("")
+        else:
+            lib_ctx = self._get_library_context()
+            if lib_ctx:
+                parts.append(lib_ctx)
+                parts.append("")
         
-        # 宸叉浜¤鑹诧紙浠庣煡璇嗗簱鍜屽唴瀛樹腑鍚堝苟锛?
+        # 合并知识库和内存中的死亡角色约束
         all_dead = set(self._dead_characters)
         if kb_context.get("dead_characters"):
             all_dead.update(kb_context["dead_characters"])
         
         if all_dead:
-            parts.append("[宸叉浜¤鑹?- 缁濆绂佹澶嶆椿锛乚")
-            parts.append("浠ヤ笅瑙掕壊宸插湪涔嬪墠鐨勭珷鑺備腑姝讳骸锛岀粷瀵逛笉鑳借浠栦滑浠ユ椿浜鸿韩浠藉嚭鐜帮細")
+            parts.append("[已死亡角色 - 绝对禁止复活]")
+            parts.append("以下角色已在之前的章节中死亡，绝对不能让他们以活人身份出现：")
             for char in sorted(all_dead):
-                parts.append(f"  鉂?{char}")
+                parts.append(f"  - {char}")
             parts.append("")
         
-        # 鍓ф儏绾︽潫锛堜粠鐭ヨ瘑搴撴绱級
+        # 剧情约束（从知识库检索）
         if kb_context.get("plot_constraints"):
-            parts.append("[閲嶈鍓ф儏绾︽潫]")
+            parts.append("[重要剧情约束]")
             for constraint in kb_context["plot_constraints"][:5]:
                 doc = constraint.get("document", "")
                 if doc:
-                    # 鍙彁鍙栧叧閿俊鎭?
+                    # 只提取关键信息
                     lines = doc.split("\n")[:10]
                     for line in lines:
                         if line.strip() and not line.startswith("==="):
                             parts.append(f"  {line}")
             parts.append("")
         
-        # 澧炲己鍓嶆儏鍥為【锛氭彁渚涙洿璇︾粏鐨勭珷鑺傚唴瀹?
+        # 增强前情回顾，提供更详细的章节内容
         if recent_chapters:
-            parts.append("[鍓嶆儏鍥為【]")
+            parts.append("[前情回顾]")
             for ch in recent_chapters:
                 ch_num = ch.get('chapter_number')
                 title = ch.get('title', '')
-                summary = ch.get('summary', '')[:300]  # 澧炲姞鎽樿闀垮害
+                summary = ch.get('summary', '')[:300]
                 parts.append(f"第{ch_num}章 {title}:")
                 parts.append(f"  {summary}...")
             parts.append("")
             
-            # 鏈€鍚庝竴绔犵殑瀹屾暣鍐呭锛堢‘淇濈画鍐欒繛璐級
+            # 最后一章的完整内容，确保续写连贯
             if recent_chapters:
                 last_chapter = recent_chapters[-1]
                 last_content = last_chapter.get('content', '')
                 if last_content:
-                    # 鎻愪緵鏈€鍚?000瀛椾綔涓虹洿鎺ヤ笂涓嬫枃
-                    parts.append("[涓婁竴绔犵粨灏撅紙璇风洿鎺ョ画鍐欙級]")
-                    parts.append(last_content[-1000:])
+                    parts.append("[上一章结尾（请直接续写）]")
+                    parts.append(last_content[-1500:])
                     parts.append("")
+
+        if self.write_config.check_consistency:
+            character_memory = self._build_character_memory_block()
+            if character_memory:
+                parts.append("[角色状态锚点]")
+                parts.append(character_memory)
+                parts.append("")
+
+            setting_memory = self._build_setting_memory_block(story_beginning, recent_chapters)
+            if setting_memory:
+                parts.append("[设定与场景锚点]")
+                parts.append(setting_memory)
+                parts.append("")
+
+            preflight = self._build_preflight_consistency_checklist(recent_chapters)
+            if preflight:
+                parts.append("[续写前快速自检]")
+                parts.append(preflight)
+                parts.append("")
         
         if inspirations:
-            parts.append("[鐏垫劅]")
+            parts.append("[灵感]")
             for insp in inspirations:
                 parts.append(f"- {insp.get('content', '')}")
             parts.append("")
         
         if corrections:
-            parts.append("[绾犳]")
+            parts.append("[纠正]")
             for corr in corrections:
                 parts.append(f"- {corr.get('content', '')}")
             parts.append("")
@@ -725,15 +855,62 @@ class ContinuousWriter(BaseAgent):
         min_w = int(target * 0.90)
         max_w = int(target * 1.10)
         
+        parts.append("[执行优先级]")
+        parts.append("1. 先保证前文记忆、人物状态、世界设定、时间线不出错。")
+        parts.append("2. 再自然承接上一章结尾，推进当前冲突或目标。")
+        parts.append("3. 若使用热点，只能改写成剧情素材，不能写成新闻播报或生硬插入。")
+        parts.append("4. 直接输出小说正文，不要附加章节信息、自检结果或解释。")
+        parts.append("")
+        parts.append("[记忆使用]")
+        parts.append("已提供的前情、知识库、剧情总结、死亡角色和约束就是本次可用记忆，优先服从，不要擅自补写未提供的重要设定。")
+        parts.append("")
         parts.append(f"[字数限制] {min_w}-{max_w}字，目标{target}字")
         parts.append(f"[任务] 请创作第{chapter_number}章")
-        parts.append("[注意] 请保持与前文剧情连贯，不要重复已有内容，不要让已死亡角色复活")
+        parts.append("[注意] 请保持与前文剧情连贯，不要重复已有内容，不要让已死亡角色复活，不要输出正文外说明")
         
-        return "\n".join(parts)
-    
+        mandatory_tail_marker = "[执行优先级]"
+
+        prompt_text = "\n".join(parts)
+        estimated_tokens = len(prompt_text) // 2
+        max_tokens = WRITING_CONFIG.MAX_CONTEXT_TOKENS
+
+        if estimated_tokens > max_tokens:
+            mandatory_tail = ""
+            mt_idx = prompt_text.find(mandatory_tail_marker)
+            if mt_idx != -1:
+                mandatory_tail = prompt_text[mt_idx:]
+                prompt_text = prompt_text[:mt_idx]
+
+            budget_chars = max_tokens * 2 - len(mandatory_tail)
+            low_priority_markers = [
+                "[热点融合要求]", "[热点候选]",
+                "[知识库信息]",
+                "[故事开头核心设定]",
+                "[设定与场景锚点]",
+            ]
+            for marker in low_priority_markers:
+                if len(prompt_text) <= budget_chars:
+                    break
+                idx = prompt_text.find(marker)
+                if idx == -1:
+                    continue
+                end = prompt_text.find("\n[", idx + len(marker))
+                if end == -1:
+                    prompt_text = prompt_text[:idx]
+                else:
+                    prompt_text = prompt_text[:idx] + prompt_text[end:]
+
+            prompt_text = prompt_text.rstrip() + "\n" + mandatory_tail
+            logger.warning(
+                f"[{self.name}] 提示词超出token预算: "
+                f"{estimated_tokens}>{max_tokens}, 已截断至{len(prompt_text)//2}"
+            )
+
+        return self._ensure_text_integrity(prompt_text, "章节提示词")
+
     def _parse_chapter_response(self, response: str, chapter_number: int) -> Dict[str, Any]:
-        """瑙ｆ瀽LLM鍝嶅簲"""
-        title_match = re.search(r'#\s*绗琝d+绔燶s*(.+?)(?:\n|$)', response)
+        """解析 LLM 响应。"""
+        title_match = re.search(r'#\s*第\d+章\s*(.+?)(?:\n|$)', response)
         title = title_match.group(1).strip() if title_match else f"第{chapter_number}章"
         
         content = response
@@ -745,6 +922,8 @@ class ContinuousWriter(BaseAgent):
         
         if title_match:
             content = content[title_match.end():].strip()
+
+        self._ensure_chapter_like_content(content, chapter_number)
         
         word_count = len(re.sub(r'\s+', '', content))
         
@@ -752,7 +931,7 @@ class ContinuousWriter(BaseAgent):
         max_w = int(target * 1.15)
         
         if word_count > max_w:
-            logger.warning(f"[{self.name}] 瀛楁暟瓒呮爣: {word_count} > {max_w}")
+            logger.warning(f"[{self.name}] 字数超标: {word_count} > {max_w}")
             content = self._smart_truncate(content, max_w)
             word_count = len(re.sub(r'\s+', '', content))
         
@@ -766,6 +945,30 @@ class ContinuousWriter(BaseAgent):
             "summary": summary,
             **chapter_info
         }
+
+    def _ensure_chapter_like_content(self, content: str, chapter_number: int) -> None:
+        """阻止将需求收集或说明性回复误存为章节正文。"""
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError(f"第{chapter_number}章生成失败：模型返回空正文")
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        bullet_lines = [line for line in lines if re.match(r"^[-*]\s+", line)]
+        question_lines = [line for line in lines if "？" in line or "?" in line]
+        matched_patterns = [
+            pattern for pattern in NON_CHAPTER_RESPONSE_PATTERNS
+            if re.search(pattern, text)
+        ]
+
+        if len(matched_patterns) >= 2:
+            raise ValueError(
+                f"第{chapter_number}章生成失败：模型返回了需求收集/说明性内容，未输出小说正文"
+            )
+
+        if len(bullet_lines) >= 3 and (question_lines or "请告诉我" in text or "比如" in text):
+            raise ValueError(
+                f"第{chapter_number}章生成失败：模型返回了列表式说明而非章节正文"
+            )
     
     def _smart_truncate(self, content: str, max_words: int) -> str:
         """鏅鸿兘鎴柇"""
@@ -788,17 +991,74 @@ class ContinuousWriter(BaseAgent):
         return '\n\n'.join(result).strip() or content[:max_words * 2]
     
     def _update_character_states(self, chapter_data: Dict[str, Any]) -> None:
-        """鏇存柊瑙掕壊鐘舵€?"""
-        pass
-    
+        """根据最新章节更新角色状态与剧情锚点。"""
+        content = str(chapter_data.get("content") or "").strip()
+        chapter_number = int(chapter_data.get("chapter_number") or 0)
+        if not content or chapter_number <= 0:
+            return
+
+        for name, note in self._extract_character_state_notes(content).items():
+            state = self._characters.get(name) or CharacterState(name=name)
+            state.last_chapter = chapter_number
+            if note:
+                state.notes.append(note)
+                state.notes = state.notes[-5:]
+            inferred_location = self._infer_character_location(note)
+            if inferred_location:
+                state.location = inferred_location
+            inferred_status = self._infer_character_status(note)
+            if inferred_status:
+                state.status = inferred_status
+                if self._character_manager and inferred_status in ("死亡", "陨落"):
+                    try:
+                        self._character_manager.update_character(name, {"status": "deceased"})
+                    except Exception:
+                        pass
+            self._characters[name] = state
+
+        self._plot_points.extend(self._extract_plot_points(content, chapter_number))
+        self._plot_points = self._plot_points[-20:]
+
+    def _get_library_context(self) -> str:
+        try:
+            if self._library_service is None:
+                from novel_agent.library_service import get_library_service
+                self._library_service = get_library_service()
+            svc = self._library_service
+            if svc.is_degraded:
+                return ""
+            parts = []
+            chars = svc.list_entries(entry_type="character")
+            if chars:
+                parts.append("[资料库-角色]")
+                for c in chars[:10]:
+                    name = c.content_structured.get("name", c.title)
+                    role = c.content_structured.get("role", "")
+                    parts.append(f"- {name}: {role}")
+            worlds = svc.list_entries(entry_type="world")
+            if worlds:
+                parts.append("[资料库-世界观]")
+                for w in worlds[:3]:
+                    world_data = w.content_structured.get("world", {})
+                    name = world_data.get("name", w.title) if isinstance(world_data, dict) else w.title
+                    parts.append(f"- {name}")
+            outline = svc.list_entries(entry_type="outline")
+            if outline:
+                chapters = outline[0].content_structured.get("chapters", [])
+                if chapters:
+                    parts.append(f"[资料库-大纲] 共{len(chapters)}章")
+            return "\n".join(parts) if parts else ""
+        except Exception:
+            return ""
+
     async def _retrieve_from_knowledge_base(self, chapter_number: int) -> Dict[str, Any]:
         """
-        浠庣煡璇嗗簱妫€绱紙澧炲己鐗堬級
+        从知识库检索上下文（增强版）。
         
-        浣跨敤 SeekDB 浼樺寲鐨勯珮绾ф悳绱㈠姛鑳斤細
-        - 鍔ㄦ€佹潈閲嶈皟鏁?
-        - 鏅鸿兘閲嶆帓搴?
-        - 涓婁笅鏂囧帇缂?
+        优先使用 SeekDB 高级搜索能力：
+        - 动态权重调整
+        - 智能重排
+        - 上下文压缩
         """
         if not self.knowledge_base:
             return {"relevant_content": [], "plot_constraints": [], "dead_characters": [], "writing_context": {}}
@@ -847,11 +1107,11 @@ class ContinuousWriter(BaseAgent):
                     # 姝讳骸瑙掕壊
                     result["dead_characters"] = writing_context.get("dead_characters", [])
                     
-                    logger.debug(f"[{self.name}] 楂樼骇鎼滅储瀹屾垚锛宼oken浼拌: {writing_context.get('total_tokens_estimate', 0)}")
+                    logger.debug(f"[{self.name}] 高级搜索完成，token 估算: {writing_context.get('total_tokens_estimate', 0)}")
                     
                 except AttributeError:
-                    # 鐭ヨ瘑搴撲笉鏀寔楂樼骇鎼滅储锛屼娇鐢ㄥ熀纭€鎼滅储
-                    logger.debug(f"[{self.name}] 鐭ヨ瘑搴撲笉鏀寔楂樼骇鎼滅储锛屽洖閫€鍒板熀纭€妯″紡")
+                    # 知识库不支持高级搜索，回退到基础模式
+                    logger.debug(f"[{self.name}] 知识库不支持高级搜索，回退到基础模式")
                     self._use_advanced_search = False
             
             # 鍩虹鎼滅储锛堜綔涓哄悗澶囨垨楂樼骇鎼滅储涓嶅彲鐢ㄦ椂锛?
@@ -880,26 +1140,26 @@ class ContinuousWriter(BaseAgent):
                 for char in result["dead_characters"]:
                     if char not in self._dead_characters:
                         self._dead_characters.append(char)
-                        logger.info(f"[{self.name}] 浠庣煡璇嗗簱鍚屾姝讳骸瑙掕壊: {char}")
+                        logger.info(f"[{self.name}] 从知识库同步死亡角色: {char}")
                 
         except Exception as e:
-            logger.warning(f"[{self.name}] 鐭ヨ瘑搴撴绱㈠け璐? {e}")
+            logger.warning(f"[{self.name}] 知识库检索失败: {e}")
         
         return result
     
     async def _retrieve_summaries_from_knowledge_base(self) -> List[Dict[str, Any]]:
-        """浠庣煡璇嗗簱妫€绱㈡€荤粨"""
+        """从知识库检索剧情总结。"""
         if not self.knowledge_base:
             return []
         
         try:
             resp = self.knowledge_base.search(
-                query="鍓ф儏鎬荤粨",
+                query="剧情总结",
                 top_k=self.write_config.kb_summary_top_k
             )
             return [{"chapter_range": "", "content": r.document[:500]} for r in resp.results]
         except Exception as e:
-            logger.debug(f"[{self.name}] 妫€绱㈠墽鎯呮€荤粨澶辫触: {e}")
+            logger.debug(f"[{self.name}] 检索剧情总结失败: {e}")
         
         return []
 
@@ -976,7 +1236,7 @@ class ContinuousWriter(BaseAgent):
         return candidates
     
     async def _search_trends(self) -> List[Dict[str, Any]]:
-        """鎼滅储鐑偣"""
+        """搜索热点。"""
         trends: List[Dict[str, Any]] = []
 
         def _extract_tag(text: str, tag: str) -> str:
@@ -1132,7 +1392,7 @@ class ContinuousWriter(BaseAgent):
                         f"[{self.name}] 平台热点获取成功: platform={platform}, tool={used_tool}, count={len(platform_trends[platform])}"
                     )
                 except Exception as platform_error:
-                    logger.debug(f"[{self.name}] 鑾峰彇骞冲彴鐑偣澶辫触({platform}): {platform_error}")
+                    logger.debug(f"[{self.name}] 获取平台热点失败({platform}): {platform_error}")
                     continue
 
             merged_candidates: List[Dict[str, Any]] = []
@@ -1141,11 +1401,11 @@ class ContinuousWriter(BaseAgent):
             trends = self._select_balanced_trend_candidates(merged_candidates, limit=total_limit)
             self._cached_trends = trends
         except Exception as e:
-            logger.error(f"[{self.name}] 鐑偣鎼滅储澶辫触: {e}")
+            logger.error(f"[{self.name}] 热点搜索失败: {e}")
         return trends
     
     def _get_trend_tool_name(self, platform: str) -> str:
-        """鑾峰彇鐑偣宸ュ叿鍚?"""
+        """获取热点工具名。"""
         platform = (platform or "").strip().lower()
         m = {
             "douban": "get_douban_rank",
@@ -1168,12 +1428,12 @@ class ContinuousWriter(BaseAgent):
         return m.get(platform, f"get_{platform}_trending")
     
     async def _save_to_knowledge_base(self, chapter_data: Dict[str, Any]) -> None:
-        """瀛樺叆鐭ヨ瘑搴撳苟鑷姩鎻愬彇鍓ф儏绾︽潫"""
+        """存入知识库并自动提取剧情约束。"""
         if not self.knowledge_base:
             return
         
         try:
-            # 瀛樺偍绔犺妭鍐呭
+            # 存储章节内容
             self.knowledge_base.add_chapter(
                 chapter_id=f"chapter_{chapter_data['chapter_number']}",
                 title=chapter_data["title"],
@@ -1200,19 +1460,19 @@ class ContinuousWriter(BaseAgent):
                         for entity in constraint.entities:
                             if entity not in self._dead_characters:
                                 self._dead_characters.append(entity)
-                                logger.info(f"[{self.name}] 妫€娴嬪埌瑙掕壊姝讳骸: {entity}")
+                                logger.info(f"[{self.name}] 检测到角色死亡: {entity}")
                 
                 if constraints:
                     logger.info(f"[{self.name}] Extracted {len(constraints)} plot constraints")
             
         except Exception as e:
-            logger.error(f"[{self.name}] 瀛樺偍澶辫触: {e}")
+            logger.error(f"[{self.name}] 存储失败: {e}")
     
     def _add_inspiration(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """娣诲姞鐏垫劅"""
         content = input_data.get("content", "")
         if not content:
-            return {"success": False, "error": "鐏垫劅鍐呭涓嶈兘涓虹┖"}
+            return {"success": False, "error": "灵感内容不能为空"}
         
         chapter = input_data.get("chapter", self._current_chapter + 1)
         self._user_inspirations.append({"content": content, "chapter": chapter, "added_at": time.time()})
@@ -1226,7 +1486,7 @@ class ContinuousWriter(BaseAgent):
         """娣诲姞绾犳"""
         content = input_data.get("content", "")
         if not content:
-            return {"success": False, "error": "绾犳鍐呭涓嶈兘涓虹┖"}
+            return {"success": False, "error": "纠正内容不能为空"}
         
         chapter = input_data.get("chapter", self._current_chapter + 1)
         self._corrections.append({"content": content, "chapter": chapter, "added_at": time.time()})
@@ -1237,11 +1497,15 @@ class ContinuousWriter(BaseAgent):
         return {"success": True, "message": "correction added"}
     
     def _add_dead_character(self, character_name: str) -> Dict[str, Any]:
-        """娣诲姞姝讳骸瑙掕壊"""
         if character_name and character_name not in self._dead_characters:
             self._dead_characters.append(character_name)
             self._sync_to_session()
-            logger.info(f"[{self.name}] 璁板綍瑙掕壊姝讳骸: {character_name}")
+            if self._character_manager:
+                try:
+                    self._character_manager.update_character(character_name, {"status": "deceased"})
+                except Exception as e:
+                    logger.warning(f"[{self.name}] 同步角色死亡到CharacterManager失败: {e}")
+            logger.info(f"[{self.name}] 记录角色死亡: {character_name}")
         return {"success": True, "dead_characters": self._dead_characters}
     
     def _stop_writing(self) -> Dict[str, Any]:
@@ -1292,7 +1556,7 @@ class ContinuousWriter(BaseAgent):
         return {"success": True, "message": "trends fusion disabled"}
     
     def _get_chapter(self, chapter_number: int) -> Dict[str, Any]:
-        """鑾峰彇绔犺妭"""
+        """获取指定章节。"""
         for ch in self._written_chapters:
             if ch.get("chapter_number") == chapter_number:
                 return {"success": True, "chapter": ch}
@@ -1304,7 +1568,7 @@ class ContinuousWriter(BaseAgent):
         current_chapter: int,
         deleted_chapters: Optional[List[int]] = None
     ) -> Dict[str, Any]:
-        """鍚屾鍓嶇绔犺妭鍒楄〃鍒板悗绔細璇?"""
+        """将前端章节列表同步到后端会话。"""
         normalized = [ch for ch in chapters if isinstance(ch, dict)]
         normalized.sort(key=lambda x: x.get("chapter_number", 0))
         
@@ -1324,7 +1588,7 @@ class ContinuousWriter(BaseAgent):
                 try:
                     self.knowledge_base.delete_chapter(f"chapter_{num}")
                 except Exception as e:
-                    logger.warning(f"[{self.name}] 鍒犻櫎鐭ヨ瘑搴撶珷鑺傚け璐? chapter_{num}, {e}")
+                    logger.warning(f"[{self.name}] 删除知识库章节失败: chapter_{num}, {e}")
         
         self._user_inspirations = [
             i for i in self._user_inspirations if i.get("chapter", 0) <= self._current_chapter + 1
@@ -1343,24 +1607,119 @@ class ContinuousWriter(BaseAgent):
         }
     
     def _get_recent_chapters(self) -> List[Dict[str, Any]]:
-        """鑾峰彇鏈€杩戠珷鑺?"""
+        """获取最近几章。"""
         return self._written_chapters[-self.write_config.context_chapters:]
+
+    @staticmethod
+    def _extract_character_state_notes(content: str) -> Dict[str, str]:
+        notes: Dict[str, str] = {}
+        sentences = re.split(r"(?<=[。！？!?])", content)
+        candidate_pattern = re.compile(r"([\u4e00-\u9fa5]{2,4})")
+        blocked = {"我们", "他们", "这里", "那里", "一个", "不是", "如果", "然后", "自己"}
+        for sentence in sentences:
+            cleaned = sentence.strip()
+            if not cleaned or cleaned.startswith("“") or cleaned.startswith("\""):
+                continue
+            for name in candidate_pattern.findall(cleaned):
+                if name in blocked:
+                    continue
+                if name not in notes:
+                    notes[name] = cleaned[:80]
+        return notes
+
+    @staticmethod
+    def _infer_character_location(note: str) -> str:
+        match = re.search(r"(?:在|回到|来到|走进|站在|留在)([\u4e00-\u9fa5]{2,8}(?:城|镇|村|宫|殿|阁|楼|院|府|山|峰|谷|林|海|岛|桥|巷|街|房|室|厅|门|营|塔))", note or "")
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _infer_character_status(note: str) -> str:
+        text = note or ""
+        for keyword in ("受伤", "虚弱", "愤怒", "慌乱", "警惕", "犹豫", "沉默", "冷静", "紧张", "疲惫", "失控"):
+            if keyword in text:
+                return keyword
+        return ""
+
+    @staticmethod
+    def _extract_plot_points(content: str, chapter_number: int) -> List[PlotPoint]:
+        points: List[PlotPoint] = []
+        sentences = [item.strip() for item in re.split(r"(?<=[。！？!?])", content) if item.strip()]
+        for sentence in sentences[:2]:
+            points.append(
+                PlotPoint(
+                    chapter=chapter_number,
+                    description=sentence[:80],
+                    importance="high" if any(token in sentence for token in ("终于", "发现", "真相", "决定", "必须", "突然")) else "normal",
+                )
+            )
+        return points
+
+    def _build_character_memory_block(self) -> str:
+        if not self._characters:
+            return ""
+        ranked = sorted(self._characters.values(), key=lambda item: (item.last_chapter, len(item.notes)), reverse=True)
+        lines: List[str] = []
+        for state in ranked[:8]:
+            fragments = [state.name]
+            if state.last_chapter:
+                fragments.append(f"最近出现在第{state.last_chapter}章")
+            if state.status and state.status != "姝ｅ父":
+                fragments.append(f"状态：{state.status}")
+            if state.location:
+                fragments.append(f"位置：{state.location}")
+            if state.notes:
+                fragments.append(f"最近表现：{state.notes[-1]}")
+            lines.append("；".join(fragments))
+        return "\n".join(lines)
+
+    def _build_setting_memory_block(self, story_beginning: str, recent_chapters: List[Dict[str, Any]]) -> str:
+        anchors: List[str] = []
+        if story_beginning:
+            anchors.append(f"开篇设定：{story_beginning[:120].strip()}")
+        for chapter in recent_chapters[-3:]:
+            title = str(chapter.get("title") or "").strip()
+            summary = str(chapter.get("summary") or "").strip()
+            content = str(chapter.get("content") or "").strip()
+            snippet = summary or content[:120]
+            if snippet:
+                anchors.append(f"第{chapter.get('chapter_number')}章 {title}：{snippet[:120]}")
+        return "\n".join(anchors[:4])
+
+    def _build_preflight_consistency_checklist(self, recent_chapters: List[Dict[str, Any]]) -> str:
+        checklist: List[str] = [
+            "1. 先核对角色称呼、身份、立场，别把同一个人写成两个版本。",
+            "2. 先核对地点、时间、场景承接，别突然换地图。",
+            "3. 先核对上一章刚发生的大事，别忘掉刚立住的冲突。",
+        ]
+        if self._characters:
+            hot_names = [state.name for state in sorted(self._characters.values(), key=lambda item: item.last_chapter, reverse=True)[:3]]
+            if hot_names:
+                checklist.append(f"4. 本章重点盯住这些角色：{'、'.join(hot_names)}。")
+        if recent_chapters:
+            last_title = str(recent_chapters[-1].get("title") or "").strip() or f"第{recent_chapters[-1].get('chapter_number')}章"
+            checklist.append(f"5. 本章必须顺着上一章《{last_title}》的结尾往下写。")
+        if self._plot_points:
+            latest_plot = self._plot_points[-1].description.strip()
+            if latest_plot:
+                checklist.append(f"6. 最近刚立住的剧情点：{latest_plot[:60]}。")
+        checklist.append("7. 如果拿不准，就保守续写，优先沿用已有设定，不擅自加新设定。")
+        return "\n".join(checklist)
     
     def get_all_chapters(self) -> List[Dict[str, Any]]:
-        """鑾峰彇鎵€鏈夌珷鑺?"""
+        """获取全部章节。"""
         return self._written_chapters.copy()
     
     def set_knowledge_base(self, kb) -> None:
-        """璁剧疆鐭ヨ瘑搴?"""
+        """设置知识库实例。"""
         self.knowledge_base = kb
         
-        # 鍒濆鍖栧墽鎯呯害鏉熷瓨鍌?
+        # 初始化剧情约束存储
         if kb:
             try:
                 self._constraint_store = get_plot_constraint_store(kb)
                 logger.info(f"[{self.name}] Knowledge base and plot constraint store initialized")
                 
-                # 浠庣煡璇嗗簱鍔犺浇宸叉湁鐨勬浜¤鑹?
+                # 从知识库加载已有的死亡角色约束
                 dead_chars = self._constraint_store.get_death_constraints()
                 for char in dead_chars:
                     if char not in self._dead_characters:
@@ -1369,37 +1728,47 @@ class ContinuousWriter(BaseAgent):
                 if self._dead_characters:
                     logger.info(f"[{self.name}] Loaded dead-character constraints: {len(self._dead_characters)}")
                 
-                # 鍒濆鍖栧唴瀹归獙璇佸櫒锛堝悗澶勭悊楠岃瘉锛?
+                # 初始化内容验证器
                 self._content_validator, _ = get_content_validator(self._constraint_store, kb)
                 self._content_validator.load_constraints()
-                logger.info(f"[{self.name}] 鍐呭楠岃瘉鍣ㄥ凡閰嶇疆")
+                logger.info(f"[{self.name}] 内容验证器已配置")
                 
             except Exception as e:
-                logger.warning(f"[{self.name}] 鍓ф儏绾︽潫瀛樺偍鍒濆鍖栧け璐? {e}")
+                logger.warning(f"[{self.name}] 剧情约束存储初始化失败: {e}")
                 self._constraint_store = None
                 self._content_validator = None
         else:
             self._constraint_store = None
-            self._content_validator = None
-            logger.info(f"[{self.name}] 鐭ヨ瘑搴撳凡閰嶇疆")
-    
+            try:
+                self._content_validator, _ = get_content_validator(None, None)
+            except Exception as exc:
+                logger.warning(f"[{self.name}] 基础内容验证器初始化失败: {exc}")
+                self._content_validator = None
+            logger.info(f"[{self.name}] 知识库已清空")
+
+    def set_character_manager(self, cm) -> None:
+        """设置角色管理器实例，用于同步角色状态。"""
+        self._character_manager = cm
+        if cm:
+            logger.info(f"[{self.name}] CharacterManager已配置")
+
     def set_session_id(self, session_id: str, project_id: str = "") -> None:
-        """璁剧疆浼氳瘽ID锛堢敤浜庢寔涔呭寲锛?"""
+        """设置会话 ID。"""
         self._session_id = session_id
         self._project_id = project_id
-        logger.info(f"[{self.name}] 浼氳瘽ID璁剧疆涓? {session_id}")
+        logger.info(f"[{self.name}] 会话 ID 已设置: {session_id}")
     
     def set_model(self, model: str) -> None:
-        """璁剧疆褰撳墠妯″瀷锛堢敤浜庤拷韪ā鍨嬪垏鎹級"""
+        """设置当前模型。"""
         if model != self._current_model:
-            logger.info(f"[{self.name}] 妯″瀷鍒囨崲: {self._current_model} -> {model}")
+            logger.info(f"[{self.name}] 模型切换: {self._current_model} -> {model}")
         self._current_model = model
     
     def get_session_context(self) -> Dict[str, Any]:
         """
-        鑾峰彇浼氳瘽涓婁笅鏂囷紙渚涘閮ㄤ娇鐢級
+        获取会话上下文，供外部恢复续写使用。
         
-        杩斿洖纭繚杩炶疮鎬ф墍闇€鐨勬墍鏈変俊鎭?
+        返回保持续写连续性所需的核心状态。
         """
         if self._session_state:
             return self._session_store.get_context_for_continuation(
@@ -1424,20 +1793,20 @@ class ContinuousWriter(BaseAgent):
         use_context_compression: bool = True
     ) -> None:
         """
-        閰嶇疆楂樼骇鎼滅储閫夐」
+        配置高级搜索选项。
         
         Args:
-            use_advanced: 鏄惁浣跨敤楂樼骇鎼滅储
-            use_dynamic_weights: 鏄惁浣跨敤鍔ㄦ€佹潈閲?
-            use_reranking: 鏄惁浣跨敤閲嶆帓搴?
-            use_context_compression: 鏄惁浣跨敤涓婁笅鏂囧帇缂?
+            use_advanced: 是否启用高级搜索
+            use_dynamic_weights: 是否启用动态权重
+            use_reranking: 是否启用重排
+            use_context_compression: 是否启用上下文压缩
         """
         self._use_advanced_search = use_advanced
         self._use_dynamic_weights = use_dynamic_weights
         self._use_reranking = use_reranking
         self._use_context_compression = use_context_compression
         logger.info(
-            f"[{self.name}] 楂樼骇鎼滅储閰嶇疆鏇存柊: "
+            f"[{self.name}] 高级搜索配置已更新: "
             f"advanced={use_advanced}, "
             f"dynamic_weights={use_dynamic_weights}, "
             f"reranking={use_reranking}, "
@@ -1446,12 +1815,10 @@ class ContinuousWriter(BaseAgent):
     
     async def recover_from_model_switch(self) -> Dict[str, Any]:
         """
-        浠庢ā鍨嬪垏鎹腑鎭㈠
-        
-        褰撴娴嬪埌妯″瀷鍒囨崲鏃讹紝涓诲姩鍔犺浇瀹屾暣涓婁笅鏂囦互纭繚杩炶疮鎬?
+        在模型切换后恢复续写上下文。
         
         Returns:
-            鎭㈠缁撴灉锛屽寘鍚姞杞界殑涓婁笅鏂囦俊鎭?
+            恢复结果，包含加载的上下文信息。
         """
         result = {
             "success": True,
@@ -1463,36 +1830,45 @@ class ContinuousWriter(BaseAgent):
         }
         
         if not self._session_state:
-            result["message"] = "session state not found"
+            result["message"] = "未找到会话状态"
             return result
         
         last_model = self._session_state.last_model
         if not last_model or last_model == self._current_model:
-            result["message"] = "鏈娴嬪埌妯″瀷鍒囨崲"
+            result["message"] = "未检测到模型切换"
             return result
         
         result["model_switched"] = True
-        logger.info(f"[{self.name}] 妫€娴嬪埌妯″瀷鍒囨崲锛屽紑濮嬫仮澶嶄笂涓嬫枃: {last_model} -> {self._current_model}")
+        logger.info(f"[{self.name}] 检测到模型切换，开始恢复上下文: {last_model} -> {self._current_model}")
         
         try:
-            # 1. 浠庢寔涔呭寲瀛樺偍鎭㈠鍩虹鐘舵€?
+            # 1. 从持久化存储恢复基础状态
             self._story_beginning = self._session_state.story_beginning
             self._current_chapter = self._session_state.current_chapter
             self._written_chapters = self._session_state.chapters.copy()
             self._dead_characters = self._session_state.dead_characters.copy()
             self._user_inspirations = self._session_state.inspirations.copy()
             self._corrections = self._session_state.corrections.copy()
+            self._characters = {
+                name: CharacterState(**payload) if isinstance(payload, dict) else CharacterState(name=name)
+                for name, payload in (self._session_state.character_states or {}).items()
+            }
+            self._plot_points = [
+                PlotPoint(**item)
+                for item in (self._session_state.plot_points or [])
+                if isinstance(item, dict)
+            ]
             
             result["recent_chapters_count"] = len(self._written_chapters)
             
-            # 2. 浠庣煡璇嗗簱鍚屾鏈€鏂扮害鏉?
+            # 2. 从知识库补齐最新约束
             if self.knowledge_base:
                 try:
-                    # 鑾峰彇娲昏穬绾︽潫
+                    # 获取活动约束
                     constraints = self.knowledge_base.get_active_constraints()
                     result["constraints"] = [c.title for c in constraints[:5]]
                     
-                    # 鍚屾姝讳骸瑙掕壊
+                    # 同步死亡角色
                     dead_chars = self.knowledge_base.get_dead_characters()
                     for char in dead_chars:
                         if char not in self._dead_characters:
@@ -1501,21 +1877,19 @@ class ContinuousWriter(BaseAgent):
                     result["dead_characters"] = self._dead_characters.copy()
                     
                 except Exception as e:
-                    logger.warning(f"[{self.name}] 浠庣煡璇嗗簱鎭㈠绾︽潫澶辫触: {e}")
+                    logger.warning(f"[{self.name}] 从知识库恢复约束失败: {e}")
             
             result["context_loaded"] = True
-            result["message"] = (
-                f"context recovered after model switch, loaded {result['recent_chapters_count']} chapters"
-            )
+            result["message"] = f"模型切换后已恢复上下文，加载 {result['recent_chapters_count']} 章"
             
-            # 鏇存柊浼氳瘽涓殑妯″瀷淇℃伅
+            # 更新会话中的模型信息
             self._session_state.last_model = self._current_model
             self._session_store.save(self._session_state)
             
         except Exception as e:
-            logger.error(f"[{self.name}] 妯″瀷鍒囨崲鎭㈠澶辫触: {e}")
+            logger.error(f"[{self.name}] 模型切换恢复失败: {e}")
             result["success"] = False
-            result["message"] = f"鎭㈠澶辫触: {e}"
+            result["message"] = f"恢复失败: {e}"
         
         return result
 

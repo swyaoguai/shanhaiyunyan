@@ -52,6 +52,21 @@ function renderNavPanel(moduleId) {
             }
             break;
 
+        case 'short-story':
+            ui.navTitle.textContent = '短篇创作';
+            ui.navActionAdd.style.display = 'none';
+            if (typeof renderShortStoryNavPanel === 'function') {
+                renderShortStoryNavPanel();
+            } else {
+                console.error('[Nav] renderShortStoryNavPanel not found');
+                ui.navList.innerHTML = `
+                    <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                        短篇创作导航加载失败，请刷新页面重试。
+                    </div>
+                `;
+            }
+            break;
+
         case 'novel-to-script':
             ui.navTitle.textContent = '小说转剧本';
             ui.navActionAdd.style.display = 'none';
@@ -68,18 +83,18 @@ function renderNavPanel(moduleId) {
             break;
 
         case 'write':
-            ui.navTitle.textContent = '协作创作';
+            ui.navTitle.textContent = '多Agent创作';
             ui.navActionAdd.style.display = 'block';
             ui.navActionAdd.onclick = addNewChapter;
 
-            // 渲染写作模块导航（协作创作章节列表）
+            // 渲染写作模块导航（多Agent创作模式章节列表 + 资料库）
             if (typeof renderMultiAgentWriteNavPanel === 'function') {
                 renderMultiAgentWriteNavPanel();
             } else {
                 console.error('[Nav] renderMultiAgentWriteNavPanel not found');
                 ui.navList.innerHTML = `
                     <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
-                        协作模式导航加载失败，请刷新页面重试。
+                        多Agent创作导航加载失败，请刷新页面重试。
                     </div>
                 `;
             }
@@ -93,12 +108,34 @@ function renderNavPanel(moduleId) {
             break;
 
         case 'aux-memory':
-            ui.navTitle.textContent = '长期记忆';
+            ui.navTitle.textContent = '知识中心';
             ui.navActionAdd.style.display = 'none';
             if (typeof renderAuxMemoryNavPanel === 'function') {
                 renderAuxMemoryNavPanel();
             }
+            // 根据子视图渲染工作区
+            if (typeof auxMemoryState !== 'undefined' && auxMemoryState.subView === 'workbench') {
+                if (typeof renderKnowledgeWorkbench === 'function') {
+                    renderKnowledgeWorkbench();
+                }
+                updateBreadcrumbs(['知识中心', '知识工作台']);
+            } else {
+                if (typeof initAuxMemoryCenter === 'function') {
+                    initAuxMemoryCenter();
+                }
+            }
             break;
+
+        case 'knowledge-workbench':
+            // 已合并到知识中心，重定向
+            switchModule('aux-memory');
+            if (typeof auxMemoryState !== 'undefined') {
+                auxMemoryState.subView = 'workbench';
+            }
+            if (typeof auxSwitchToWorkbench === 'function') {
+                auxSwitchToWorkbench();
+            }
+            return;
 
         case 'settings':
             ui.navTitle.textContent = '偏好设置';
@@ -110,7 +147,8 @@ function renderNavPanel(moduleId) {
                 { id: 'set-agent', icon: 'ri-brain-line', text: 'Agent配置' },
                 { id: 'set-backup', icon: 'ri-save-line', text: '备份管理' },
                 { id: 'set-prompts', icon: 'ri-file-text-line', text: '提示词管理' },
-                { id: 'set-skills', icon: 'ri-puzzle-line', text: 'Skills管理' },
+                { id: 'set-skills', icon: 'ri-puzzle-line', text: '技能管理' },
+                { id: 'set-writing', icon: 'ri-quill-pen-line', text: '写作配置' },
                 { id: 'set-regex', icon: 'ri-code-line', text: '正则替换规则' }
             ], (item) => {
                 if (item.id === 'set-theme') loadThemeSettings();
@@ -137,6 +175,7 @@ function renderNavPanel(moduleId) {
                     setTimeout(checkAndLoad, 50);
                 }
                 if (item.id === 'set-skills') loadSkillsSettings();
+                if (item.id === 'set-writing') loadWritingSettings();
                 if (item.id === 'set-regex') loadRegexRulesSettings();
             });
             break;
@@ -169,7 +208,7 @@ function renderNavList(items, onClick) {
             <span>${item.text}</span>
             ${item.count !== undefined ? `<span style="margin-left:auto; font-size:11px; opacity:0.6;">(${item.count})</span>` : ''}
         `;
-        div.addEventListener('click', () => {
+        window.makeElementActivatable(div, () => {
             ui.navList.querySelectorAll('.list-item').forEach(el => el.classList.remove('active'));
             div.classList.add('active');
             if (onClick) onClick(item);
@@ -218,7 +257,7 @@ function renderNavListWithActions(items, type) {
         });
 
         // 点击打开编辑器
-        div.addEventListener('click', (e) => {
+        window.makeElementActivatable(div, (e) => {
             if (!e.target.closest('.item-actions')) {
                 ui.navList.querySelectorAll('.list-item').forEach(el => el.classList.remove('active'));
                 div.classList.add('active');
@@ -226,6 +265,8 @@ function renderNavListWithActions(items, type) {
                     openChapterEditor(item.index);
                 }
             }
+        }, {
+            allowWhen: (event) => !event.target.closest('.item-actions')
         });
 
         // 编辑按钮
@@ -261,7 +302,7 @@ function renderDashboard() {
     const chapterCount = chapters.length;
     const writtenChapters = chapters.filter(ch => (ch.content || '').length > 0).length;
     const characterCount = (store.projectData.characters || []).length;
-    const settingCount = (store.projectData.worldbuilding || []).length + (store.projectData.items || []).length;
+    const settingCount = (store.projectData.worldbuilding || []).length + (store.projectData.items || []).length + (store.projectData.eventlines || []).length + (store.projectData.detail_settings || []).length + (store.projectData.chapter_settings || []).length;
 
     ui.workspace.innerHTML = `
         <div style="padding: 40px; text-align: center;">
@@ -317,8 +358,11 @@ async function renderStatistics() {
     store.currentDashboardView = 'stats';
     
     // 初始化选中项目为当前项目
+    const activeProjectId = typeof getActiveProjectId === 'function'
+        ? (getActiveProjectId() || '')
+        : (store.currentProjectId || '');
     if (!statisticsState.selectedProjectId) {
-        statisticsState.selectedProjectId = store.currentProject || '';
+        statisticsState.selectedProjectId = activeProjectId;
     }
     
     // 获取选中项目的名称
@@ -331,7 +375,7 @@ async function renderStatistics() {
     let projectData = store.projectData;
     
     // 如果选中的不是当前项目，需要从API加载该项目的数据
-    if (statisticsState.selectedProjectId && statisticsState.selectedProjectId !== store.currentProject) {
+    if (statisticsState.selectedProjectId && statisticsState.selectedProjectId !== activeProjectId) {
         try {
             // 从API获取指定项目的数据
             const [outlineRes, charRes, worldRes, itemRes] = await Promise.all([
@@ -375,7 +419,7 @@ async function renderStatistics() {
             infiniteWriteWords = data.totalWords || 0;
         }
         // 如果按项目ID找不到，尝试使用旧的通用键（兼容旧数据）
-        if (infiniteWriteChapters.length === 0 && statisticsState.selectedProjectId === store.currentProject) {
+        if (infiniteWriteChapters.length === 0 && statisticsState.selectedProjectId === activeProjectId) {
             const oldData = localStorage.getItem('infinite_write_data');
             if (oldData) {
                 const data = JSON.parse(oldData);
@@ -595,7 +639,7 @@ async function renderStatistics() {
                             <i class="ri-quill-pen-line" style="font-size: 20px; color: #8b5cf6;"></i>
                         </div>
                         <div style="flex: 1;">
-                            <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">协作创作模式</div>
+                                <div style="font-size: 14px; color: var(--text-primary); font-weight: 500;">多Agent创作模式</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">多Agent协作写作</div>
                         </div>
                         ${statisticsState.dataSource === 'multi-agent' ? '<i class="ri-checkbox-circle-fill" style="font-size: 20px; color: #8b5cf6;"></i>' : '<i class="ri-checkbox-blank-circle-line" style="font-size: 20px; color: var(--text-secondary); opacity: 0.5;"></i>'}
@@ -642,7 +686,7 @@ async function renderStatistics() {
                     <i class="ri-filter-3-line" style="color: var(--accent-color);"></i>
                     <span style="font-size: 13px; color: var(--text-secondary);">当前显示:</span>
                     <span style="font-size: 13px; color: var(--text-primary); font-weight: 500;">
-                        ${statisticsState.dataSource === 'all' ? '全部模式' : statisticsState.dataSource === 'multi-agent' ? '协作创作模式' : '无限续写模式'}
+                    ${statisticsState.dataSource === 'all' ? '全部模式' : statisticsState.dataSource === 'multi-agent' ? '多Agent创作模式' : '无限续写模式'}
                     </span>
                 </div>
                 ${statisticsState.dataSource !== 'all' ? `
@@ -966,7 +1010,7 @@ function renderVersionPage() {
                 <h3 style="color: var(--text-primary); margin-bottom: 16px;">✨ 主要功能</h3>
                 <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px; line-height: 2;">
                     <li>无限续写模式 - 灵感驱动的自由创作</li>
-                    <li>多Agent协作创作 - 智能分工协同</li>
+                        <li>多Agent创作模式 - 智能分工协同</li>
                     <li>知识库管理 - 角色、设定、世界观</li>
                     <li>会话持久化 - 换模型保持连贯</li>
                     <li>热点融合 - 实时话题灵感</li>

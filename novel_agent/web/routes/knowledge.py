@@ -15,7 +15,7 @@ import logging
 import re
 from pathlib import Path
 from typing import List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ...constants import SERVER_DEFAULTS
@@ -474,6 +474,79 @@ async def create_knowledge_category(request: CreateCategoryRequest):
             "builtin": False
         }
     })
+
+
+@router.get("/knowledge-base/search")
+async def search_knowledge_nodes(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50), node_type: str | None = None):
+    """搜索知识节点。"""
+    from ...project_manager import get_project_manager
+    pm = get_project_manager()
+    if not pm.current_project_id:
+        return JSONResponse({"success": False, "error": "请先选择一个项目"}, status_code=400)
+    try:
+        from ...knowledge_base import KnowledgeBase
+        kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=True)
+        results = kb.knowledge_api.search_nodes(q, limit=limit, node_type=node_type)
+        kb.close()
+        return JSONResponse({"success": True, "results": results, "count": len(results)})
+    except Exception as e:
+        logger.error(f"[Knowledge] 搜索知识节点失败: {e}")
+        return JSONResponse({"success": False, "error": f"搜索失败: {e}"}, status_code=500)
+
+
+@router.get("/knowledge-base/node/{node_id}")
+async def get_knowledge_node(node_id: str):
+    """获取知识节点详情。"""
+    from ...project_manager import get_project_manager
+    pm = get_project_manager()
+    if not pm.current_project_id:
+        return JSONResponse({"success": False, "error": "请先选择一个项目"}, status_code=400)
+    try:
+        from ...knowledge_base import KnowledgeBase
+        kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=True)
+        node = kb.knowledge_api.get_node(node_id)
+        neighbors = kb.knowledge_api.get_node_neighbors(node_id)
+        kb.close()
+        if not node:
+            return JSONResponse({"success": False, "error": "节点不存在"}, status_code=404)
+        return JSONResponse({"success": True, "node": node, "neighbors": neighbors})
+    except Exception as e:
+        logger.error(f"[Knowledge] 获取知识节点失败: {e}")
+        return JSONResponse({"success": False, "error": f"获取失败: {e}"}, status_code=500)
+
+
+@router.post("/knowledge-base/update-node")
+async def update_knowledge_node(payload: dict):
+    """更新知识节点。"""
+    from ...project_manager import get_project_manager
+    pm = get_project_manager()
+    if not pm.current_project_id:
+        return JSONResponse({"success": False, "error": "请先选择一个项目"}, status_code=400)
+    node_id = str(payload.get("node_id") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    metadata = payload.get("metadata") or {}
+    if not node_id or not title:
+        return JSONResponse({"success": False, "error": "缺少节点ID或标题"}, status_code=400)
+    try:
+        from ...knowledge_base import KnowledgeBase
+        kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=True)
+        existing = kb.knowledge_api.get_node(node_id)
+        if not existing:
+            kb.close()
+            return JSONResponse({"success": False, "error": "节点不存在"}, status_code=404)
+        existing_meta = existing.get("metadata") or {}
+        if isinstance(metadata, dict):
+            existing_meta.update(metadata)
+        existing_meta["summary_text"] = summary
+        existing_meta["title"] = title
+        existing_meta["links"] = existing.get("links_out", [])
+        result = kb.knowledge_api.update_chapter(node_id, title=title, metadata=existing_meta)
+        kb.close()
+        return JSONResponse({"success": result.success, "node_id": node_id, "error": result.error})
+    except Exception as e:
+        logger.error(f"[Knowledge] 更新知识节点失败: {e}")
+        return JSONResponse({"success": False, "error": f"更新失败: {e}"}, status_code=500)
 
 
 @router.get("/knowledge-base/stats")

@@ -5,9 +5,12 @@
 
 import json
 import logging
+import re
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+
+from ..utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +21,22 @@ class Character:
     name: str
     role: str  # 主角/配角/反派/龙套
     description: str
+    age: str = ""
+    gender: str = ""
+    identity: str = ""
+    occupation: str = ""
+    appearance: str = ""
     personality: List[str] = field(default_factory=list)
     abilities: List[str] = field(default_factory=list)
     background: str = ""
+    motivation: str = ""
+    goals: List[str] = field(default_factory=list)
+    habits: List[str] = field(default_factory=list)
+    speaking_style: str = ""
     relationships: Dict[str, str] = field(default_factory=dict)
     arc: str = ""  # 角色成长弧线
+    notes: str = ""
+    tags: List[str] = field(default_factory=list)
     first_appearance: int = 0  # 首次出场章节
     status: str = "active"  # active/deceased/missing
 
@@ -95,13 +109,22 @@ class CharacterManager:
         
         result = []
         for char in chars:
+            personality = "、".join(char.personality[:5]) if char.personality else "未设定"
+            goals = "、".join(char.goals[:3]) if char.goals else "未设定"
+            relationships = (
+                "、".join(f"{name}({relation})" for name, relation in list(char.relationships.items())[:4])
+                if char.relationships else
+                "未设定"
+            )
+            status_tag = f"\n- 状态：{char.status}" if char.status != "active" else ""
             info = f"""【{char.name}】
 - 定位：{char.role}
+- 身份：{char.identity or char.occupation or "未设定"}
 - 简介：{char.description}
-- 性格：{', '.join(char.personality)}
-- 能力：{', '.join(char.abilities)}
-- 背景：{char.background}
-- 成长线：{char.arc}"""
+- 性格：{personality}
+- 目标：{goals}
+- 关系：{relationships}
+- 成长线：{char.arc}{status_tag}"""
             result.append(info)
         
         return "\n\n".join(result)
@@ -141,10 +164,123 @@ class CharacterManager:
         if char_file.exists():
             try:
                 data = json.loads(char_file.read_text(encoding="utf-8"))
-                for name, char_data in data.items():
+                normalized = self._normalize_character_payload(data)
+                for name, char_data in normalized.items():
                     self.characters[name] = Character(**char_data)
             except Exception as e:
                 logger.warning(f"Failed to load characters: {e}")
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _split_text_list(value: Any) -> List[str]:
+        """将字符串或列表统一为字符串列表。"""
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [part.strip() for part in re.split(r"[,，、/|\n]+", value) if part.strip()]
+        return []
+
+    @staticmethod
+    def _normalize_relationships(value: Any) -> Dict[str, str]:
+        """统一关系字段格式。"""
+        if isinstance(value, dict):
+            return {
+                str(name).strip(): str(relation).strip()
+                for name, relation in value.items()
+                if str(name).strip() and str(relation).strip()
+            }
+        if isinstance(value, list):
+            result: Dict[str, str] = {}
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                target = str(item.get("target") or item.get("name") or "").strip()
+                relation = str(item.get("relation") or item.get("description") or "").strip()
+                if target and relation:
+                    result[target] = relation
+            return result
+        if isinstance(value, str):
+            result: Dict[str, str] = {}
+            for line in value.splitlines():
+                text = str(line).strip()
+                if not text:
+                    continue
+                if "：" in text:
+                    target, relation = text.split("：", 1)
+                elif ":" in text:
+                    target, relation = text.split(":", 1)
+                else:
+                    continue
+                target = target.strip()
+                relation = relation.strip()
+                if target and relation:
+                    result[target] = relation
+            return result
+        return {}
+
+    def _coerce_character_data(self, raw: Any, fallback_name: str = "") -> Optional[Dict[str, Any]]:
+        """兼容旧版列表结构并标准化角色数据。"""
+        if not isinstance(raw, dict):
+            return None
+
+        name = str(raw.get("name") or raw.get("title") or fallback_name).strip()
+        if not name:
+            return None
+
+        description = str(raw.get("description") or raw.get("content") or "").strip()
+        role = str(raw.get("role") or raw.get("type") or "未分类").strip() or "未分类"
+
+        return {
+            "name": name,
+            "role": role,
+            "description": description,
+            "age": str(raw.get("age") or "").strip(),
+            "gender": str(raw.get("gender") or "").strip(),
+            "identity": str(raw.get("identity") or raw.get("position") or raw.get("identity_label") or "").strip(),
+            "occupation": str(raw.get("occupation") or raw.get("profession") or raw.get("job") or "").strip(),
+            "appearance": str(raw.get("appearance") or raw.get("look") or "").strip(),
+            "personality": self._split_text_list(raw.get("personality") or raw.get("traits")),
+            "abilities": self._split_text_list(raw.get("abilities")),
+            "background": str(raw.get("background") or "").strip(),
+            "motivation": str(raw.get("motivation") or raw.get("drive") or "").strip(),
+            "goals": self._split_text_list(raw.get("goals") or raw.get("goal")),
+            "habits": self._split_text_list(raw.get("habits") or raw.get("habit")),
+            "speaking_style": str(raw.get("speaking_style") or raw.get("speech_style") or "").strip(),
+            "relationships": self._normalize_relationships(raw.get("relationships")),
+            "arc": str(raw.get("arc") or "").strip(),
+            "notes": str(raw.get("notes") or raw.get("details") or "").strip(),
+            "tags": self._split_text_list(raw.get("tags")),
+            "first_appearance": self._safe_int(raw.get("first_appearance"), 0),
+            "status": str(raw.get("status") or "active").strip() or "active",
+        }
+
+    def _normalize_character_payload(self, data: Any) -> Dict[str, Dict[str, Any]]:
+        """兼容 dict/list 两种角色存储结构。"""
+        normalized: Dict[str, Dict[str, Any]] = {}
+
+        payload = data.get("characters") if isinstance(data, dict) and "characters" in data else data
+
+        if isinstance(payload, dict):
+            for name, raw in payload.items():
+                char_data = self._coerce_character_data(raw, fallback_name=str(name))
+                if char_data:
+                    normalized[char_data["name"]] = char_data
+            return normalized
+
+        if isinstance(payload, list):
+            for raw in payload:
+                char_data = self._coerce_character_data(raw)
+                if char_data:
+                    normalized[char_data["name"]] = char_data
+            return normalized
+
+        raise ValueError("Unsupported characters payload format")
     
     def _save_characters(self) -> None:
         """保存角色到文件"""
@@ -159,10 +295,7 @@ class CharacterManager:
             for name, char in self.characters.items()
         }
         
-        char_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        atomic_write_json(char_file, data)
     
     def export_for_llm(self) -> List[Dict[str, Any]]:
         """导出为LLM可用的格式"""

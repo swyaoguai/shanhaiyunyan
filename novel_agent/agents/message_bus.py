@@ -11,7 +11,8 @@
 import asyncio
 import uuid
 import logging
-from typing import Dict, Any, Callable, List, Optional, Awaitable
+from collections import deque
+from typing import Dict, Any, Callable, List, Optional, Awaitable, AsyncGenerator, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -23,24 +24,39 @@ logger = logging.getLogger(__name__)
 
 class MessageType(Enum):
     """消息类型"""
-    # 任务相关
+    # 任务相关（现有强编排）
     TASK_ASSIGNED = "task_assigned"          # Coordinator分配任务
     TASK_COMPLETED = "task_completed"        # 子Agent完成任务
     TASK_FAILED = "task_failed"              # 子Agent失败
     TASK_PROGRESS = "task_progress"          # 任务进度更新
-    
+
+    # 任务相关（监督式自组织扩展）
+    TASK_PROPOSED = "task_proposed"          # 发布任务提案
+    TASK_CLAIMED = "task_claimed"            # Agent认领任务
+    TASK_REJECTED = "task_rejected"          # Agent拒绝任务
+    TASK_BLOCKED = "task_blocked"            # 任务被阻塞
+
+    # 依赖与计划协商
+    DEPENDENCY_REQUIRED = "dependency_required"    # 需要某项依赖
+    DEPENDENCY_RESOLVED = "dependency_resolved"    # 某项依赖已满足
+    REPLAN_REQUIRED = "replan_required"            # 需要重规划
+    PLAN_APPROVED = "plan_approved"                # 计划已批准
+    PLAN_ABORTED = "plan_aborted"                  # 计划已中止
+
     # 上下文相关
     CONTEXT_UPDATED = "context_updated"      # 上下文更新
     CONTEXT_REQUEST = "context_request"      # 请求上下文
-    
-    # 协作相关
+
+    # 评审协作
     NEED_REVIEW = "need_review"              # 请求评审
     REVIEW_COMPLETED = "review_completed"    # 评审完成
-    
+    REVIEW_REQUESTED = "review_requested"    # 发起评审请求
+    REVIEW_ACCEPTED = "review_accepted"      # 评审通过/接受
+
     # 用户交互
     USER_INPUT_REQUIRED = "user_input_required"  # 需要用户输入
     USER_INPUT_RECEIVED = "user_input_received"  # 收到用户输入
-    
+
     # 系统消息
     AGENT_STARTED = "agent_started"          # Agent启动
     AGENT_STOPPED = "agent_stopped"          # Agent停止
@@ -70,7 +86,8 @@ class AgentMessage:
             "payload": self.payload,
             "reply_to": self.reply_to,
             "timestamp": self.timestamp,
-            "priority": self.priority
+            "priority": self.priority,
+            "ttl": self.ttl,
         }
     
     @classmethod
@@ -84,7 +101,8 @@ class AgentMessage:
             payload=data.get("payload", {}),
             reply_to=data.get("reply_to"),
             timestamp=data.get("timestamp", datetime.now().isoformat()),
-            priority=data.get("priority", 0)
+            priority=data.get("priority", 0),
+            ttl=data.get("ttl", MESSAGE_BUS_CONFIG.DEFAULT_TTL),
         )
 
 
@@ -120,8 +138,10 @@ class MessageBus:
         self.type_subscribers: Dict[MessageType, List[MessageHandler]] = {}
         self.message_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self.pending_replies: Dict[str, asyncio.Future] = {}
-        self.dead_letters: List[AgentMessage] = []
-        self.message_history: List[AgentMessage] = []
+        self.pending_streams: Dict[str, asyncio.Queue] = {}
+        self._publish_counter = 0
+        self.dead_letters: deque = deque(maxlen=500)
+        self.message_history: deque = deque(maxlen=MESSAGE_BUS_CONFIG.HISTORY_LIMIT)
         self.enable_persistence = enable_persistence
         self._running = False
         self._processor_task: Optional[asyncio.Task] = None
@@ -134,7 +154,8 @@ class MessageBus:
             "total_published": 0,
             "total_delivered": 0,
             "total_default_handled": 0,
-            "total_dead_letters": 0
+            "total_dead_letters": 0,
+            "total_expired": 0,
         }
         
         logger.info("MessageBus initialized")
@@ -214,6 +235,17 @@ class MessageBus:
             else:
                 del self.subscribers[agent_name]
     
+    def _is_message_expired(self, message: AgentMessage) -> bool:
+        """判断消息是否已过期。"""
+        ttl = int(getattr(message, "ttl", 0) or 0)
+        if ttl <= 0:
+            return False
+        try:
+            created_at = datetime.fromisoformat(message.timestamp)
+        except Exception:
+            return False
+        return (datetime.now() - created_at).total_seconds() > ttl
+
     async def publish(self, message: AgentMessage) -> None:
         """
         发布消息
@@ -221,9 +253,17 @@ class MessageBus:
         Args:
             message: 消息对象
         """
+        if self._is_message_expired(message):
+            self.dead_letters.append(message)
+            self._stats["total_dead_letters"] += 1
+            self._stats["total_expired"] += 1
+            logger.warning(f"Expired message rejected before enqueue: {message.id}")
+            return
+
         # 使用负的优先级，因为PriorityQueue是最小堆
         priority = -message.priority
-        await self.message_queue.put((priority, message.timestamp, message))
+        self._publish_counter += 1
+        await self.message_queue.put((priority, message.timestamp, self._publish_counter, message))
         
         if self.enable_persistence:
             self.message_history.append(message)
@@ -231,6 +271,24 @@ class MessageBus:
         self._stats["total_published"] += 1
         logger.debug(f"Message published: {message.msg_type.value} from {message.sender} to {message.receiver}")
     
+    def _is_terminal_response_message(self, message: AgentMessage) -> bool:
+        """判断消息是否可以结束一次 request/request_stream 调用。"""
+        terminal_types: Set[MessageType] = {
+            MessageType.TASK_COMPLETED,
+            MessageType.TASK_FAILED,
+            MessageType.TASK_CLAIMED,
+            MessageType.TASK_REJECTED,
+            MessageType.TASK_BLOCKED,
+            MessageType.CONTEXT_UPDATED,
+            MessageType.USER_INPUT_RECEIVED,
+            MessageType.DEPENDENCY_RESOLVED,
+            MessageType.REVIEW_COMPLETED,
+            MessageType.REVIEW_ACCEPTED,
+            MessageType.PLAN_APPROVED,
+            MessageType.PLAN_ABORTED,
+        }
+        return message.msg_type in terminal_types
+
     async def request(
         self,
         message: AgentMessage,
@@ -262,6 +320,40 @@ class MessageBus:
             return None
         finally:
             self.pending_replies.pop(message.id, None)
+
+    async def request_stream(
+        self,
+        message: AgentMessage,
+        timeout: float = TIMEOUTS.HTTP_LONG
+    ) -> AsyncGenerator[AgentMessage, None]:
+        """
+        发送请求并以流式方式接收过程事件与最终响应。
+
+        Yields:
+            AgentMessage: 中间进度或最终结果消息
+        """
+        stream_queue: asyncio.Queue = asyncio.Queue()
+        self.pending_streams[message.id] = stream_queue
+
+        await self.publish(message)
+
+        try:
+            while True:
+                try:
+                    response = await asyncio.wait_for(stream_queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Stream request timeout: {message.id}")
+                    return
+
+                if response is None:
+                    return
+
+                yield response
+
+                if self._is_terminal_response_message(response):
+                    return
+        finally:
+            self.pending_streams.pop(message.id, None)
     
     async def reply(self, original: AgentMessage, response: AgentMessage) -> None:
         """
@@ -275,8 +367,10 @@ class MessageBus:
         await self.publish(response)
         
         # 如果有等待的Future，完成它
-        if original.id in self.pending_replies:
-            self.pending_replies[original.id].set_result(response)
+        if original.id in self.pending_replies and self._is_terminal_response_message(response):
+            future = self.pending_replies[original.id]
+            if not future.done():
+                future.set_result(response)
     
     async def _process_messages(self):
         """消息处理循环"""
@@ -284,7 +378,7 @@ class MessageBus:
             try:
                 # 获取消息（带超时以允许检查_running状态）
                 try:
-                    _, _, message = await asyncio.wait_for(
+                    _, _, _, message = await asyncio.wait_for(
                         self.message_queue.get(),
                         timeout=TIMEOUTS.MESSAGE_QUEUE
                     )
@@ -300,11 +394,28 @@ class MessageBus:
     
     async def _dispatch_message(self, message: AgentMessage):
         """分发消息给订阅者"""
+        if self._is_message_expired(message):
+            self.dead_letters.append(message)
+            self._stats["total_dead_letters"] += 1
+            self._stats["total_expired"] += 1
+            logger.warning(f"Expired message moved to dead letters: {message.id}")
+            return
+
         delivered = False
         
         # 1. 检查是否是响应消息
-        if message.reply_to and message.reply_to in self.pending_replies:
-            self.pending_replies[message.reply_to].set_result(message)
+        if message.reply_to and message.reply_to in self.pending_streams:
+            await self.pending_streams[message.reply_to].put(message)
+            delivered = True
+
+        if (
+            message.reply_to
+            and message.reply_to in self.pending_replies
+            and self._is_terminal_response_message(message)
+        ):
+            future = self.pending_replies[message.reply_to]
+            if not future.done():
+                future.set_result(message)
             delivered = True
         
         # 2. 按接收者分发
@@ -340,9 +451,10 @@ class MessageBus:
             if self._default_handler:
                 try:
                     logger.info(f"Invoking default handler for undelivered message: {message.id}")
-                    await self._default_handler(message)
-                    delivered = True
-                    self._stats["total_default_handled"] += 1
+                    default_result = await self._default_handler(message)
+                    if default_result is not None:
+                        delivered = True
+                        self._stats["total_default_handled"] += 1
                 except Exception as e:
                     logger.error(f"Default handler error: {e}")
             
@@ -356,7 +468,7 @@ class MessageBus:
     
     def get_dead_letters(self) -> List[AgentMessage]:
         """获取死信队列中的消息"""
-        return self.dead_letters.copy()
+        return list(self.dead_letters)
     
     def clear_dead_letters(self):
         """清空死信队列"""
@@ -376,6 +488,7 @@ class MessageBus:
             "history_size": len(self.message_history),
             "running": self._running,
             "has_default_handler": self._default_handler is not None,
+            "expired_messages": self._stats.get("total_expired", 0),
             "message_stats": self._stats.copy()
         }
 
@@ -436,6 +549,60 @@ def create_task_message(
             "task_data": task_data
         },
         priority=priority
+    )
+
+
+def create_task_proposed_message(
+    sender: str,
+    receiver: str,
+    task: Dict[str, Any],
+    priority: int = 0,
+) -> AgentMessage:
+    """创建任务提案消息。"""
+    return AgentMessage(
+        msg_type=MessageType.TASK_PROPOSED,
+        sender=sender,
+        receiver=receiver,
+        payload={
+            "task": dict(task or {}),
+        },
+        priority=priority,
+    )
+
+
+def create_task_claimed_message(
+    sender: str,
+    task_id: str,
+    receiver: str = "coordinator",
+    claim_reason: str = "",
+) -> AgentMessage:
+    """创建任务认领消息。"""
+    return AgentMessage(
+        msg_type=MessageType.TASK_CLAIMED,
+        sender=sender,
+        receiver=receiver,
+        payload={
+            "task_id": str(task_id or "").strip(),
+            "claim_reason": str(claim_reason or "").strip(),
+        },
+    )
+
+
+def create_dependency_resolved_message(
+    sender: str,
+    dependency_key: str,
+    receiver: str = "*",
+    payload: Optional[Dict[str, Any]] = None,
+) -> AgentMessage:
+    """创建依赖已满足消息。"""
+    return AgentMessage(
+        msg_type=MessageType.DEPENDENCY_RESOLVED,
+        sender=sender,
+        receiver=receiver,
+        payload={
+            "dependency_key": str(dependency_key or "").strip(),
+            **dict(payload or {}),
+        },
     )
 
 

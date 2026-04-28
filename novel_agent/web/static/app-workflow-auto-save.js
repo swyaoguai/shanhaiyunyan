@@ -12,27 +12,204 @@ const AUTO_SAVE_HANDLERS = {
     'items': autoSaveItems
 };
 
+function dedupeWorkflowFiles(files) {
+    const normalizedFiles = Array.isArray(files) ? files : [];
+    const seen = new Map();
+    normalizedFiles.forEach((file) => {
+        if (!file || typeof file !== 'object') return;
+        const path = String(file.path || '').trim();
+        if (!path) return;
+        seen.set(path, {
+            path,
+            label: String(file.label || file.name || '').trim(),
+            kind: String(file.kind || 'file').trim(),
+            status: String(file.status || 'created').trim()
+        });
+    });
+    return Array.from(seen.values());
+}
+
+function upsertKnowledgeItems(target, items) {
+    if (!Array.isArray(target) || !Array.isArray(items)) return;
+    items.forEach((item) => {
+        const name = String(item && item.name || '').trim();
+        if (!name) return;
+        const existingIndex = target.findIndex((entry) => String(entry && entry.name || '').trim() === name);
+        if (existingIndex >= 0) {
+            target[existingIndex] = { ...target[existingIndex], ...item };
+        } else {
+            target.push(item);
+        }
+    });
+}
+
+function parseWorldbuildingContent(content, file) {
+    let parsed = null;
+    try {
+        parsed = JSON.parse(content);
+    } catch (e) {
+        console.error('[AutoSave] 世界观数据解析失败', file && file.path, e);
+        return [];
+    }
+    const worldData = parsed && typeof parsed === 'object'
+        ? (parsed.world && typeof parsed.world === 'object' ? parsed.world : parsed)
+        : null;
+    if (!worldData || typeof worldData !== 'object') {
+        return [];
+    }
+    return convertWorldDataToLibraryItems(worldData);
+}
+
+function mapWorkflowFileKindToProjectDataKey(fileKind) {
+    const normalizedKind = String(fileKind || '').trim();
+    const mapping = {
+        worldbuilding: 'worldbuilding',
+        outline: 'outline',
+        chapter: 'outline',
+        characters: 'characters',
+        items: 'items',
+        eventlines: 'eventlines',
+        outline_settings: 'outline_settings',
+        detail_settings: 'detail_settings',
+        chapter_settings: 'chapter_settings'
+    };
+    return mapping[normalizedKind] || '';
+}
+
+async function refreshWorkflowTargetedData(workflow) {
+    const normalizedWorkflow = workflow && typeof workflow === 'object' ? workflow : {};
+    const workflowFiles = dedupeWorkflowFiles([
+        ...(Array.isArray(normalizedWorkflow.created_files) ? normalizedWorkflow.created_files : []),
+        ...(Array.isArray(normalizedWorkflow.updated_files) ? normalizedWorkflow.updated_files : [])
+    ]);
+    const refreshKeys = Array.from(new Set(
+        workflowFiles
+            .map((file) => mapWorkflowFileKindToProjectDataKey(file.kind))
+            .filter(Boolean)
+    ));
+
+    if (refreshKeys.length === 0) {
+        return false;
+    }
+
+    let refreshed = false;
+    for (const dataKey of refreshKeys) {
+        try {
+            const serverData = await apiCall(`/api/project-data/${dataKey}`, 'GET');
+            store.projectData[dataKey] = Array.isArray(serverData?.data) ? serverData.data : (serverData?.data || []);
+            refreshed = true;
+        } catch (e) {
+            console.warn(`[AutoSave] 定向刷新 ${dataKey} 失败`, e);
+        }
+    }
+
+    if (refreshed && typeof updateMentionData === 'function') {
+        updateMentionData();
+    }
+    return refreshed;
+}
+
+async function reloadProjectDataAndRefreshView(workflow) {
+    const targetedReloaded = await refreshWorkflowTargetedData(workflow);
+    if (!targetedReloaded && typeof loadCurrentProjectData === 'function') {
+        await loadCurrentProjectData();
+    }
+
+    const normalizedWorkflow = workflow && typeof workflow === 'object' ? workflow : {};
+    const focusModule = String(normalizedWorkflow.focus_module || '').trim();
+    const createdKinds = dedupeWorkflowFiles([
+        ...(Array.isArray(normalizedWorkflow.created_files) ? normalizedWorkflow.created_files : []),
+        ...(Array.isArray(normalizedWorkflow.updated_files) ? normalizedWorkflow.updated_files : [])
+    ]).map((file) => String(file.kind || '').trim());
+
+    const hasChapterOrOutline = createdKinds.includes('chapter') || createdKinds.includes('outline');
+    const hasWorldbuilding = createdKinds.includes('worldbuilding');
+
+    if (focusModule === 'world' || (!focusModule && hasWorldbuilding)) {
+        // 切换到资料库模块并加载世界观分类
+        if (typeof switchModule === 'function') {
+            switchModule('world');
+        }
+        const worldCategory = Array.isArray(store?.knowledgeCategories)
+            ? store.knowledgeCategories.find((item) => String(item.key || '').trim() === 'worldbuilding')
+            : null;
+        if (worldCategory && typeof loadDatabase === 'function') {
+            window.setTimeout(() => loadDatabase(worldCategory.id), 80);
+        }
+    } else if (focusModule === 'write' || (!focusModule && hasChapterOrOutline)) {
+        // 切换到创作模块并刷新章节导航面板
+        if (typeof switchModule === 'function') {
+            switchModule('write');
+        }
+        // 显式刷新左侧章节列表导航面板
+        window.setTimeout(() => {
+            if (typeof renderNavPanel === 'function') {
+                renderNavPanel('write');
+            }
+        }, 100);
+    } else {
+        await refreshCurrentModule();
+    }
+
+    // 保底：如果当前已在world模块且有世界观文件更新，确保刷新资料库
+    if (!focusModule && hasWorldbuilding && store.currentModule === 'world' && typeof loadDatabase === 'function') {
+        const worldCategory = Array.isArray(store?.knowledgeCategories)
+            ? store.knowledgeCategories.find((item) => String(item.key || '').trim() === 'worldbuilding')
+            : null;
+        if (worldCategory) {
+            window.setTimeout(() => loadDatabase(worldCategory.id), 80);
+        }
+    }
+
+    // 保底：如果当前已在write模块且有章节/大纲文件更新，确保刷新导航面板
+    if (!focusModule && hasChapterOrOutline && store.currentModule === 'write') {
+        window.setTimeout(() => {
+            if (typeof renderNavPanel === 'function') {
+                renderNavPanel('write');
+            }
+        }, 120);
+    }
+
+    if (typeof maybeFocusWorkflowTarget === 'function') {
+        maybeFocusWorkflowTarget(normalizedWorkflow);
+    }
+}
+
 /**
  * 主入口：处理工作流完成事件
  */
 async function handleWorkflowAutoSave(workflow) {
-    if (!workflow || !workflow.created_files || workflow.created_files.length === 0) {
+    if (!workflow) {
+        return;
+    }
+
+    const workflowFiles = dedupeWorkflowFiles([
+        ...(Array.isArray(workflow.created_files) ? workflow.created_files : []),
+        ...(Array.isArray(workflow.updated_files) ? workflow.updated_files : [])
+    ]);
+
+    if (workflowFiles.length === 0) {
         return;
     }
 
     console.log('[AutoSave] 开始处理工作流文件自动保存', workflow);
 
     const sessionId = getCurrentCopilotSessionId();
-    const savedCount = { success: 0, failed: 0 };
+    const savedCount = { success: 0, failed: 0, skipped: 0 };
 
-    for (const file of workflow.created_files) {
+    for (const file of workflowFiles) {
         try {
             const handler = AUTO_SAVE_HANDLERS[file.kind];
             if (handler) {
-                await handler(file, sessionId);
-                savedCount.success++;
+                const saved = await handler(file, sessionId);
+                if (saved) {
+                    savedCount.success++;
+                } else {
+                    savedCount.skipped++;
+                }
             } else {
                 console.log(`[AutoSave] 未找到处理器: ${file.kind}`);
+                savedCount.skipped++;
             }
         } catch (e) {
             console.error(`[AutoSave] 保存失败: ${file.path}`, e);
@@ -40,16 +217,13 @@ async function handleWorkflowAutoSave(workflow) {
         }
     }
 
-    // 显示保存结果
     if (savedCount.success > 0) {
-        showToast(`已自动保存 ${savedCount.success} 个文件到对应位置`, 'success');
-        
-        // 刷新当前模块显示
-        refreshCurrentModule();
+        await reloadProjectDataAndRefreshView(workflow);
+        showToast(`已自动同步 ${savedCount.success} 个文件到对应位置`, 'success');
     }
 
     if (savedCount.failed > 0) {
-        showToast(`${savedCount.failed} 个文件保存失败`, 'warning');
+        showToast(`${savedCount.failed} 个文件同步失败`, 'warning');
     }
 }
 
@@ -59,46 +233,44 @@ async function handleWorkflowAutoSave(workflow) {
 async function autoSaveWorldbuilding(file, sessionId) {
     console.log('[AutoSave] 处理世界观文件', file);
 
-    // 读取文件内容
-    const content = await fetchWorkflowFileContent(file.path, sessionId);
-    if (!content) return;
-
-    // 解析世界观数据
-    let worldData;
     try {
-        worldData = JSON.parse(content);
+        const serverData = await apiCall('/api/project-data/worldbuilding', 'GET');
+        if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
+            store.projectData.worldbuilding = serverData.data;
+            if (typeof updateMentionData === 'function') {
+                updateMentionData();
+            }
+            return true;
+        }
     } catch (e) {
-        console.error('[AutoSave] 世界观数据解析失败', e);
-        return;
+        console.warn('[AutoSave] 读取服务端世界观失败，回退到文件解析', e);
     }
 
-    // 转换为资料库格式
-    const worldItems = convertWorldDataToLibraryItems(worldData);
+    const content = await fetchWorkflowFileContent(file.path, sessionId);
+    if (!content) return false;
 
-    // 保存到本地store
+    const worldItems = parseWorldbuildingContent(content, file);
+    if (!worldItems.length) {
+        console.warn('[AutoSave] 世界观内容无法转为资料库条目', file.path);
+        return false;
+    }
+
     if (!store.projectData.worldbuilding) {
         store.projectData.worldbuilding = [];
     }
 
-    // 追加新数据（避免重复）
-    worldItems.forEach(item => {
-        const exists = store.projectData.worldbuilding.some(w => w.name === item.name);
-        if (!exists) {
-            store.projectData.worldbuilding.push(item);
-        }
-    });
+    upsertKnowledgeItems(store.projectData.worldbuilding, worldItems);
 
-    // 保存到服务器
     await apiCall('/api/project-data/worldbuilding', 'POST', {
         data: store.projectData.worldbuilding
     });
 
-    // 更新@引用数据
     if (typeof updateMentionData === 'function') {
         updateMentionData();
     }
 
     console.log('[AutoSave] 世界观保存成功', worldItems.length);
+    return true;
 }
 
 /**
@@ -107,8 +279,21 @@ async function autoSaveWorldbuilding(file, sessionId) {
 async function autoSaveOutline(file, sessionId) {
     console.log('[AutoSave] 处理大纲文件', file);
 
+    try {
+        const serverData = await apiCall('/api/project-data/outline', 'GET');
+        if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
+            store.projectData.outline = serverData.data;
+            if (typeof updateMentionData === 'function') {
+                updateMentionData();
+            }
+            return true;
+        }
+    } catch (e) {
+        console.warn('[AutoSave] 读取服务端大纲失败，回退到文件解析', e);
+    }
+
     const content = await fetchWorkflowFileContent(file.path, sessionId);
-    if (!content) return;
+    if (!content) return false;
 
     let outlineData;
     try {
@@ -150,6 +335,7 @@ async function autoSaveOutline(file, sessionId) {
     }
 
     console.log('[AutoSave] 大纲保存成功', chapters.length);
+    return true;
 }
 
 /**
@@ -158,8 +344,23 @@ async function autoSaveOutline(file, sessionId) {
 async function autoSaveChapter(file, sessionId) {
     console.log('[AutoSave] 处理章节文件', file);
 
+    try {
+        const serverData = await apiCall('/api/project-data/outline', 'GET');
+        if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
+            const existingOutline = serverData.data;
+            const previewContent = await fetchWorkflowFileContent(file.path, sessionId);
+            const chapterInfo = previewContent ? extractChapterInfo(file, previewContent) : null;
+            if (!chapterInfo || (existingOutline[chapterInfo.index || 0] && String(existingOutline[chapterInfo.index || 0].content || '').trim())) {
+                store.projectData.outline = existingOutline;
+                return true;
+            }
+        }
+    } catch (e) {
+        console.warn('[AutoSave] 读取服务端章节失败，回退到文件解析', e);
+    }
+
     const content = await fetchWorkflowFileContent(file.path, sessionId);
-    if (!content) return;
+    if (!content) return false;
 
     // 从文件名或内容中提取章节信息
     const chapterInfo = extractChapterInfo(file, content);
@@ -195,6 +396,7 @@ async function autoSaveChapter(file, sessionId) {
     });
 
     console.log('[AutoSave] 章节保存成功', chapterInfo.title);
+    return true;
 }
 
 /**
@@ -203,8 +405,21 @@ async function autoSaveChapter(file, sessionId) {
 async function autoSaveCharacters(file, sessionId) {
     console.log('[AutoSave] 处理角色文件', file);
 
+    try {
+        const serverData = await apiCall('/api/project-data/characters', 'GET');
+        if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
+            store.projectData.characters = serverData.data;
+            if (typeof updateMentionData === 'function') {
+                updateMentionData();
+            }
+            return true;
+        }
+    } catch (e) {
+        console.warn('[AutoSave] 读取服务端角色失败，回退到文件解析', e);
+    }
+
     const content = await fetchWorkflowFileContent(file.path, sessionId);
-    if (!content) return;
+    if (!content) return false;
 
     let charactersData;
     try {
@@ -247,6 +462,7 @@ async function autoSaveCharacters(file, sessionId) {
     }
 
     console.log('[AutoSave] 角色保存成功', characters.length);
+    return true;
 }
 
 /**
@@ -255,8 +471,18 @@ async function autoSaveCharacters(file, sessionId) {
 async function autoSaveItems(file, sessionId) {
     console.log('[AutoSave] 处理道具文件', file);
 
+    try {
+        const serverData = await apiCall('/api/project-data/items', 'GET');
+        if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
+            store.projectData.items = serverData.data;
+            return true;
+        }
+    } catch (e) {
+        console.warn('[AutoSave] 读取服务端道具失败，回退到文件解析', e);
+    }
+
     const content = await fetchWorkflowFileContent(file.path, sessionId);
-    if (!content) return;
+    if (!content) return false;
 
     let itemsData;
     try {
@@ -290,6 +516,7 @@ async function autoSaveItems(file, sessionId) {
     });
 
     console.log('[AutoSave] 道具保存成功', items.length);
+    return true;
 }
 
 /**
@@ -298,7 +525,7 @@ async function autoSaveItems(file, sessionId) {
 async function fetchWorkflowFileContent(filePath, sessionId) {
     try {
         const res = await apiCall(
-            `/api/chat/workflow-file-preview?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`,
+            `/api/v1/chat/workflow-file-preview?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`,
             'GET'
         );
         return res && res.content ? res.content : null;
@@ -450,8 +677,18 @@ function extractChapterInfo(file, content) {
 
 /**
  * 辅助函数：刷新当前模块显示
+ * 先从服务端重新加载项目数据，再刷新UI面板
  */
-function refreshCurrentModule() {
+async function refreshCurrentModule() {
+    // 先从服务端重新加载项目数据，确保UI渲染的是最新数据
+    if (typeof loadCurrentProjectData === 'function') {
+        try {
+            await loadCurrentProjectData();
+        } catch (e) {
+            console.warn('[refreshCurrentModule] 加载项目数据失败', e);
+        }
+    }
+
     const currentModule = store.currentModule;
     
     if (currentModule === 'world') {
@@ -459,8 +696,15 @@ function refreshCurrentModule() {
         if (typeof renderKnowledgeNavPanel === 'function') {
             renderKnowledgeNavPanel();
         }
+        // 如果当前有选中的世界观分类，也刷新它
+        const worldCategory = Array.isArray(store?.knowledgeCategories)
+            ? store.knowledgeCategories.find((item) => String(item.key || '').trim() === 'worldbuilding')
+            : null;
+        if (worldCategory && typeof loadDatabase === 'function') {
+            window.setTimeout(() => loadDatabase(worldCategory.id), 80);
+        }
     } else if (currentModule === 'write') {
-        // 刷新章节列表
+        // 刷新章节列表导航面板
         if (typeof renderNavPanel === 'function') {
             renderNavPanel('write');
         }

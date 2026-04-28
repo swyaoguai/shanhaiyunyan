@@ -19,10 +19,69 @@ from .coordinator import (
     WorkflowCheckpoint,
     NovelProject
 )
+from .contracts import (
+    CreationContract,
+    TaskDefinition,
+    TaskDependency,
+    ExecutionPolicy,
+    build_default_creation_contract,
+    build_default_task_graph,
+)
+from .agent_dispatcher import AgentDispatcher, DispatchResult
+from .checkpoint_manager import CheckpointManager
+from .collab_registry import CollabAgentRegistry, CollabServiceRegistry
+from .collab_services import (
+    BaseCollabService,
+    ContextStrategyService,
+    ContentReaderService,
+    ContentExpansionService,
+    FileNamingService,
+    SummaryService,
+    ServiceBackedCollabParticipant,
+    build_default_collab_participants,
+    build_default_collab_service_registry,
+)
+from .execution_context import CollabExecutionContext, ContextValidationError, TaskExecutionEnvelope
+from .memory_sync import MemorySyncManager
+from .routing_policy import RouteDecision, RouteRule, RoutingPolicy, RoutingPolicyError
+from .runtime_state import RuntimeStateStore
+from .task_pool import TaskPool, TaskPoolSnapshot, TaskStatus
 
 __all__ = [
     "NovelCoordinator",
     "WorkflowState",
     "WorkflowCheckpoint",
-    "NovelProject"
+    "NovelProject",
+    "CreationContract",
+    "TaskDefinition",
+    "TaskDependency",
+    "ExecutionPolicy",
+    "build_default_creation_contract",
+    "build_default_task_graph",
+    "AgentDispatcher",
+    "DispatchResult",
+    "CheckpointManager",
+    "CollabAgentRegistry",
+    "CollabServiceRegistry",
+    "BaseCollabService",
+    "ContextStrategyService",
+    "ContentReaderService",
+    "ContentExpansionService",
+    "FileNamingService",
+    "SummaryService",
+    "ServiceBackedCollabParticipant",
+    "build_default_collab_participants",
+    "build_default_collab_service_registry",
+    "CollabExecutionContext",
+    "ContextValidationError",
+    "TaskExecutionEnvelope",
+    "MemorySyncManager",
+    "RouteDecision",
+    "RouteRule",
+    "RoutingPolicy",
+    "RoutingPolicyError",
+    "RuntimeStateStore",
+    "TaskPool",
+    "TaskPoolSnapshot",
+    "TaskStatus",
 ]

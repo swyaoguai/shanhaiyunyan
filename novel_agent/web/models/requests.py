@@ -8,17 +8,25 @@ from ...constants import LLM_DEFAULTS, WRITING_CONFIG
 
 
 class CreateNovelRequest(BaseModel):
-    novel_type: str = "玄幻"
+    novel_type: str = ""
     theme: str = ""
     requirements: str = ""
     protagonist: str = ""
     plot_idea: str = ""
     volume_count: int = 1
     chapters_per_volume: int = 5
+    session_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]{0,64}$")
+
+
+class ConfirmCreationContractRequest(BaseModel):
+    contract_id: str = ""
+    approved: bool = True
+    session_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]{0,64}$")
+    contract_payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class GenerateWorldRequest(BaseModel):
-    novel_type: str = "玄幻"
+    novel_type: str = ""
     theme: str = ""
     requirements: str = ""
 
@@ -68,6 +76,28 @@ class GlobalAPIConfigRequest(BaseModel):
     model: str = ""
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
+
+
+class ShortStoryTimeoutSettingsRequest(BaseModel):
+    synopsis: Optional[int] = None
+    outline: Optional[int] = None
+    chapter: Optional[int] = None
+    quality: Optional[int] = None
+    coherence: Optional[int] = None
+    title: Optional[int] = None
+    tags: Optional[int] = None
+
+
+class LLMTimeoutSettingsRequest(BaseModel):
+    connect: Optional[int] = None
+    read: Optional[int] = None
+    write: Optional[int] = None
+    pool: Optional[int] = None
+
+
+class TimeoutSettingsRequest(BaseModel):
+    llm: Optional[LLMTimeoutSettingsRequest] = None
+    short_story: Optional[ShortStoryTimeoutSettingsRequest] = None
 
 
 class AddAPIConfigRequest(BaseModel):
@@ -400,6 +430,11 @@ class RegexReplaceRequest(BaseModel):
     flags: str = ""
 
 
+class ContinuousWriteExportRequest(BaseModel):
+    title: str = ""
+    chapters: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class SavePromptRequest(BaseModel):
     content: str
 
@@ -416,9 +451,61 @@ class TrendsConfigRequest(BaseModel):
     refresh_interval: Optional[int] = None
     default_platforms: Optional[List[str]] = None
     show_in_infinite_write: Optional[bool] = None
-    show_in_multi_agent: Optional[bool] = None
 
 
 class TrendsVisibilityRequest(BaseModel):
     show_in_infinite_write: bool = True
-    show_in_multi_agent: bool = True
+
+
+class ShortStoryStartRequest(BaseModel):
+    keywords: List[str] = Field(default_factory=list)
+    source_input: str = ""
+    target_total_words: int = 5000
+    chapter_word_target: Optional[int] = None
+    category: str = "其他"
+    tone: str = ""
+
+
+class ShortStoryWorkflowRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    api_config_id: str = ""
+    model: str = ""
+    feedback: str = ""
+
+
+class ShortStorySelectionRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    selection: int
+
+
+class ShortStoryOutlineConfirmRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    approved: bool = True
+    feedback: str = ""
+
+
+class ShortStoryChapterGenerateRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    chapter_number: int
+    api_config_id: str = ""
+    model: str = ""
+
+
+class ShortStoryChapterSaveRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    chapter_number: int
+    title: str = ""
+    content: str = ""
+
+
+class ShortStoryReviewCommitRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    report: str = ""
+    passed: bool = True
+    chapters: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ShortStorySimpleFixRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    report: str = ""
+    chapters: List[Dict[str, Any]] = Field(default_factory=list)

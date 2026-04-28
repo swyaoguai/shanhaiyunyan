@@ -136,7 +136,16 @@ def open_browser(port: int, delay: float = 1.5):
 def main():
     """主函数"""
     try:
-        import uvicorn
+        try:
+            import uvicorn
+        except ModuleNotFoundError as exc:
+            if exc.name == "uvicorn":
+                logger.critical(
+                    "Missing required dependency '%s' for interpreter %s",
+                    exc.name,
+                    sys.executable,
+                )
+            raise
         from novel_agent.config import config
         from novel_agent.web import create_app
 
@@ -197,7 +206,24 @@ def main():
         try:
             with open("startup_error.txt", "w", encoding="utf-8") as f:
                 import traceback
-                f.write(f"Startup failed: {e}\n\n")
+                f.write(f"Python executable: {sys.executable}\n")
+                f.write(f"Working directory: {os.getcwd()}\n")
+                f.write(f"Startup failed: {e}\n")
+                if isinstance(e, ModuleNotFoundError):
+                    missing_name = getattr(e, "name", None) or "unknown"
+                    # 检测是否为打包环境（便携版EXE不是Python解释器）
+                    is_packaged = getattr(sys, 'frozen', False) or not sys.executable.lower().endswith('python.exe')
+                    if is_packaged:
+                        f.write(
+                            f"Suggested fix: 请重新下载最新便携版，或联系技术支持\n"
+                            f"  # missing module: {missing_name}\n"
+                        )
+                    else:
+                        f.write(
+                            f"Suggested fix: \"{sys.executable}\" -m pip install -r requirements.txt"
+                            f"  # missing: {missing_name}\n"
+                        )
+                f.write("\n")
                 f.write(traceback.format_exc())
         except Exception as write_error:
             logger.error(f"Failed to write startup_error.txt: {write_error}")
