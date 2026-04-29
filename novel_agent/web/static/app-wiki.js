@@ -13,7 +13,7 @@
 (function () {
     'use strict';
 
-    const WIKI_API = '/api/wiki';
+    const WIKI_API = '/api/v1/wiki';
     let currentPage = null;
     let allPages = [];
 

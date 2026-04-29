@@ -372,14 +372,12 @@ function switchModule(moduleId) {
             // 不自动渲染协作状态面板，只显示空编辑器
             showEmptyEditor();
         }
-    } else if (normalizedModuleId === 'knowledge-workbench') {
-        // 已合并到知识中心，切换到aux-memory并显示知识工作台子视图
-        if (typeof auxMemoryState !== 'undefined') {
-            auxMemoryState.subView = 'workbench';
-        }
-        switchModule('aux-memory');
-        if (typeof auxSwitchToWorkbench === 'function') {
-            auxSwitchToWorkbench();
+    } else if (normalizedModuleId === 'aux-memory' || normalizedModuleId === 'knowledge-workbench') {
+        // 知识中心已合并到Wiki系统
+        if (typeof WikiModule !== 'undefined' && typeof WikiModule.render === 'function') {
+            WikiModule.render();
+        } else {
+            console.error('[switchModule] WikiModule not found');
         }
     } else if (normalizedModuleId === 'about') {
         // 关于页面

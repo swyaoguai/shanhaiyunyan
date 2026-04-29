@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/wiki", tags=["wiki"])
+router = APIRouter(prefix="/wiki", tags=["wiki"])
 
 
 # ===== 请求模型 =====
