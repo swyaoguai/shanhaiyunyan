@@ -322,12 +322,12 @@ function showConfigEditModal(configId = null) {
             <div>
                 <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API 类型 <span style="color: #ef4444;">*</span></label>
                 <select id="config-api-type" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
-                    <option value="openai_chat" ${currentApiType === 'openai_chat' ? 'selected' : ''}>OpenAI Chat（默认）</option>
-                    <option value="openai_responses" ${currentApiType === 'openai_responses' ? 'selected' : ''}>OpenAI Responses（新版）</option>
-                    <option value="anthropic" ${currentApiType === 'anthropic' ? 'selected' : ''}>Anthropic（原生）</option>
+                    <option value="openai_chat" ${currentApiType === 'openai_chat' ? 'selected' : ''}>OpenAI Chat</option>
+                    <option value="openai_responses" ${currentApiType === 'openai_responses' ? 'selected' : ''}>OpenAI Responses</option>
+                    <option value="anthropic" ${currentApiType === 'anthropic' ? 'selected' : ''}>Anthropic</option>
                 </select>
                 <div id="api-type-hint" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
-                    ${currentApiType === 'anthropic' ? 'Anthropic 使用原生消息接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）' : '使用 OpenAI 兼容的聊天补全端点'}
+                    ${currentApiType === 'anthropic' ? '使用 Anthropic Messages 接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）' : '使用 OpenAI 兼容的聊天补全端点'}
                 </div>
             </div>
             <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Base URL <span style="color: #ef4444;">*</span></label><input type="text" id="config-api-base" value="${safeAttr(config?.api_base || '')}" placeholder="${currentApiType === 'anthropic' ? 'https://api.anthropic.com 或中转地址' : 'https://api.openai.com/v1'}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
@@ -393,7 +393,7 @@ function showConfigEditModal(configId = null) {
         const apiBaseInput = document.getElementById('config-api-base');
 
         if (selectedType === 'anthropic') {
-            if (hintEl) hintEl.textContent = 'Anthropic 使用原生消息接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）';
+            if (hintEl) hintEl.textContent = '使用 Anthropic Messages 接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）';
             if (apiBaseInput) apiBaseInput.placeholder = 'https://api.anthropic.com 或中转地址';
         } else if (selectedType === 'openai_responses') {
             if (hintEl) hintEl.textContent = '使用 OpenAI Responses 端点（/v1/responses），需要兼容的 API Key';

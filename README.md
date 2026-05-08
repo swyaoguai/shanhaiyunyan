@@ -93,7 +93,10 @@
 
 ### 环境要求
 - Python 3.10+
-- 支持 OpenAI 兼容 API 的服务（OpenAI、DeepSeek、硅基流动等）
+- 至少准备一种可用的模型 API 配置：
+  - OpenAI Chat
+  - OpenAI Responses
+  - Anthropic
 
 ### 安装
 
@@ -103,35 +106,17 @@ cd wscz
 pip install -r requirements.txt
 ```
 
-### 配置
+### 配置模型
 
-1. 复制环境变量模板：
-```bash
-cp .env.example .env
-```
+启动软件后进入「设置」，在「全局 API 配置」中新增配置。API 类型支持：
 
-2. 编辑 `.env` 文件：
-```env
-# LLM API配置（必填）
-OPENAI_API_KEY=your-api-key-here
-OPENAI_API_BASE=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4
+| API 类型 | 说明 |
+|----------|------|
+| OpenAI Chat | 使用 OpenAI Chat Completions 兼容接口 |
+| OpenAI Responses | 使用 OpenAI Responses 接口 |
+| Anthropic | 使用 Anthropic Messages 接口 |
 
-# 知识库向量化配置（二选一；也可以在软件设置页里切换）
-
-# 方案A：使用硅基流动线上嵌入模型
-KB_EMBEDDING_PROVIDER=api
-SILICONFLOW_API_KEY=your-siliconflow-api-key
-SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
-SILICONFLOW_EMBEDDING_MODEL=BAAI/bge-m3
-SILICONFLOW_EMBEDDING_DIM=1024
-
-# 方案B：使用本地 ONNX 嵌入模型
-# KB_EMBEDDING_PROVIDER=local_onnx
-# KB_ONNX_MODEL_DIR=novel_agent/models/embedding/default
-# KB_ONNX_MODEL_FILE=model.onnx
-# KB_ONNX_POOLING=cls
-```
+知识库向量检索也在「设置 → 知识库配置」中选择，可以使用硅基流动线上嵌入模型，也可以安装本地 ONNX 模型包。
 
 ### 启动
 
@@ -227,15 +212,15 @@ novel_agent/
 
 ### 全局API配置
 
-系统支持在Web UI的设置页面配置全局API，也可以为每个Agent单独配置不同的模型。
+系统支持在 Web UI 的设置页面配置全局 API，也可以为每个 Agent 单独配置不同的模型。
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `OPENAI_API_BASE` | API地址 | https://api.openai.com/v1 |
-| `OPENAI_API_KEY` | API密钥 | - |
-| `OPENAI_MODEL` | 模型名称 | gpt-4 |
-| `MAX_TOKENS` | 最大Token数 | 4096 |
-| `TEMPERATURE` | 温度参数 | 0.7 |
+| API 类型 | 需要填写 |
+|----------|----------|
+| OpenAI Chat | API Base URL、API Key、模型名 |
+| OpenAI Responses | API Base URL、API Key、模型名 |
+| Anthropic | API Base URL、API Key、模型名 |
+
+设置页也支持为不同 Agent 指定不同 API 配置、模型、温度和最大 token 数。
 
 ### 知识库嵌入模型配置
 
@@ -296,20 +281,15 @@ SILICONFLOW_EMBEDDING_DIM=1024
 
 从本地 ONNX 切到硅基流动，或从硅基流动切回本地 ONNX 后，建议重建知识库索引。不同模型的向量维度和分布可能不同，旧索引继续混用会影响检索效果，维度不同还可能导致向量库写入失败。
 
-### 支持的LLM提供商
+### 支持的 API 类型
 
-通过 OpenAI 兼容 API 支持任意提供商，内置适配器包括：
+项目当前在设置页支持三种 API 类型：
 
-| 提供商 | 适配器 | 模型示例 |
-|--------|--------|---------|
-| DeepSeek | `deepseek.py` | deepseek-chat, deepseek-reasoner |
-| 智谱AI | `zhipu.py` | glm-4, glm-4v |
-| 月之暗面 | `moonshot.py` | moonshot-v1-128k |
-| 字节豆包 | `doubao.py` | doubao-pro-128k |
-| 阿里通义 | `alibaba.py` | qwen-max, qwen-turbo |
-| 百度文心 | `baidu.py` | ernie-4.0-8k |
-| 讯飞星火 | `iflytek.py` | spark-max |
-| MiniMax | `minimax.py` | abab6.5-chat |
+| API 类型 | 用途 |
+|----------|------|
+| OpenAI Chat | 适用于 Chat Completions 兼容接口 |
+| OpenAI Responses | 适用于 Responses 接口 |
+| Anthropic | 适用于 Anthropic Messages 接口 |
 
 ### Skill 配置
 
@@ -323,34 +303,22 @@ cp config.example.json config.json
 - `agent_reach`: 网络搜索功能
 - `trends_search`: 热点趋势搜索（抖音、头条）
 
-## 📚 文档
-
-- [文档索引](./docs/README.md) - 按当前文档、设计方案、已实现归档、报告和待办分类
-- [API 文档](./docs/current/API.md) - REST API 接口说明
-- [LLM Wiki 改造方案](./docs/design/knowledge-base/LLM-Wiki知识系统改造方案.md) - 知识系统架构设计
-- [迁移指南](./MIGRATION_GUIDE.md) - v1.0 → v1.1 升级指南
-- [更新日志](./CHANGELOG.md) - 版本更新记录
-- [架构文档](./docs/) - 详细技术文档
-
 ## 🎮 使用指南
 
-### 1. 创建项目
-在Web UI左上角的项目选择器中创建新项目，每个项目独立存储数据。
+### 1. 配置模型
+进入「设置」，新增一个 API 配置，选择 API 类型并填写 API Base URL、API Key 和模型名。保存后可以测试连接。
 
-### 2. 构建世界观
-进入"世界设定"模块，填写小说类型、主题等信息，系统会自动生成世界观。
+### 2. 创建或选择项目
+在项目入口创建项目。项目数据会按项目隔离保存。
 
-### 3. 规划大纲
-在"写作"模块中创建章节，系统会根据世界观和前文自动规划情节。
+### 3. 进入写作工作区
+在写作区可以编辑章节，也可以使用右侧 Copilot 对话，让它基于当前项目资料协助创作、修改或整理内容。
 
-### 4. 创作内容
-- **手动撰写**：直接在编辑器中写作
-- **AI续写**：点击"AI续写"按钮自动生成内容
-- **无限续写**：进入"无限续写"模块，基于灵感自动创作
-- **热点融合**：启用热点搜索，将实时热点融入创作
+### 4. 使用资料与知识库
+资料库用于管理角色、世界观、物品、事件线等项目资料。知识库用于导入文档、分块索引和语义检索；嵌入模型来源可在「设置 → 知识库配置」中切换。
 
-### 5. 使用Copilot
-点击右侧Copilot面板，使用 `@角色名` 或 `@章节名` 引用内容进行对话。
+### 5. 使用专项工具
+可以进入「无限续写」「短篇创作」「小说转剧本」「热点趋势」「Token 统计」等模块处理对应任务。
 
 ## 🔧 开发说明
 
@@ -369,9 +337,3 @@ python -m pytest novel_agent/tests/ -v
 ## 📄 License
 
 MIT License
-
-## 🙏 致谢
-
-- 知识系统基于 [Andrej Karpathy 的 LLM Wiki 模式](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
-- 使用 OpenAI 兼容 API
-- 向量化服务由硅基流动提供
