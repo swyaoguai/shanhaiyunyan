@@ -11,7 +11,8 @@
 import logging
 import time
 import hashlib
-from typing import Optional, Union
+from pathlib import Path
+from typing import Any, Optional, Union
 from dataclasses import dataclass
 
 try:
@@ -21,7 +22,7 @@ except ImportError:
     HTTPX_AVAILABLE = False
     httpx = None
 
-from ..config import SiliconFlowConfig, NVIDIAConfig
+from ..config import SiliconFlowConfig, NVIDIAConfig, LocalOnnxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,7 @@ class EmbeddingService:
     def get_model_info(self) -> dict:
         """获取模型信息"""
         return {
+            "provider": "api",
             "model": self.config.model,
             "embedding_dim": self.config.embedding_dim,
             "max_tokens": self.config.max_tokens,
@@ -528,6 +530,7 @@ class NVIDIAEmbeddingService:
     def get_model_info(self) -> dict:
         """获取模型信息"""
         return {
+            "provider": "nvidia",
             "model": self.config.model,
             "embedding_dim": self.config.embedding_dim,
             "input_type": self.config.input_type,
@@ -546,6 +549,213 @@ class NVIDIAEmbeddingService:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+class LocalOnnxEmbeddingService:
+    """
+    本地 ONNX 向量化服务。
+
+    约定模型目录中包含 model.onnx 和 tokenizer.json，或提供可被
+    transformers.AutoTokenizer 读取的 tokenizer 文件。
+    """
+
+    def __init__(
+        self,
+        config: Optional[LocalOnnxConfig] = None,
+        *,
+        session: Any = None,
+        tokenizer: Any = None,
+    ):
+        self.config = config or LocalOnnxConfig()
+        self._cache: dict[str, list[float]] = {}
+        self._session = session
+        self._tokenizer = tokenizer
+        self._input_names: set[str] = set()
+
+        self._validate_config(skip_files=bool(session and tokenizer))
+        self._initialize_runtime()
+
+    def _validate_config(self, *, skip_files: bool = False) -> None:
+        if skip_files:
+            return
+        model_dir = Path(self.config.model_dir or "")
+        model_path = model_dir / (self.config.model_file or "model.onnx")
+        if not self.config.model_dir:
+            raise ValueError("缺少本地 ONNX 模型目录，请设置 KB_ONNX_MODEL_DIR")
+        if not model_path.exists():
+            raise ValueError(f"本地 ONNX 模型文件不存在: {model_path}")
+
+    def _initialize_runtime(self) -> None:
+        if self._session is None:
+            try:
+                import onnxruntime as ort
+            except ImportError as exc:
+                raise ImportError("onnxruntime 未安装，请运行: pip install onnxruntime") from exc
+
+            model_path = Path(self.config.model_dir) / (self.config.model_file or "model.onnx")
+            session_options = ort.SessionOptions()
+            if self.config.threads:
+                session_options.intra_op_num_threads = int(self.config.threads)
+                session_options.inter_op_num_threads = int(self.config.threads)
+            self._session = ort.InferenceSession(
+                str(model_path),
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"],
+            )
+
+        self._input_names = {getattr(item, "name", "") for item in self._session.get_inputs()}
+
+        if self._tokenizer is None:
+            tokenizer_dir = Path(self.config.tokenizer_dir or self.config.model_dir)
+            tokenizer_json = tokenizer_dir / "tokenizer.json"
+            if tokenizer_json.exists():
+                try:
+                    from tokenizers import Tokenizer
+                except ImportError as exc:
+                    raise ImportError("tokenizers 未安装，请运行: pip install tokenizers") from exc
+                tokenizer = Tokenizer.from_file(str(tokenizer_json))
+                tokenizer.enable_truncation(max_length=int(self.config.max_length))
+                tokenizer.enable_padding()
+                self._tokenizer = tokenizer
+            else:
+                try:
+                    from transformers import AutoTokenizer
+                except ImportError as exc:
+                    raise ImportError(
+                        "缺少 tokenizer.json，且 transformers 未安装；请安装 tokenizers 或 transformers"
+                    ) from exc
+                self._tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+
+        logger.info(
+            "本地 ONNX 向量化服务初始化完成: model=%s, max_length=%s",
+            self.config.model_name,
+            self.config.max_length,
+        )
+
+    def embed(self, text: str, use_cache: bool = True) -> list[float]:
+        if not text or not text.strip():
+            raise ValueError("文本不能为空")
+        return self.embed_batch([text], use_cache=use_cache)[0]
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        batch_size: int = 32,
+        use_cache: bool = True,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+
+        results: dict[int, list[float]] = {}
+        pending: list[tuple[int, str]] = []
+        for idx, text in enumerate(texts):
+            clean = str(text or "").strip()
+            if not clean:
+                results[idx] = []
+                continue
+            cache_key = self._get_cache_key(clean)
+            if use_cache and cache_key in self._cache:
+                results[idx] = self._cache[cache_key]
+                continue
+            pending.append((idx, clean))
+
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            batch_texts = [text for _, text in batch]
+            embeddings = self._embed_uncached_batch(batch_texts)
+            for (idx, text), embedding in zip(batch, embeddings):
+                results[idx] = embedding
+                if use_cache:
+                    self._cache[self._get_cache_key(text)] = embedding
+
+        return [results.get(i, []) for i in range(len(texts))]
+
+    def _embed_uncached_batch(self, texts: list[str]) -> list[list[float]]:
+        import numpy as np
+
+        inputs = self._tokenize(texts)
+        attention_mask = np.asarray(inputs.pop("__attention_mask"), dtype=np.float32)
+        outputs = self._session.run(None, inputs)
+        if not outputs:
+            raise RuntimeError("ONNX embedding 模型未返回输出")
+
+        hidden = np.asarray(outputs[0], dtype=np.float32)
+        if hidden.ndim == 3:
+            if str(self.config.pooling or "mean").lower() == "cls":
+                pooled = hidden[:, 0, :]
+            else:
+                mask = np.expand_dims(attention_mask, axis=-1)
+                summed = (hidden * mask).sum(axis=1)
+                counts = np.clip(mask.sum(axis=1), a_min=1e-9, a_max=None)
+                pooled = summed / counts
+        elif hidden.ndim == 2:
+            pooled = hidden
+        else:
+            pooled = hidden.reshape((hidden.shape[0], -1))
+
+        norms = np.linalg.norm(pooled, axis=1, keepdims=True)
+        norms = np.clip(norms, a_min=1e-12, a_max=None)
+        normalized = pooled / norms
+        self.config.embedding_dim = int(normalized.shape[1])
+        return normalized.astype(float).tolist()
+
+    def _tokenize(self, texts: list[str]) -> dict[str, Any]:
+        import numpy as np
+
+        if hasattr(self._tokenizer, "encode_batch"):
+            encodings = self._tokenizer.encode_batch(texts)
+            input_ids = [encoding.ids for encoding in encodings]
+            attention_mask = [encoding.attention_mask for encoding in encodings]
+            token_type_ids = [getattr(encoding, "type_ids", [0] * len(encoding.ids)) for encoding in encodings]
+            arrays = {
+                "input_ids": np.asarray(input_ids, dtype=np.int64),
+                "attention_mask": np.asarray(attention_mask, dtype=np.int64),
+                "token_type_ids": np.asarray(token_type_ids, dtype=np.int64),
+            }
+        else:
+            arrays = self._tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=int(self.config.max_length),
+                return_tensors="np",
+            )
+
+        feed: dict[str, Any] = {}
+        for name, value in dict(arrays).items():
+            if name in self._input_names:
+                feed[name] = value
+        if not feed:
+            raise RuntimeError(f"无法匹配 ONNX 输入名: {sorted(self._input_names)}")
+        if "attention_mask" in dict(arrays):
+            feed["__attention_mask"] = dict(arrays)["attention_mask"]
+        else:
+            feed["__attention_mask"] = np.ones_like(feed["input_ids"], dtype=np.int64)
+        return feed
+
+    def _get_cache_key(self, text: str) -> str:
+        content = f"{self.config.model_name}:{self.config.max_length}:{self.config.pooling}:{text}"
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def clear_cache(self) -> int:
+        count = len(self._cache)
+        self._cache.clear()
+        return count
+
+    def get_cache_size(self) -> int:
+        return len(self._cache)
+
+    def get_model_info(self) -> dict:
+        return {
+            "provider": "local_onnx",
+            "model": self.config.model_name,
+            "embedding_dim": self.config.embedding_dim,
+            "model_dir": self.config.model_dir,
+            "max_length": self.config.max_length,
+        }
+
+    def close(self):
+        self._session = None
 
 
 class MockEmbeddingService(EmbeddingService):
@@ -597,3 +807,10 @@ class MockEmbeddingService(EmbeddingService):
     
     def close(self):
         pass
+
+    def get_model_info(self) -> dict:
+        return {
+            "provider": "mock",
+            "model": self.config.model,
+            "embedding_dim": self.embedding_dim,
+        }

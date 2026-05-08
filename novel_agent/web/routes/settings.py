@@ -948,6 +948,7 @@ async def add_api_config(request: AddAPIConfigRequest):
         name=request.name,
         api_base=request.api_base,
         api_key=request.api_key,
+        api_keys=[entry.model_dump() for entry in request.api_keys],
         models=request.models,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
@@ -974,6 +975,8 @@ async def update_api_config_by_id(config_id: str, request: UpdateAPIConfigReques
         updates["api_base"] = request.api_base
     if request.api_key is not None and not request.api_key.endswith("****"):
         updates["api_key"] = request.api_key
+    if request.api_keys is not None:
+        updates["api_keys"] = [entry.model_dump() for entry in request.api_keys]
     if request.models is not None:
         updates["models"] = request.models
     if request.temperature is not None:

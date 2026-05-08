@@ -84,12 +84,15 @@ class ConfigValidator:
             with open(config_path, 'r', encoding='utf-8') as f:
                 kb_config = json.load(f)
 
-            # 检查 API Key
+            provider = str(kb_config.get("embedding_provider") or "api").lower()
             api_key = kb_config.get("siliconflow_api_key", "")
-            if not api_key or api_key == "your_siliconflow_api_key_here":
+            has_embedding_config = bool(api_key and api_key != "your_siliconflow_api_key_here")
+            if provider in {"local", "local_onnx"}:
+                has_embedding_config = bool(kb_config.get("onnx_model_dir"))
+            if not has_embedding_config:
                 self.warnings.append(
-                    "知识库 API Key 未配置。知识库功能将不可用。"
-                    f"请在 {config_path} 中配置有效的 SiliconFlow API Key。"
+                    "知识库向量 provider 未配置。知识库功能将不可用。"
+                    f"请在 {config_path} 中配置 SiliconFlow API Key 或本地 ONNX 模型目录。"
                 )
 
             # 检查 ChromaDB

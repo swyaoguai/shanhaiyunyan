@@ -14,6 +14,7 @@ Web应用主模块（重构版）
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -101,15 +102,23 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
         
         config_path = Path(__file__).parent.parent / "data" / "knowledge_base_config.json"
         
-        has_api_key = False
+        has_embedding_config = False
         if config_path.exists():
             try:
                 kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                has_api_key = bool(kb_config.get("siliconflow_api_key"))
+                provider = str(kb_config.get("embedding_provider") or "api").lower()
+                has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
+                if provider in {"local", "local_onnx"}:
+                    has_embedding_config = bool(kb_config.get("onnx_model_dir"))
             except Exception:
                 pass
+        else:
+            provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
+            has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
+            if provider in {"local", "local_onnx"}:
+                has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
         
-        if has_api_key:
+        if has_embedding_config:
             kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
             router_agent.set_knowledge_base(kb)
 
@@ -120,7 +129,7 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
 
             logger.info("[Router] ✓ 知识库已配置，并已同步到协调器子Agent（使用真实向量存储）")
         else:
-            logger.info("[Router] 未配置向量化API Key，跳过知识库功能")
+            logger.info("[Router] 未配置可用向量化 provider，跳过知识库功能")
             
     except ImportError as e:
         logger.error(f"[Router] 知识库初始化失败（ChromaDB不可用）: {e}")

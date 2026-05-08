@@ -36,6 +36,19 @@ class NVIDIAConfig:
 
 
 @dataclass
+class LocalOnnxConfig:
+    """本地 ONNX embedding 模型配置。"""
+    model_dir: str = field(default_factory=lambda: os.getenv("KB_ONNX_MODEL_DIR", ""))
+    model_file: str = field(default_factory=lambda: os.getenv("KB_ONNX_MODEL_FILE", "model.onnx"))
+    tokenizer_dir: str = field(default_factory=lambda: os.getenv("KB_ONNX_TOKENIZER_DIR", ""))
+    model_name: str = field(default_factory=lambda: os.getenv("KB_ONNX_MODEL_NAME", "local_onnx"))
+    embedding_dim: int = 0
+    max_length: int = 512
+    threads: Optional[int] = None
+    pooling: str = "mean"  # "mean" 或 "cls"
+
+
+@dataclass
 class ChromaConfig:
     """ChromaDB向量数据库配置"""
     persist_directory: str = "./data/chroma"
@@ -95,10 +108,11 @@ class KnowledgeBaseConfig:
     """知识库总配置"""
     project_id: str = "default"
     data_dir: str = ""  # 将在__post_init__中设置
-    embedding_provider: str = "siliconflow"  # "siliconflow", "nvidia", "local"
+    embedding_provider: str = "siliconflow"  # "api"/"siliconflow", "nvidia", "local_onnx"
     
     siliconflow: SiliconFlowConfig = field(default_factory=SiliconFlowConfig)
     nvidia: NVIDIAConfig = field(default_factory=NVIDIAConfig)
+    local_onnx: LocalOnnxConfig = field(default_factory=LocalOnnxConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     sqlite: SQLiteConfig = field(default_factory=SQLiteConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
@@ -128,7 +142,7 @@ class KnowledgeBaseConfig:
         config = cls(project_id=project_id)
         
         # 从环境变量覆盖嵌入提供商
-        if provider := os.getenv("EMBEDDING_PROVIDER"):
+        if provider := (os.getenv("KB_EMBEDDING_PROVIDER") or os.getenv("EMBEDDING_PROVIDER")):
             config.embedding_provider = provider
         
         # 从环境变量覆盖硅基流动配置
@@ -148,6 +162,22 @@ class KnowledgeBaseConfig:
             config.nvidia.model = model
         if input_type := os.getenv("NVIDIA_INPUT_TYPE"):
             config.nvidia.input_type = input_type
+
+        # 从环境变量覆盖本地 ONNX 配置
+        if model_dir := os.getenv("KB_ONNX_MODEL_DIR"):
+            config.local_onnx.model_dir = model_dir
+        if model_file := os.getenv("KB_ONNX_MODEL_FILE"):
+            config.local_onnx.model_file = model_file
+        if tokenizer_dir := os.getenv("KB_ONNX_TOKENIZER_DIR"):
+            config.local_onnx.tokenizer_dir = tokenizer_dir
+        if model_name := os.getenv("KB_ONNX_MODEL_NAME"):
+            config.local_onnx.model_name = model_name
+        if max_length := os.getenv("KB_ONNX_MAX_LENGTH"):
+            config.local_onnx.max_length = int(max_length)
+        if threads := os.getenv("KB_ONNX_THREADS"):
+            config.local_onnx.threads = int(threads)
+        if pooling := os.getenv("KB_ONNX_POOLING"):
+            config.local_onnx.pooling = pooling
             
         # 从环境变量覆盖数据目录
         if data_dir := os.getenv("KNOWLEDGE_BASE_DATA_DIR"):
@@ -159,12 +189,20 @@ class KnowledgeBaseConfig:
     def validate(self) -> list[str]:
         """验证配置有效性，返回错误列表"""
         errors = []
+        provider = str(self.embedding_provider or "").strip().lower()
         
         # 根据选择的提供商验证API密钥
-        if self.embedding_provider == "siliconflow" and not self.siliconflow.api_key:
+        if provider in {"api", "siliconflow"} and not self.siliconflow.api_key:
             errors.append("缺少硅基流动API密钥 (SILICONFLOW_API_KEY)")
-        elif self.embedding_provider == "nvidia" and not self.nvidia.api_key:
+        elif provider == "nvidia" and not self.nvidia.api_key:
             errors.append("缺少NVIDIA API密钥 (NVIDIA_API_KEY)")
+        elif provider in {"local", "local_onnx"}:
+            model_dir = Path(self.local_onnx.model_dir or "")
+            model_file = self.local_onnx.model_file or "model.onnx"
+            if not self.local_onnx.model_dir:
+                errors.append("缺少本地 ONNX 模型目录 (KB_ONNX_MODEL_DIR)")
+            elif not (model_dir / model_file).exists():
+                errors.append(f"本地 ONNX 模型文件不存在: {model_dir / model_file}")
         
         if self.chunking.chunk_size < self.chunking.min_chunk_size:
             errors.append(f"chunk_size ({self.chunking.chunk_size}) 不能小于 min_chunk_size ({self.chunking.min_chunk_size})")

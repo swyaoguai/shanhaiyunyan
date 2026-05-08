@@ -5,6 +5,7 @@
 """
 
 import io
+import os
 import re
 import json
 import logging
@@ -414,20 +415,28 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
             else:
                 config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
                 
-                has_api_key = False
+                has_embedding_config = False
                 if config_path.exists():
                     try:
                         kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                        has_api_key = bool(kb_config.get("siliconflow_api_key"))
+                        provider = str(kb_config.get("embedding_provider") or "api").lower()
+                        has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
+                        if provider in {"local", "local_onnx"}:
+                            has_embedding_config = bool(kb_config.get("onnx_model_dir"))
                     except Exception as e:
                         logger.warning(f"[ContinuousWriter] 读取知识库配置失败: {e}")
+                else:
+                    provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
+                    has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
+                    if provider in {"local", "local_onnx"}:
+                        has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
                 
-                if has_api_key:
+                if has_embedding_config:
                     kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
                     writer.set_knowledge_base(kb)
                     logger.info("[ContinuousWriter] ✓ 知识库已配置（使用真实向量存储）")
                 else:
-                    logger.info("[ContinuousWriter] 未配置向量化API Key，跳过知识库功能")
+                    logger.info("[ContinuousWriter] 未配置可用向量化 provider，跳过知识库功能")
         except ImportError as e:
             logger.error(f"[ContinuousWriter] 知识库初始化失败（ChromaDB不可用）: {e}")
         except ValueError as e:
@@ -810,14 +819,22 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
             from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE
             if CHROMA_AVAILABLE:
                 config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
-                has_api_key = False
+                has_embedding_config = False
                 if config_path.exists():
                     try:
                         kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                        has_api_key = bool(kb_config.get("siliconflow_api_key"))
+                        provider = str(kb_config.get("embedding_provider") or "api").lower()
+                        has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
+                        if provider in {"local", "local_onnx"}:
+                            has_embedding_config = bool(kb_config.get("onnx_model_dir"))
                     except Exception as e:
                         logger.warning(f"[ContinuousWrite] 读取知识库配置失败: {e}")
-                if has_api_key:
+                else:
+                    provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
+                    has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
+                    if provider in {"local", "local_onnx"}:
+                        has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
+                if has_embedding_config:
                     kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
                     for num in deleted_numbers:
                         try:

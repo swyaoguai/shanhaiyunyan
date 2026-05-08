@@ -80,6 +80,14 @@ class GlobalAPIConfigRequest(BaseModel):
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
 
 
+class APIKeyEntryRequest(BaseModel):
+    id: str = ""
+    key: str = ""
+    remark: str = ""
+    is_enabled: bool = True
+    created_at: str = ""
+
+
 class ShortStoryTimeoutSettingsRequest(BaseModel):
     synopsis: Optional[int] = None
     outline: Optional[int] = None
@@ -106,6 +114,7 @@ class AddAPIConfigRequest(BaseModel):
     name: str
     api_base: str
     api_key: str
+    api_keys: List[APIKeyEntryRequest] = Field(default_factory=list)
     models: List[str] = Field(default_factory=list)
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
@@ -116,6 +125,7 @@ class UpdateAPIConfigRequest(BaseModel):
     name: Optional[str] = None
     api_base: Optional[str] = None
     api_key: Optional[str] = None
+    api_keys: Optional[List[APIKeyEntryRequest]] = None
     models: Optional[List[str]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -222,10 +232,16 @@ class NovelToScriptBatchReconvertRequest(BaseModel):
 
 
 class KnowledgeBaseConfigRequest(BaseModel):
+    embedding_provider: str = "api"
     siliconflow_api_key: str = ""
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
     siliconflow_model: str = "BAAI/bge-m3"
     siliconflow_embedding_dim: int = 1024
+    onnx_model_dir: str = ""
+    onnx_model_file: str = "model.onnx"
+    onnx_tokenizer_dir: str = ""
+    onnx_max_length: int = 512
+    onnx_threads: Optional[int] = None
     chunk_size: int = 500
     chunk_overlap: int = 50
     vector_weight: float = 0.7

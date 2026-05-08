@@ -17,6 +17,8 @@ beautifulsoup4>=4.12.0
 # RAG & Knowledge Base
 numpy>=1.24.0
 chromadb>=0.4.0
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
 
 # System monitoring
 psutil>=5.9.0

@@ -26,6 +26,12 @@ from ..utils.token_stats import record_token_usage
 from ..utils.llm_params import normalize_max_tokens
 from ..constants import TIMEOUTS, RETRY_DEFAULTS
 from ..timeout_settings import get_llm_timeout_settings
+from .api_key_rotation import (
+    KeyUseResult,
+    classify_key_error,
+    get_api_key_rotation_service,
+    is_api_key_rotation_enabled,
+)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -115,6 +121,7 @@ class BaseAgent(ABC):
         )
         
         # 初始化OpenAI客户端
+        self._rotation_client_cache: Dict[tuple[str, str], Any] = {}
         self.client = self._create_client()
         
         # LLMClient代理（用于非openai_chat类型的API路由）
@@ -139,19 +146,22 @@ class BaseAgent(ABC):
         manager = get_config_manager()
         return manager.get_effective_config(self.name)
     
+    def _build_timeout_config(self) -> httpx.Timeout:
+        llm_timeouts = get_llm_timeout_settings()
+        return httpx.Timeout(
+            connect=float(llm_timeouts["connect"]),
+            read=float(llm_timeouts["read"]),
+            write=float(llm_timeouts["write"]),
+            pool=float(llm_timeouts["pool"]),
+        )
+
     def _create_client(self) -> AsyncOpenAI:
         """创建OpenAI客户端（仅用于openai_chat类型）"""
         # 优先使用Agent独立配置，否则使用全局配置
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
         llm_timeouts = get_llm_timeout_settings()
-        
-        timeout_config = httpx.Timeout(
-            connect=float(llm_timeouts["connect"]),
-            read=float(llm_timeouts["read"]),
-            write=float(llm_timeouts["write"]),
-            pool=float(llm_timeouts["pool"]),
-        )
+        timeout_config = self._build_timeout_config()
         
         logger.info(
             "[%s] Creating OpenAI client: base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss, max_retries=0",
@@ -163,12 +173,83 @@ class BaseAgent(ABC):
             llm_timeouts["pool"],
         )
         
+        return self._create_openai_client(api_key, api_base, timeout_config)
+
+    def _create_openai_client(self, api_key: str, api_base: str, timeout_config: httpx.Timeout) -> AsyncOpenAI:
         return AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
             timeout=timeout_config,
             max_retries=0  # 禁用SDK内部重试，使用我们自己的重试逻辑
         )
+
+    def _rotation_config_id(self) -> str:
+        return (
+            str(getattr(self.model_config, "api_config_id", "") or "").strip()
+            or f"{self._api_type}:{self.model_config.api_base or config.llm.api_base}"
+        )
+
+    def _rotation_entries(self):
+        if hasattr(self.model_config, "get_enabled_key_entries"):
+            return self.model_config.get_enabled_key_entries()
+        return []
+
+    def _should_use_key_rotation(self) -> bool:
+        return bool(self._api_type == "openai_chat" and is_api_key_rotation_enabled() and self._rotation_entries())
+
+    def _select_rotated_openai_client(self, exclude_key_ids: Optional[set[str]] = None):
+        if not self._should_use_key_rotation():
+            return self.client, None
+
+        service = get_api_key_rotation_service()
+        config_id = self._rotation_config_id()
+        selected = service.get_next_key(config_id, self._rotation_entries(), exclude_key_ids)
+        if not selected:
+            return None, None
+
+        api_base = self.model_config.api_base or config.llm.api_base
+        cache_key = (api_base, selected.id)
+        client = self._rotation_client_cache.get(cache_key)
+        if client is None:
+            client = self._create_openai_client(selected.key, api_base, self._build_timeout_config())
+            self._rotation_client_cache[cache_key] = client
+        return client, selected
+
+    async def _create_chat_completion_with_rotation(self, params: Dict[str, Any]):
+        if not self._should_use_key_rotation():
+            return await self.client.chat.completions.create(**params)
+
+        service = get_api_key_rotation_service()
+        config_id = self._rotation_config_id()
+        attempted: set[str] = set()
+        last_error: Optional[BaseException] = None
+
+        while True:
+            client, key_entry = self._select_rotated_openai_client(attempted)
+            if not client or not key_entry:
+                if last_error:
+                    raise last_error
+                raise RuntimeError("No available API key in rotation pool")
+
+            try:
+                response = await client.chat.completions.create(**params)
+            except Exception as exc:
+                last_error = exc
+                result = classify_key_error(exc)
+                service.report_key_result(config_id, key_entry.id, result, exc)
+                attempted.add(key_entry.id)
+                logger.warning(
+                    "[%s] key %s reported %s; trying another key if available",
+                    self.name,
+                    key_entry.preview,
+                    result.value,
+                )
+                if result == KeyUseResult.UNKNOWN:
+                    raise
+                continue
+
+            service.report_key_result(config_id, key_entry.id, KeyUseResult.SUCCESS)
+            return response
     
     def _get_or_create_llm_client(self):
         """获取或创建LLMClient实例（用于非openai_chat类型的API路由）"""
@@ -215,6 +296,7 @@ class BaseAgent(ABC):
         self.model_config = manager.update_config(self.name, **kwargs)
         self.client = self._create_client()
         self._llm_client = None  # 重置LLMClient以使用新配置
+        self._rotation_client_cache.clear()
         logger.info(f"[{self.name}] Config updated, model: {self._get_model_name()}, api_type: {self._api_type}")
 
     def refresh_model_config(self) -> bool:
@@ -229,7 +311,8 @@ class BaseAgent(ABC):
 
         changed = any([
             current.api_base != latest.api_base,
-            current.api_key != latest.api_key,
+            current.get_primary_key() != latest.get_primary_key(),
+            [entry.id for entry in current.get_enabled_key_entries()] != [entry.id for entry in latest.get_enabled_key_entries()],
             current.model != latest.model,
             current.temperature != latest.temperature,
             current.max_tokens != latest.max_tokens,
@@ -244,6 +327,7 @@ class BaseAgent(ABC):
         self.model_config = latest
         self.client = self._create_client()
         self._llm_client = None  # 重置LLMClient以使用新配置
+        self._rotation_client_cache.clear()
         logger.info(
             f"[{self.name}] Effective config refreshed: model={self._get_model_name()}, "
             f"use_global={self.model_config.use_global}, api_type={self._api_type}"
@@ -710,7 +794,7 @@ class BaseAgent(ABC):
                     )
                     return content
                 try:
-                    response = await self.client.chat.completions.create(**params)
+                    response = await self._create_chat_completion_with_rotation(params)
                 except Exception as create_error:
                     if self._should_force_stream_fallback(create_error, stream=stream):
                         logger.warning(
@@ -1090,7 +1174,7 @@ class BaseAgent(ABC):
     async def _stream_response(self, params: dict) -> AsyncGenerator[str, None]:
         """流式响应生成器"""
         try:
-            response = await self.client.chat.completions.create(**params)
+            response = await self._create_chat_completion_with_rotation(params)
             
             # 验证响应是否是流式生成器
             if isinstance(response, str):

@@ -19,12 +19,131 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class APIConfigItem:
+class APIKeyEntry:
+    """单个 API Key 条目，支持同 provider 下多 key 轮询。"""
+
+    id: str = ""
+    key: str = ""
+    remark: str = ""
+    is_enabled: bool = True
+    created_at: str = ""
+
+    def __post_init__(self):
+        self.id = str(self.id or "").strip() or str(uuid.uuid4())[:8]
+        self.key = str(self.key or "").strip()
+        self.remark = str(self.remark or "").strip()
+        if not self.created_at:
+            from datetime import datetime
+            self.created_at = datetime.now().isoformat()
+
+    @property
+    def preview(self) -> str:
+        """返回安全展示用 key preview，不泄漏完整 key。"""
+        if not self.key:
+            return ""
+        return self.key[:8] + "****" if len(self.key) > 8 else "****"
+
+    def to_public_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "remark": self.remark,
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at,
+            "key_set": bool(self.key),
+            "key_preview": self.preview,
+        }
+
+
+def _coerce_api_key_entries(entries: Any) -> List[APIKeyEntry]:
+    """兼容从 JSON/Pydantic/dataclass 还原 key entries。"""
+    if not entries:
+        return []
+    coerced: List[APIKeyEntry] = []
+    for item in entries:
+        if isinstance(item, APIKeyEntry):
+            coerced.append(item)
+            continue
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        elif hasattr(item, "dict"):
+            item = item.dict()
+        if not isinstance(item, dict):
+            continue
+        payload = dict(item)
+        if "enabled" in payload and "is_enabled" not in payload:
+            payload["is_enabled"] = payload.pop("enabled")
+        allowed = {"id", "key", "remark", "is_enabled", "created_at"}
+        coerced.append(APIKeyEntry(**{k: v for k, v in payload.items() if k in allowed}))
+    return coerced
+
+
+class APIKeyPoolMixin:
+    """Shared helpers for config objects that expose an API key pool."""
+
+    api_key: str
+    api_keys: List[APIKeyEntry]
+
+    def normalize_key_pool(self) -> None:
+        self.api_key = str(getattr(self, "api_key", "") or "").strip()
+        self.api_keys = _coerce_api_key_entries(getattr(self, "api_keys", []))
+        if not self.api_keys and self.api_key:
+            self.api_keys = [
+                APIKeyEntry(
+                    id="legacy",
+                    key=self.api_key,
+                    remark="legacy api_key",
+                    is_enabled=True,
+                )
+            ]
+        if self.api_keys and not self.api_key:
+            primary = self.get_primary_key()
+            if primary:
+                self.api_key = primary
+
+    def set_primary_key(self, api_key: str) -> None:
+        key = str(api_key or "").strip()
+        self.api_key = key
+        self.api_keys = _coerce_api_key_entries(getattr(self, "api_keys", []))
+        if not key:
+            return
+        if not self.api_keys:
+            self.api_keys = [
+                APIKeyEntry(
+                    id="legacy",
+                    key=key,
+                    remark="legacy api_key",
+                    is_enabled=True,
+                )
+            ]
+            return
+        self.api_keys[0].key = key
+        self.api_keys[0].is_enabled = True
+
+    def get_enabled_key_entries(self) -> List[APIKeyEntry]:
+        self.api_keys = _coerce_api_key_entries(getattr(self, "api_keys", []))
+        return [entry for entry in self.api_keys if entry.is_enabled and entry.key]
+
+    def get_primary_key(self) -> str:
+        enabled = self.get_enabled_key_entries()
+        if enabled:
+            return enabled[0].key
+        for entry in self.api_keys:
+            if entry.key:
+                return entry.key
+        return str(getattr(self, "api_key", "") or "").strip()
+
+    def has_auth(self) -> bool:
+        return bool(self.get_primary_key())
+
+
+@dataclass
+class APIConfigItem(APIKeyPoolMixin):
     """单个API配置项"""
     id: str = ""
     name: str = ""
     api_base: str = ""
     api_key: str = ""
+    api_keys: List[APIKeyEntry] = field(default_factory=list)
     models: List[str] = field(default_factory=list)  # 支持多个模型
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
@@ -37,10 +156,11 @@ class APIConfigItem:
         if not self.created_at:
             from datetime import datetime
             self.created_at = datetime.now().isoformat()
+        self.normalize_key_pool()
     
     def is_configured(self) -> bool:
         """检查是否已配置"""
-        return bool(self.api_base and self.api_key and self.models)
+        return bool(self.api_base and self.has_auth() and self.models)
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（隐藏API Key）"""
@@ -50,6 +170,7 @@ class APIConfigItem:
             "api_base": self.api_base,
             "api_key_set": bool(self.api_key),
             "api_key_preview": self.api_key[:8] + "****" if len(self.api_key) > 8 else "",
+            "api_keys": [entry.to_public_dict() for entry in self.api_keys],
             "models": self.models,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -92,27 +213,32 @@ class MultiAPIConfig:
 
 
 @dataclass
-class GlobalAPIConfig:
+class GlobalAPIConfig(APIKeyPoolMixin):
     """全局默认API配置（向后兼容）"""
     api_base: str = ""
     api_key: str = ""
+    api_keys: List[APIKeyEntry] = field(default_factory=list)
     model: str = ""
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
     api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
-    
+
+    def __post_init__(self):
+        self.normalize_key_pool()
+
     def is_configured(self) -> bool:
         """检查是否已配置"""
-        return bool(self.api_base and self.api_key and self.model)
+        return bool(self.api_base and self.has_auth() and self.model)
 
 
 @dataclass
-class AgentModelConfig:
+class AgentModelConfig(APIKeyPoolMixin):
     """单个Agent的模型配置"""
     agent_name: str = ""
     api_config_id: str = ""
     api_base: str = ""
     api_key: str = ""
+    api_keys: List[APIKeyEntry] = field(default_factory=list)
     model: str = ""
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
@@ -120,10 +246,13 @@ class AgentModelConfig:
     description: str = ""
     use_global: bool = True  # 是否使用全局配置
     api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
-    
+
+    def __post_init__(self):
+        self.normalize_key_pool()
+
     def is_configured(self) -> bool:
         """检查是否已配置"""
-        return bool(self.api_base and self.api_key and self.model)
+        return bool(self.api_base and self.has_auth() and self.model)
 
 
 class AgentConfigManager:
@@ -325,9 +454,11 @@ class AgentConfigManager:
                 name="默认配置",
                 api_base=self.global_config.api_base,
                 api_key=self.global_config.api_key,
+                api_keys=self.global_config.api_keys,
                 models=[self.global_config.model] if self.global_config.model else [],
                 temperature=self.global_config.temperature,
-                max_tokens=self.global_config.max_tokens
+                max_tokens=self.global_config.max_tokens,
+                api_type=self.global_config.api_type,
             )
             self.multi_config = MultiAPIConfig(
                 configs=[config_item],
@@ -344,6 +475,7 @@ class AgentConfigManager:
             self.global_config = GlobalAPIConfig(
                 api_base=active.api_base,
                 api_key=active.api_key,
+                api_keys=active.api_keys,
                 model=self.multi_config.get_effective_model(),
                 temperature=active.temperature,
                 max_tokens=active.max_tokens,
@@ -425,7 +557,7 @@ class AgentConfigManager:
             
             # 更新API配置相关的环境变量
             env_content["OPENAI_API_BASE"] = active.api_base
-            env_content["OPENAI_API_KEY"] = active.api_key
+            env_content["OPENAI_API_KEY"] = active.get_primary_key()
             env_content["OPENAI_MODEL"] = self.multi_config.get_effective_model()
             
             # 确保其他必要的环境变量存在
@@ -457,7 +589,7 @@ class AgentConfigManager:
         if active:
             # 更新现有配置
             active.api_base = api_base
-            active.api_key = api_key
+            active.set_primary_key(api_key)
             if model and model not in active.models:
                 active.models.append(model)
             active.temperature = temperature
@@ -486,13 +618,15 @@ class AgentConfigManager:
     def add_api_config(self, name: str, api_base: str, api_key: str,
                        models: List[str], temperature: float = LLM_DEFAULTS.TEMPERATURE,
                        max_tokens: int = LLM_DEFAULTS.MAX_TOKENS,
-                       api_type: str = "openai_chat") -> APIConfigItem:
+                       api_type: str = "openai_chat",
+                       api_keys: Optional[List[APIKeyEntry]] = None) -> APIConfigItem:
         """添加新的API配置"""
         normalized_max_tokens = self._normalize_config_max_tokens(max_tokens, source=f"APIConfig:add:{name}")
         config_item = APIConfigItem(
             name=name,
             api_base=api_base,
             api_key=api_key,
+            api_keys=api_keys or [],
             models=models,
             temperature=temperature,
             max_tokens=normalized_max_tokens,
@@ -521,7 +655,13 @@ class AgentConfigManager:
                                 value,
                                 source=f"APIConfig:update:{config.name or config.id}",
                             )
-                        setattr(config, key, value)
+                        if key == "api_key":
+                            config.set_primary_key(value)
+                        elif key == "api_keys":
+                            config.api_keys = _coerce_api_key_entries(value)
+                            config.api_key = config.get_primary_key()
+                        else:
+                            setattr(config, key, value)
                 self._sync_global_from_multi()
                 # 如果更新的是当前激活的配置，同步到.env文件
                 is_active = (config_id == self.multi_config.active_config_id)
@@ -618,7 +758,8 @@ class AgentConfigManager:
         如果Agent使用全局配置且全局已配置，则返回合并后的配置
         """
         config = self.get_config(agent_name)
-        global_auth_configured = bool(self.global_config.api_base and self.global_config.api_key)
+        self._sync_global_from_multi()
+        global_auth_configured = bool(self.global_config.api_base and self.global_config.has_auth())
         selected_api_config = self._get_api_config_by_id(config.api_config_id) if not config.use_global else None
 
         # 如果Agent选择使用全局配置，且全局配置已设置
@@ -627,9 +768,10 @@ class AgentConfigManager:
             effective_model = self.global_config.model or config.model
             return AgentModelConfig(
                 agent_name=config.agent_name,
-                api_config_id=config.api_config_id,
+                api_config_id=self.multi_config.active_config_id or config.api_config_id,
                 api_base=self.global_config.api_base,
-                api_key=self.global_config.api_key,
+                api_key=self.global_config.get_primary_key(),
+                api_keys=self.global_config.api_keys,
                 model=effective_model,
                 temperature=self.global_config.temperature if self.global_config.model else config.temperature,
                 max_tokens=self.global_config.max_tokens if self.global_config.model else config.max_tokens,
@@ -642,7 +784,8 @@ class AgentConfigManager:
         # 独立配置优先按 api_config_id 解析真实 API 配置，避免仅靠 api_base 误匹配。
         if not config.use_global and selected_api_config:
             merged_api_base = selected_api_config.api_base or config.api_base
-            merged_api_key = selected_api_config.api_key or config.api_key
+            merged_api_key = selected_api_config.get_primary_key() or config.get_primary_key()
+            merged_api_keys = selected_api_config.api_keys or config.api_keys
             merged_api_type = selected_api_config.api_type or config.api_type
 
             selected_model = config.model
@@ -651,12 +794,13 @@ class AgentConfigManager:
 
             if global_auth_configured:
                 merged_api_base = merged_api_base or self.global_config.api_base
-                merged_api_key = merged_api_key or self.global_config.api_key
+                merged_api_key = merged_api_key or self.global_config.get_primary_key()
+                merged_api_keys = merged_api_keys or self.global_config.api_keys
                 selected_model = selected_model or self.global_config.model
 
             if (
                 merged_api_base != config.api_base or
-                merged_api_key != config.api_key or
+                merged_api_key != config.get_primary_key() or
                 selected_model != config.model
             ):
                 return AgentModelConfig(
@@ -664,6 +808,7 @@ class AgentConfigManager:
                     api_config_id=config.api_config_id,
                     api_base=merged_api_base,
                     api_key=merged_api_key,
+                    api_keys=merged_api_keys,
                     model=selected_model,
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
@@ -676,12 +821,13 @@ class AgentConfigManager:
         # 独立配置缺失关键字段时，回退使用全局配置补齐缺失值，避免认证失败。
         if not config.use_global and global_auth_configured:
             merged_api_base = config.api_base or self.global_config.api_base
-            merged_api_key = config.api_key or self.global_config.api_key
+            merged_api_key = config.get_primary_key() or self.global_config.get_primary_key()
+            merged_api_keys = config.api_keys or self.global_config.api_keys
             merged_model = config.model or self.global_config.model
 
             if (
                 merged_api_base != config.api_base or
-                merged_api_key != config.api_key or
+                merged_api_key != config.get_primary_key() or
                 merged_model != config.model
             ):
                 return AgentModelConfig(
@@ -689,6 +835,7 @@ class AgentConfigManager:
                     api_config_id=config.api_config_id,
                     api_base=merged_api_base,
                     api_key=merged_api_key,
+                    api_keys=merged_api_keys,
                     model=merged_model,
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,

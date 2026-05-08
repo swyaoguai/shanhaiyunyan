@@ -18,7 +18,12 @@ from .data_layer.vector_store import VectorStore, MockVectorStore, CHROMA_AVAILA
 from .data_layer.fulltext_store import FullTextStore
 from .data_layer.metadata_store import MetadataStore, ChapterInfo
 from .logic_layer.chunker import TextChunker
-from .logic_layer.embeddings import EmbeddingService, MockEmbeddingService
+from .logic_layer.embeddings import (
+    EmbeddingService,
+    LocalOnnxEmbeddingService,
+    MockEmbeddingService,
+    NVIDIAEmbeddingService,
+)
 from .logic_layer.chapter_marker import ChapterMarker
 from .application_layer.hybrid_search import HybridSearch, SearchResponse, SearchType
 from .application_layer.knowledge_api import KnowledgeAPI, AddChapterResult
@@ -127,10 +132,15 @@ class KnowledgeBase:
         self._chunker = TextChunker(self.config.chunking)
         self._chapter_marker = ChapterMarker()
         
+        provider = str(self.config.embedding_provider or "").strip().lower()
         if use_mock_embeddings:
             self._embedding_service = MockEmbeddingService(
                 embedding_dim=self.config.siliconflow.embedding_dim
             )
+        elif provider == "nvidia":
+            self._embedding_service = NVIDIAEmbeddingService(self.config.nvidia)
+        elif provider in {"local", "local_onnx"}:
+            self._embedding_service = LocalOnnxEmbeddingService(self.config.local_onnx)
         else:
             self._embedding_service = EmbeddingService(self.config.siliconflow)
         

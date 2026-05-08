@@ -10,6 +10,7 @@
 
 import logging
 import uuid
+import hashlib
 from collections import defaultdict
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -116,6 +117,7 @@ class KnowledgeAPI:
             # 向量化
             chunk_texts = [chunk.text for chunk in chunks]
             embeddings = self.embedding_service.embed_batch(chunk_texts)
+            embedding_info = self._get_embedding_info()
             
             # 准备存储数据
             chunk_ids = [f"{chapter_id}_chunk_{i}" for i in range(chunk_count)]
@@ -127,6 +129,10 @@ class KnowledgeAPI:
                     "chapter_id": chapter_id,
                     "chunk_index": i,
                     "word_count": chunk.word_count,
+                    "embedding_provider": embedding_info.get("provider", embedding_info.get("base_url", "api")),
+                    "embedding_model": embedding_info.get("model", ""),
+                    "embedding_dim": embedding_info.get("embedding_dim", 0),
+                    "content_hash": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
                     **(metadata or {})
                 }
                 chunk_metadatas.append(chunk_metadata)
@@ -189,6 +195,13 @@ class KnowledgeAPI:
                 success=False,
                 error=str(e)
             )
+
+    def _get_embedding_info(self) -> dict:
+        try:
+            info = self.embedding_service.get_model_info()
+            return info if isinstance(info, dict) else {}
+        except Exception:
+            return {}
     
     def update_chapter(
         self,

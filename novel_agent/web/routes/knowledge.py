@@ -66,10 +66,16 @@ async def get_knowledge_base_config():
     config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
     
     default_config = {
+        "embedding_provider": os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")),
         "siliconflow_api_key": os.getenv("SILICONFLOW_API_KEY", ""),
         "siliconflow_base_url": os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
         "siliconflow_model": os.getenv("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3"),
         "siliconflow_embedding_dim": int(os.getenv("SILICONFLOW_EMBEDDING_DIM", "1024")),
+        "onnx_model_dir": os.getenv("KB_ONNX_MODEL_DIR", ""),
+        "onnx_model_file": os.getenv("KB_ONNX_MODEL_FILE", "model.onnx"),
+        "onnx_tokenizer_dir": os.getenv("KB_ONNX_TOKENIZER_DIR", ""),
+        "onnx_max_length": int(os.getenv("KB_ONNX_MAX_LENGTH", "512")),
+        "onnx_threads": int(os.getenv("KB_ONNX_THREADS", "0") or "0") or None,
         "chunk_size": 500,
         "chunk_overlap": 50,
         "vector_weight": 0.7,
@@ -89,11 +95,17 @@ async def get_knowledge_base_config():
     
     api_key = default_config.get("siliconflow_api_key", "")
     return JSONResponse({
+        "embedding_provider": default_config.get("embedding_provider", "api"),
         "siliconflow_api_key": api_key[:8] + "****" if len(api_key) > 8 else "",
         "siliconflow_api_key_set": bool(api_key),
         "siliconflow_base_url": default_config.get("siliconflow_base_url", ""),
         "siliconflow_model": default_config.get("siliconflow_model", ""),
         "siliconflow_embedding_dim": default_config.get("siliconflow_embedding_dim", 1024),
+        "onnx_model_dir": default_config.get("onnx_model_dir", ""),
+        "onnx_model_file": default_config.get("onnx_model_file", "model.onnx"),
+        "onnx_tokenizer_dir": default_config.get("onnx_tokenizer_dir", ""),
+        "onnx_max_length": default_config.get("onnx_max_length", 512),
+        "onnx_threads": default_config.get("onnx_threads"),
         "chunk_size": default_config.get("chunk_size", 500),
         "chunk_overlap": default_config.get("chunk_overlap", 50),
         "vector_weight": default_config.get("vector_weight", 0.7),
@@ -124,10 +136,16 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         api_key = existing_config.get("siliconflow_api_key", "")
     
     new_config = {
+        "embedding_provider": request.embedding_provider,
         "siliconflow_api_key": api_key,
         "siliconflow_base_url": request.siliconflow_base_url,
         "siliconflow_model": request.siliconflow_model,
         "siliconflow_embedding_dim": request.siliconflow_embedding_dim,
+        "onnx_model_dir": request.onnx_model_dir,
+        "onnx_model_file": request.onnx_model_file,
+        "onnx_tokenizer_dir": request.onnx_tokenizer_dir,
+        "onnx_max_length": request.onnx_max_length,
+        "onnx_threads": request.onnx_threads,
         "chunk_size": request.chunk_size,
         "chunk_overlap": request.chunk_overlap,
         "vector_weight": request.vector_weight,
@@ -161,18 +179,30 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
 
         if api_key:
             env_content["SILICONFLOW_API_KEY"] = api_key
+        env_content["KB_EMBEDDING_PROVIDER"] = request.embedding_provider
         env_content["SILICONFLOW_BASE_URL"] = request.siliconflow_base_url
         env_content["SILICONFLOW_EMBEDDING_MODEL"] = request.siliconflow_model
         env_content["SILICONFLOW_EMBEDDING_DIM"] = str(request.siliconflow_embedding_dim)
+        env_content["KB_ONNX_MODEL_DIR"] = request.onnx_model_dir
+        env_content["KB_ONNX_MODEL_FILE"] = request.onnx_model_file
+        env_content["KB_ONNX_TOKENIZER_DIR"] = request.onnx_tokenizer_dir
+        env_content["KB_ONNX_MAX_LENGTH"] = str(request.onnx_max_length)
+        env_content["KB_ONNX_THREADS"] = "" if request.onnx_threads is None else str(request.onnx_threads)
 
         # 保留已有无关键，避免全量覆写导致环境变量丢失
         env_content.setdefault("OPENAI_API_KEY", "")
         env_content.setdefault("OPENAI_API_BASE", "")
         env_content.setdefault("OPENAI_MODEL", "gpt-4")
         env_content.setdefault("SILICONFLOW_API_KEY", "")
+        env_content.setdefault("KB_EMBEDDING_PROVIDER", "api")
         env_content.setdefault("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         env_content.setdefault("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3")
         env_content.setdefault("SILICONFLOW_EMBEDDING_DIM", "1024")
+        env_content.setdefault("KB_ONNX_MODEL_DIR", "")
+        env_content.setdefault("KB_ONNX_MODEL_FILE", "model.onnx")
+        env_content.setdefault("KB_ONNX_TOKENIZER_DIR", "")
+        env_content.setdefault("KB_ONNX_MAX_LENGTH", "512")
+        env_content.setdefault("KB_ONNX_THREADS", "")
         env_content.setdefault("HOST", "0.0.0.0")
         env_content.setdefault("PORT", str(SERVER_DEFAULTS.PORT))
         env_content.setdefault("DEBUG", "false")
@@ -415,19 +445,27 @@ async def save_infinite_summary(request: dict):
     }
 
     config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
-    has_api_key = False
+    has_embedding_config = False
     if config_path.exists():
         try:
             kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-            has_api_key = bool((kb_config.get("siliconflow_api_key") or "").strip())
+            provider = str(kb_config.get("embedding_provider") or "api").lower()
+            has_embedding_config = bool((kb_config.get("siliconflow_api_key") or "").strip())
+            if provider in {"local", "local_onnx"}:
+                has_embedding_config = bool((kb_config.get("onnx_model_dir") or "").strip())
         except Exception as e:
             logger.warning(f"[Knowledge] 读取知识库配置失败: {e}")
+    else:
+        provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
+        has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
+        if provider in {"local", "local_onnx"}:
+            has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
 
-    if not has_api_key:
+    if not has_embedding_config:
         return JSONResponse(
             {
                 "success": False,
-                "error": "知识库向量API未配置，剧情总结存储暂不可用",
+                "error": "知识库向量 provider 未配置，剧情总结存储暂不可用",
                 "not_ready": True,
             },
             status_code=503,

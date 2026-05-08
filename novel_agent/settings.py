@@ -73,8 +73,14 @@ class KnowledgeBaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KB_", env_file=".env", extra="ignore")
 
     enabled: bool = True
+    embedding_provider: str = "api"
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-ada-002"
+    onnx_model_dir: str = ""
+    onnx_model_file: str = "model.onnx"
+    onnx_tokenizer_dir: str = ""
+    onnx_max_length: int = 512
+    onnx_threads: Optional[int] = None
     chunk_size: int = 500
     chunk_overlap: int = 50
 

@@ -31,6 +31,12 @@ from ..timeout_settings import get_llm_timeout_settings
 from ..utils.llm_params import normalize_max_tokens
 from ..utils.metrics import get_metrics_collector
 from ..utils.token_stats import record_token_usage
+from .api_key_rotation import (
+    KeyUseResult,
+    classify_key_error,
+    get_api_key_rotation_service,
+    is_api_key_rotation_enabled,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +106,7 @@ class LLMClient:
 
         # 根据 api_type 创建对应的客户端
         self._api_type = self._resolve_api_type()
+        self._rotation_client_cache: Dict[Tuple[str, str], Any] = {}
         self._client = self._create_client()
 
         # 指标收集器
@@ -116,18 +123,22 @@ class LLMClient:
             api_type = API_TYPE_OPENAI_CHAT
         return api_type
 
+    def _build_timeout_config(self) -> httpx.Timeout:
+        llm_timeouts = get_llm_timeout_settings()
+        return httpx.Timeout(
+            connect=float(llm_timeouts["connect"]),
+            read=float(llm_timeouts["read"]),
+            write=float(llm_timeouts["write"]),
+            pool=float(llm_timeouts["pool"]),
+        )
+
     def _create_client(self):
         """根据 api_type 创建对应的客户端"""
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
         llm_timeouts = get_llm_timeout_settings()
 
-        timeout_config = httpx.Timeout(
-            connect=float(llm_timeouts["connect"]),
-            read=float(llm_timeouts["read"]),
-            write=float(llm_timeouts["write"]),
-            pool=float(llm_timeouts["pool"]),
-        )
+        timeout_config = self._build_timeout_config()
 
         logger.info(
             "[LLMClient:%s] Creating client: api_type=%s, base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss",
@@ -143,16 +154,90 @@ class LLMClient:
         if self._api_type == API_TYPE_ANTHROPIC:
             return self._create_anthropic_client(api_key, api_base, timeout_config)
         else:
-            # OpenAI Chat 和 OpenAI Responses 都使用 AsyncOpenAI 客户端
-            kwargs = {
-                "api_key": api_key,
-                "base_url": api_base,
-                "timeout": timeout_config,
-                "max_retries": 0,  # 禁用SDK内部重试
-            }
-            if self._is_mimo_api_base(api_base):
-                kwargs["default_headers"] = {"api-key": api_key}
-            return AsyncOpenAI(**kwargs)
+            return self._create_openai_client(api_key, api_base, timeout_config)
+
+    def _create_openai_client(self, api_key: str, api_base: str, timeout_config: httpx.Timeout):
+        """创建 OpenAI-compatible 客户端。"""
+        kwargs = {
+            "api_key": api_key,
+            "base_url": api_base,
+            "timeout": timeout_config,
+            "max_retries": 0,  # 禁用SDK内部重试
+        }
+        if self._is_mimo_api_base(api_base):
+            kwargs["default_headers"] = {"api-key": api_key}
+        return AsyncOpenAI(**kwargs)
+
+    def _rotation_config_id(self) -> str:
+        return (
+            str(getattr(self.model_config, "api_config_id", "") or "").strip()
+            or f"{self._api_type}:{self.model_config.api_base or config.llm.api_base}"
+        )
+
+    def _rotation_entries(self):
+        if hasattr(self.model_config, "get_enabled_key_entries"):
+            return self.model_config.get_enabled_key_entries()
+        return []
+
+    def _should_use_key_rotation(self) -> bool:
+        if self._api_type == API_TYPE_ANTHROPIC:
+            return False
+        return bool(is_api_key_rotation_enabled() and self._rotation_entries())
+
+    def _select_rotated_openai_client(self, exclude_key_ids: Optional[set[str]] = None):
+        if not self._should_use_key_rotation():
+            return self._client, None
+
+        service = get_api_key_rotation_service()
+        config_id = self._rotation_config_id()
+        selected = service.get_next_key(config_id, self._rotation_entries(), exclude_key_ids)
+        if not selected:
+            return None, None
+
+        api_base = self.model_config.api_base or config.llm.api_base
+        cache_key = (api_base, selected.id)
+        client = self._rotation_client_cache.get(cache_key)
+        if client is None:
+            client = self._create_openai_client(selected.key, api_base, self._build_timeout_config())
+            self._rotation_client_cache[cache_key] = client
+        return client, selected
+
+    async def _run_openai_operation_with_rotation(self, operation):
+        """Run one OpenAI-compatible operation, trying another key on key-level failures."""
+        if not self._should_use_key_rotation():
+            return await operation(self._client)
+
+        service = get_api_key_rotation_service()
+        config_id = self._rotation_config_id()
+        attempted: set[str] = set()
+        last_error: Optional[BaseException] = None
+
+        while True:
+            client, key_entry = self._select_rotated_openai_client(attempted)
+            if not client or not key_entry:
+                if last_error:
+                    raise last_error
+                raise RuntimeError("No available API key in rotation pool")
+
+            try:
+                response = await operation(client)
+            except Exception as exc:
+                last_error = exc
+                result = classify_key_error(exc)
+                service.report_key_result(config_id, key_entry.id, result, exc)
+                attempted.add(key_entry.id)
+                logger.warning(
+                    "[LLMClient:%s] key %s reported %s; trying another key if available",
+                    self.metrics_namespace,
+                    key_entry.preview,
+                    result.value,
+                )
+                if result == KeyUseResult.UNKNOWN:
+                    raise
+                continue
+
+            service.report_key_result(config_id, key_entry.id, KeyUseResult.SUCCESS)
+            return response
 
     def _create_anthropic_client(self, api_key: str, api_base: str, timeout_config: httpx.Timeout):
         """创建 Anthropic 客户端"""
@@ -212,6 +297,7 @@ class LLMClient:
         """更新配置并重建客户端"""
         self.model_config = model_config
         self._api_type = self._resolve_api_type()
+        self._rotation_client_cache.clear()
         self._client = self._create_client()
         logger.info(f"[LLMClient:{self.metrics_namespace}] Config updated, model: {self.model_name}, api_type: {self._api_type}")
 
@@ -354,7 +440,9 @@ class LLMClient:
             if stream:
                 return self._stream_openai_chat(params)
             else:
-                response = await self._client.chat.completions.create(**params)
+                response = await self._run_openai_operation_with_rotation(
+                    lambda client: client.chat.completions.create(**params)
+                )
                 content = response.choices[0].message.content
 
                 # 提取token使用
@@ -390,7 +478,9 @@ class LLMClient:
 
     async def _stream_openai_chat(self, params: dict) -> AsyncGenerator[str, None]:
         """OpenAI Chat 流式响应生成器"""
-        response = await self._client.chat.completions.create(**params)
+        response = await self._run_openai_operation_with_rotation(
+            lambda client: client.chat.completions.create(**params)
+        )
         async for chunk in response:
             if chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
@@ -444,7 +534,9 @@ class LLMClient:
             if stream:
                 return self._stream_openai_responses(params)
             else:
-                response = await self._client.responses.create(**params)
+                response = await self._run_openai_operation_with_rotation(
+                    lambda client: client.responses.create(**params)
+                )
 
                 # 提取内容 - Responses API 的输出格式
                 content = self._extract_responses_content(response)
@@ -549,7 +641,9 @@ class LLMClient:
             "[LLMClient:%s] Retrying Responses API with string input fallback",
             self.metrics_namespace,
         )
-        fallback_response = await self._client.responses.create(**fallback_params)
+        fallback_response = await self._run_openai_operation_with_rotation(
+            lambda client: client.responses.create(**fallback_params)
+        )
         fallback_content = self._extract_responses_content(fallback_response)
         if str(fallback_content or "").strip():
             return fallback_content
@@ -666,7 +760,9 @@ class LLMClient:
 
     async def _stream_openai_responses(self, params: dict) -> AsyncGenerator[str, None]:
         """OpenAI Responses 流式响应生成器"""
-        stream = await self._client.responses.create(stream=True, **params)
+        stream = await self._run_openai_operation_with_rotation(
+            lambda client: client.responses.create(stream=True, **params)
+        )
         async for event in stream:
             # Responses API 流式事件
             event_type = getattr(event, 'type', '')

@@ -9,6 +9,7 @@
 - 模型切换连贯：支持换模型后保持一致性
 """
 
+import os
 import re
 from typing import Dict, Any, Optional, List
 from .base_agent import BaseAgent, AgentCapability
@@ -104,6 +105,23 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
         # 从知识库获取写作上下文
         kb_context = await self._get_kb_context(chapter_outline, chapter_number)
+        semantic_recall_context: Dict[str, Any] = {}
+        if self._semantic_recall_enabled():
+            recall_query = self.build_semantic_recall_query(
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                chapter_outline=chapter_outline,
+                chapter_planning=chapter_planning,
+                characters=characters,
+                plot_thread=plot_thread,
+                eventlines=eventlines,
+                world=world,
+                discussion_context=discussion_context,
+            )
+            semantic_recall_context = await self._get_semantic_recall_context(
+                query=recall_query,
+                chapter_number=chapter_number,
+            )
 
         # 构建约束提示词
         constraint_prompt = self.build_constraint_prompt()
@@ -153,7 +171,11 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             discussion_context=discussion_context,
             chapter_planning=chapter_planning,
             plot_thread_state=plot_thread_prompt,
+            semantic_recall=self._format_semantic_recall_context(semantic_recall_context),
         )
+        semantic_recall_block = self._format_semantic_recall_context(semantic_recall_context)
+        if prompt and semantic_recall_block:
+            prompt = f"{prompt}\n\n{semantic_recall_block}"
         if not prompt:
             prompt = f"""请撰写以下章节：
 
@@ -196,6 +218,8 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 {aux_memory_prompt}
 
 {constraint_prompt}
+
+{semantic_recall_block}
 
 {self._format_kb_context(kb_context)}
 
@@ -248,7 +272,139 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             "stats": {"chars": total_chars, "nonspace_chars": nonspace_chars},
             "dead_characters": self.get_dead_characters()
         }
-    
+
+    @staticmethod
+    def _semantic_recall_enabled() -> bool:
+        value = os.getenv("ENABLE_CHAPTER_SEMANTIC_RECALL", "false").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def build_semantic_recall_query(
+        self,
+        *,
+        chapter_number: int,
+        chapter_title: str,
+        chapter_outline: Any,
+        chapter_planning: Any = "",
+        characters: Any = None,
+        plot_thread: Any = None,
+        eventlines: Any = None,
+        world: Any = None,
+        discussion_context: str = "",
+    ) -> str:
+        """构造章节写作前的语义召回查询。"""
+        sections: List[str] = [f"当前章节：第{chapter_number}章 {chapter_title}".strip()]
+
+        def append(label: str, value: Any, limit: int = 700) -> None:
+            text = self._semantic_recall_text(value)
+            if text:
+                sections.append(f"{label}：{text[:limit]}")
+
+        append("当前章节目标和章纲", chapter_outline, 1000)
+        append("章纲/细纲约束", chapter_planning, 800)
+        append("出场角色", characters, 700)
+        append("剧情线程/伏笔冲突", plot_thread, 900)
+        append("事件线", eventlines, 900)
+        append("世界规则", world, 900)
+        append("用户明确要求", discussion_context, 700)
+
+        query = "\n".join(part for part in sections if str(part).strip())
+        return query[:3000]
+
+    def _semantic_recall_text(self, value: Any) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, str):
+            return re.sub(r"\s+", " ", value).strip()
+        if isinstance(value, dict):
+            preferred_keys = [
+                "title", "summary", "goal", "objective", "conflict", "foreshadowing",
+                "writer_guidance", "active_thread_id", "rules", "events", "name",
+            ]
+            parts: List[str] = []
+            for key in preferred_keys:
+                if key in value:
+                    text = self._semantic_recall_text(value.get(key))
+                    if text:
+                        parts.append(f"{key}:{text}")
+            if not parts:
+                for key, item in list(value.items())[:12]:
+                    text = self._semantic_recall_text(item)
+                    if text:
+                        parts.append(f"{key}:{text}")
+            return "；".join(parts)
+        if isinstance(value, list):
+            parts = [self._semantic_recall_text(item) for item in value[:12]]
+            return "；".join(part for part in parts if part)
+        return re.sub(r"\s+", " ", str(value)).strip()
+
+    async def _get_semantic_recall_context(self, query: str, chapter_number: int) -> Dict[str, Any]:
+        if not query or not self.has_knowledge_base:
+            return {"query": query, "results": []}
+        try:
+            search_resp = self._knowledge_base.search(
+                query=query,
+                top_k=8,
+                search_type="hybrid",
+                min_score=0.3,
+            )
+            results: List[Dict[str, Any]] = []
+            for item in getattr(search_resp, "results", []) or []:
+                metadata = getattr(item, "metadata", None) or {}
+                if self._is_current_chapter_recall(metadata, chapter_number):
+                    continue
+                document = getattr(item, "document", "") or str(item)
+                score = float(getattr(item, "score", 0.0) or 0.0)
+                if not document.strip():
+                    continue
+                results.append({
+                    "content": document[:500],
+                    "score": score,
+                    "source": getattr(item, "source", "knowledge_base"),
+                    "chapter_id": metadata.get("chapter_id"),
+                    "chapter_number": metadata.get("chapter_number"),
+                })
+                if len(results) >= 5:
+                    break
+            return {"query": query, "results": results}
+        except Exception as e:
+            logger.warning(f"[{self.name}] 语义召回失败，继续使用当前上下文: {e}")
+            return {"query": query, "results": [], "error": str(e)}
+
+    @staticmethod
+    def _is_current_chapter_recall(metadata: Dict[str, Any], chapter_number: int) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        chapter_id = str(metadata.get("chapter_id") or "").strip().lower()
+        number = metadata.get("chapter_number")
+        if str(number or "").strip() == str(chapter_number):
+            return True
+        return chapter_id in {f"chapter_{chapter_number}", str(chapter_number)}
+
+    def _format_semantic_recall_context(self, recall_context: Dict[str, Any]) -> str:
+        results = recall_context.get("results", []) if isinstance(recall_context, dict) else []
+        if not results:
+            return ""
+        parts = ['<context_block source="semantic_recall">']
+        total_chars = 0
+        for idx, item in enumerate(results[:5], 1):
+            content = str(item.get("content", "") if isinstance(item, dict) else item).strip()
+            if not content:
+                continue
+            score = item.get("score", 0) if isinstance(item, dict) else 0
+            source = item.get("source", "knowledge_base") if isinstance(item, dict) else "knowledge_base"
+            chapter = item.get("chapter_id") or item.get("chapter_number") if isinstance(item, dict) else ""
+            header = f"片段 {idx} score={float(score or 0):.2f} source={source}"
+            if chapter:
+                header += f" chapter={chapter}"
+            snippet = content[:450]
+            total_chars += len(snippet)
+            if total_chars > 2200:
+                break
+            parts.append(header)
+            parts.append(snippet)
+        parts.append("</context_block>")
+        return "\n".join(parts)
+
     async def _get_kb_context(self, query: str, chapter_number: int) -> Dict[str, Any]:
         """从知识库获取上下文"""
         if not self.has_knowledge_base:
