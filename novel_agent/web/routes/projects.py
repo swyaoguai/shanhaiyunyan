@@ -187,7 +187,11 @@ def _maybe_parse_structured_text(value: Any) -> Any:
 
 
 def _normalize_outline_rows(payload: Any, *, collapse_overview: bool = True) -> List[Dict[str, Any]]:
-    if collapse_overview:
+    has_explicit_overview = not isinstance(payload, list) or any(
+        isinstance(row, dict) and (row.get("global_outline") or row.get("volume_plan"))
+        for row in payload
+    )
+    if collapse_overview and has_explicit_overview:
         overview = build_outline_overview_row(payload)
         if overview:
             return [overview]

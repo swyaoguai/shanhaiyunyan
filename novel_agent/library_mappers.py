@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def outline_to_entries(data: Any) -> List[LibraryEntry]:
     global_outline = build_global_outline_text(data)
     volume_plan = format_outline_volume_plan(data)
+    chapters = _extract_chapters(data)
     if global_outline or volume_plan:
         now = _now_iso()
         summary = _truncate(global_outline or volume_plan, 200)
@@ -32,6 +33,8 @@ def outline_to_entries(data: Any) -> List[LibraryEntry]:
             "global_outline": global_outline,
             "volume_plan": volume_plan,
         }
+        if chapters:
+            content_structured["chapters"] = chapters
         volumes = get_outline_volumes(data)
         if volumes:
             content_structured["volumes"] = volumes
@@ -49,7 +52,6 @@ def outline_to_entries(data: Any) -> List[LibraryEntry]:
             updated_at=now,
         ))]
 
-    chapters = _extract_chapters(data)
     if not chapters:
         return []
     now = _now_iso()
