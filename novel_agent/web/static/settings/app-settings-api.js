@@ -125,6 +125,23 @@ async function saveKnowledgeBaseConfig(payload) {
     return apiCall('/api/knowledge-base/config', 'POST', payload);
 }
 
+async function installLocalOnnxPackage(file) {
+    const formData = new FormData();
+    formData.append('model_package', file);
+    const response = await fetch(normalizeApiUrl('/api/knowledge-base/local-onnx/install'), {
+        method: 'POST',
+        body: formData
+    });
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json')
+        ? await response.json()
+        : { error: await response.text() };
+    if (!response.ok || payload.success === false) {
+        throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+    }
+    return payload;
+}
+
 async function clearKnowledgeBaseData(payload) {
     return apiCall('/api/knowledge-base/clear', 'POST', payload);
 }
@@ -156,6 +173,7 @@ window.saveAgentConfig = saveAgentConfig;
 window.fetchKnowledgeBaseSettingsData = fetchKnowledgeBaseSettingsData;
 window.testKnowledgeBaseConnection = testKnowledgeBaseConnection;
 window.saveKnowledgeBaseConfig = saveKnowledgeBaseConfig;
+window.installLocalOnnxPackage = installLocalOnnxPackage;
 window.clearKnowledgeBaseData = clearKnowledgeBaseData;
 window.fetchSkillsSettingsData = fetchSkillsSettingsData;
 window.deleteSkill = deleteSkill;

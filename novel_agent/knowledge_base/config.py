@@ -45,7 +45,7 @@ class LocalOnnxConfig:
     embedding_dim: int = 0
     max_length: int = 512
     threads: Optional[int] = None
-    pooling: str = "mean"  # "mean" 或 "cls"
+    pooling: str = "cls"  # "cls" 或 "mean"
 
 
 @dataclass

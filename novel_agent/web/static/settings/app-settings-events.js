@@ -657,6 +657,21 @@ function bindAgentSettingsEvents() {
 function bindKnowledgeBaseEvents() {
     const toggleKeyBtn = document.getElementById('toggle-kb-key');
     const keyInput = document.getElementById('kb-siliconflow-key');
+    const providerSelect = document.getElementById('kb-embedding-provider');
+    const apiPanel = document.getElementById('kb-provider-api-panel');
+    const localPanel = document.getElementById('kb-provider-local-panel');
+    const testButton = document.getElementById('test-embedding-btn');
+
+    const syncEmbeddingProviderPanels = () => {
+        const provider = providerSelect?.value || 'api';
+        const isLocal = provider === 'local_onnx';
+        if (apiPanel) apiPanel.style.display = isLocal ? 'none' : '';
+        if (localPanel) localPanel.style.display = isLocal ? '' : 'none';
+        if (testButton) testButton.style.display = isLocal ? 'none' : '';
+    };
+
+    syncEmbeddingProviderPanels();
+    providerSelect?.addEventListener('change', syncEmbeddingProviderPanels);
 
     toggleKeyBtn?.addEventListener('click', () => {
         if (keyInput.type === 'password') {
@@ -665,6 +680,83 @@ function bindKnowledgeBaseEvents() {
         } else {
             keyInput.type = 'password';
             toggleKeyBtn.innerHTML = '<i class="ri-eye-line"></i>';
+        }
+    });
+
+    const collectKnowledgeBasePayload = () => {
+        const apiKey = document.getElementById('kb-siliconflow-key')?.value || '';
+        const payload = {
+            embedding_provider: document.getElementById('kb-embedding-provider')?.value || 'api',
+            siliconflow_base_url: document.getElementById('kb-siliconflow-base')?.value || 'https://api.siliconflow.cn/v1',
+            siliconflow_model: document.getElementById('kb-siliconflow-model')?.value || 'BAAI/bge-m3',
+            siliconflow_embedding_dim: parseInt(document.getElementById('kb-embedding-dim')?.value || '1024', 10),
+            onnx_model_dir: document.getElementById('kb-onnx-model-dir')?.value || 'novel_agent/models/embedding/default',
+            onnx_model_file: document.getElementById('kb-onnx-model-file')?.value || 'model.onnx',
+            onnx_tokenizer_dir: '',
+            onnx_max_length: parseInt(document.getElementById('kb-onnx-max-length')?.value || '512', 10),
+            onnx_threads: null,
+            onnx_pooling: document.getElementById('kb-onnx-pooling')?.value || 'cls',
+            default_top_k: parseInt(document.getElementById('kb-top-k')?.value || '5', 10),
+            vector_weight: parseFloat(document.getElementById('kb-vector-weight')?.value || '0.7'),
+            fulltext_weight: parseFloat(document.getElementById('kb-fulltext-weight')?.value || '0.3'),
+            chunk_size: parseInt(document.getElementById('kb-chunk-size')?.value || '500', 10),
+            chunk_overlap: parseInt(document.getElementById('kb-chunk-overlap')?.value || '50', 10)
+        };
+
+        if (apiKey) {
+            payload.siliconflow_api_key = apiKey;
+        }
+        return payload;
+    };
+
+    document.getElementById('install-onnx-package-btn')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        const fileInput = document.getElementById('kb-onnx-package-file');
+        const resultEl = document.getElementById('onnx-install-result');
+        const file = fileInput?.files?.[0];
+        if (!file) {
+            showToast('请选择本地模型包 zip 文件', 'error');
+            return;
+        }
+
+        button.disabled = true;
+        button.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 安装中...';
+        if (resultEl) resultEl.style.display = 'none';
+
+        try {
+            const result = await installLocalOnnxPackage(file);
+            document.getElementById('kb-embedding-provider').value = 'local_onnx';
+            document.getElementById('kb-onnx-model-dir').value = result.onnx_model_dir || 'novel_agent/models/embedding/default';
+            document.getElementById('kb-onnx-model-file').value = result.onnx_model_file || 'model.onnx';
+            document.getElementById('kb-onnx-max-length').value = result.onnx_max_length || 512;
+            document.getElementById('kb-onnx-pooling').value = result.onnx_pooling || 'cls';
+            syncEmbeddingProviderPanels();
+            await saveKnowledgeBaseConfig(collectKnowledgeBasePayload());
+
+            if (resultEl) {
+                const modelName = result.metadata?.model_id || result.metadata?.base_model || '本地模型包';
+                resultEl.innerHTML = `
+                    <div style="background: rgba(16,185,129,0.2); border: 1px solid rgba(16,185,129,0.5); border-radius: 8px; padding: 12px; color: #10b981;">
+                        <i class="ri-check-circle-line"></i> 已安装并启用：${safeText(modelName)}
+                    </div>
+                `;
+                resultEl.style.display = 'block';
+            }
+            showToast('本地模型包已安装并启用');
+            setTimeout(() => loadKnowledgeBaseSettings(), 800);
+        } catch (e) {
+            if (resultEl) {
+                resultEl.innerHTML = `
+                    <div style="background: rgba(239,68,68,0.2); border: 1px solid rgba(239,68,68,0.5); border-radius: 8px; padding: 12px; color: #ef4444;">
+                        <i class="ri-error-warning-line"></i> 安装失败: ${safeErrorText(e)}
+                    </div>
+                `;
+                resultEl.style.display = 'block';
+            }
+            showToast(`安装失败: ${e.message}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.innerHTML = '<i class="ri-upload-cloud-line"></i> 安装模型包';
         }
     });
 
@@ -743,23 +835,7 @@ function bindKnowledgeBaseEvents() {
         button.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 保存中...';
 
         try {
-            const apiKey = document.getElementById('kb-siliconflow-key').value;
-            const payload = {
-                siliconflow_base_url: document.getElementById('kb-siliconflow-base').value,
-                siliconflow_model: document.getElementById('kb-siliconflow-model').value,
-                siliconflow_embedding_dim: parseInt(document.getElementById('kb-embedding-dim').value, 10),
-                default_top_k: parseInt(document.getElementById('kb-top-k').value, 10),
-                vector_weight: parseFloat(document.getElementById('kb-vector-weight').value),
-                fulltext_weight: parseFloat(document.getElementById('kb-fulltext-weight').value),
-                chunk_size: parseInt(document.getElementById('kb-chunk-size').value, 10),
-                chunk_overlap: parseInt(document.getElementById('kb-chunk-overlap').value, 10)
-            };
-
-            if (apiKey) {
-                payload.siliconflow_api_key = apiKey;
-            }
-
-            await saveKnowledgeBaseConfig(payload);
+            await saveKnowledgeBaseConfig(collectKnowledgeBasePayload());
             showToast('知识库配置已保存');
             setTimeout(() => loadKnowledgeBaseSettings(), 500);
         } catch (e) {

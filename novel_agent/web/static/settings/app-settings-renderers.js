@@ -688,10 +688,16 @@ async function loadKnowledgeBaseSettings() {
 
     try {
         const { config, stats, chapterSummaryConfig } = await fetchKnowledgeBaseSettingsData();
+        const embeddingProvider = String(config.embedding_provider || 'api').toLowerCase();
+        const isLocalProvider = embeddingProvider === 'local_onnx' || embeddingProvider === 'local';
         const hasApiKey = config.siliconflow_api_key && config.siliconflow_api_key.length > 10;
-        const kbStatusClass = hasApiKey ? 'settings-section-panel--accent' : 'settings-section-panel--danger';
-        const kbBadgeClass = hasApiKey ? 'settings-badge--success' : 'settings-badge--danger';
-        const kbIconColor = hasApiKey ? '#10b981' : '#ef4444';
+        const hasLocalModel = Boolean(config.onnx_model_installed);
+        const activeEmbeddingReady = isLocalProvider ? hasLocalModel : hasApiKey;
+        const kbStatusClass = activeEmbeddingReady ? 'settings-section-panel--accent' : 'settings-section-panel--danger';
+        const kbBadgeClass = activeEmbeddingReady ? 'settings-badge--success' : 'settings-badge--danger';
+        const kbIconColor = activeEmbeddingReady ? '#10b981' : '#ef4444';
+        const localModelName = config.onnx_model_metadata?.model_id || config.onnx_model_metadata?.base_model || '本地模型包';
+        const localModelDim = config.onnx_model_metadata?.embedding_dim || '';
         const autoSummaryEnabled = Boolean(chapterSummaryConfig?.auto_summary_enabled);
         const hasActiveProject = Boolean(
             typeof getActiveProjectId === 'function'
@@ -725,43 +731,90 @@ async function loadKnowledgeBaseSettings() {
                         </button>
                     </div>
                     <p class="settings-note">
-                        使用 <a href="https://cloud.siliconflow.cn/" target="_blank">硅基流动</a> 提供的向量化接口（免费额度充足）。
-                        如无账号请先注册获取接口密钥。
+                        当前使用：${isLocalProvider ? '本地模型包' : '硅基流动线上模型'}
                     </p>
                     <div class="settings-stack" style="margin-top: 16px;">
-                        <div class="settings-grid settings-grid-wide-narrow">
-                            <div>
-                                <label class="settings-label">API Base URL</label>
-                                <input type="text" id="kb-siliconflow-base" value="${safeAttr(config.siliconflow_base_url || 'https://api.siliconflow.cn/v1')}" placeholder="https://api.siliconflow.cn/v1" class="settings-field">
+                        <div>
+                            <label class="settings-label">嵌入模型来源</label>
+                            <select id="kb-embedding-provider" class="settings-field">
+                                <option value="api" ${!isLocalProvider ? 'selected' : ''}>硅基流动线上模型</option>
+                                <option value="local_onnx" ${isLocalProvider ? 'selected' : ''}>本地模型包</option>
+                            </select>
+                        </div>
+
+                        <div id="kb-provider-api-panel" class="settings-stack" style="${isLocalProvider ? 'display: none;' : ''}">
+                            <div class="settings-grid settings-grid-wide-narrow">
+                                <div>
+                                    <label class="settings-label">API Base URL</label>
+                                    <input type="text" id="kb-siliconflow-base" value="${safeAttr(config.siliconflow_base_url || 'https://api.siliconflow.cn/v1')}" placeholder="https://api.siliconflow.cn/v1" class="settings-field">
+                                </div>
+                                <div>
+                                    <label class="settings-label">向量维度</label>
+                                    <select id="kb-embedding-dim" class="settings-field">
+                                        <option value="512" ${config.siliconflow_embedding_dim == 512 ? 'selected' : ''}>512</option>
+                                        <option value="1024" ${config.siliconflow_embedding_dim == 1024 || !config.siliconflow_embedding_dim ? 'selected' : ''}>1024 (推荐)</option>
+                                        <option value="2048" ${config.siliconflow_embedding_dim == 2048 ? 'selected' : ''}>2048</option>
+                                    </select>
+                                </div>
                             </div>
                             <div>
-                                <label class="settings-label">向量维度</label>
-                                <select id="kb-embedding-dim" class="settings-field">
-                                    <option value="512" ${config.siliconflow_embedding_dim == 512 ? 'selected' : ''}>512</option>
-                                    <option value="1024" ${config.siliconflow_embedding_dim == 1024 || !config.siliconflow_embedding_dim ? 'selected' : ''}>1024 (推荐)</option>
-                                    <option value="2048" ${config.siliconflow_embedding_dim == 2048 ? 'selected' : ''}>2048</option>
+                                <label class="settings-label">
+                                    API Key <span style="color: #ef4444;">*</span>
+                                    ${hasApiKey ? '<span class="settings-chip settings-chip--success" style="margin-left: 8px;">✓ 已保存</span>' : ''}
+                                </label>
+                                <div class="settings-input-action">
+                                    <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入硅基流动API Key（sk-...）'}" class="settings-field settings-field--with-action">
+                                    <button id="toggle-kb-key" class="settings-button settings-button--ghost" type="button">
+                                        <i class="ri-eye-line"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="settings-label">Embedding 模型</label>
+                                <select id="kb-siliconflow-model" class="settings-field">
+                                    <option value="BAAI/bge-m3" ${config.siliconflow_model === 'BAAI/bge-m3' || !config.siliconflow_model ? 'selected' : ''}>BAAI/bge-m3 (推荐，多语言)</option>
+                                    <option value="BAAI/bge-large-zh-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-zh-v1.5' ? 'selected' : ''}>BAAI/bge-large-zh-v1.5 (中文优化)</option>
+                                    <option value="BAAI/bge-large-en-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-en-v1.5' ? 'selected' : ''}>BAAI/bge-large-en-v1.5 (英文优化)</option>
                                 </select>
                             </div>
                         </div>
-                        <div>
-                            <label class="settings-label">
-                                API Key <span style="color: #ef4444;">*</span>
-                                ${hasApiKey ? '<span class="settings-chip settings-chip--success" style="margin-left: 8px;">✓ 已保存</span>' : ''}
-                            </label>
+
+                        <div id="kb-provider-local-panel" class="settings-stack" style="${isLocalProvider ? '' : 'display: none;'}">
+                            <div class="settings-toggle-row">
+                                <span class="settings-status-text">
+                                    ${hasLocalModel ? `已安装：${safeText(localModelName)}${localModelDim ? ` · ${safeText(localModelDim)}维` : ''}` : '未安装本地模型包'}
+                                </span>
+                            </div>
                             <div class="settings-input-action">
-                                <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入硅基流动API Key（sk-...）'}" class="settings-field settings-field--with-action">
-                                <button id="toggle-kb-key" class="settings-button settings-button--ghost" type="button">
-                                    <i class="ri-eye-line"></i>
+                                <input type="file" id="kb-onnx-package-file" accept=".zip" class="settings-field settings-field--with-action">
+                                <button id="install-onnx-package-btn" class="settings-button" type="button">
+                                    <i class="ri-upload-cloud-line"></i> 安装模型包
                                 </button>
                             </div>
-                        </div>
-                        <div>
-                            <label class="settings-label">Embedding 模型</label>
-                            <select id="kb-siliconflow-model" class="settings-field">
-                                <option value="BAAI/bge-m3" ${config.siliconflow_model === 'BAAI/bge-m3' || !config.siliconflow_model ? 'selected' : ''}>BAAI/bge-m3 (推荐，多语言)</option>
-                                <option value="BAAI/bge-large-zh-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-zh-v1.5' ? 'selected' : ''}>BAAI/bge-large-zh-v1.5 (中文优化)</option>
-                                <option value="BAAI/bge-large-en-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-en-v1.5' ? 'selected' : ''}>BAAI/bge-large-en-v1.5 (英文优化)</option>
-                            </select>
+                            <div class="settings-grid settings-grid-wide-narrow">
+                                <div>
+                                    <label class="settings-label">模型目录</label>
+                                    <input type="text" id="kb-onnx-model-dir" value="${safeAttr(config.onnx_model_dir || 'novel_agent/models/embedding/default')}" class="settings-field">
+                                </div>
+                                <div>
+                                    <label class="settings-label">模型文件</label>
+                                    <input type="text" id="kb-onnx-model-file" value="${safeAttr(config.onnx_model_file || 'model.onnx')}" class="settings-field">
+                                </div>
+                            </div>
+                            <div class="settings-grid settings-grid-wide-narrow">
+                                <div>
+                                    <label class="settings-label">池化方式</label>
+                                    <select id="kb-onnx-pooling" class="settings-field">
+                                        <option value="cls" ${(config.onnx_pooling || 'cls') === 'cls' ? 'selected' : ''}>CLS</option>
+                                        <option value="mean" ${config.onnx_pooling === 'mean' ? 'selected' : ''}>Mean</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="settings-label">最大长度</label>
+                                    <input type="number" id="kb-onnx-max-length" min="64" max="2048" value="${safeAttr(config.onnx_max_length || 512)}" class="settings-field">
+                                </div>
+                            </div>
+                            <div id="onnx-install-result" style="display: none;"></div>
                         </div>
                     </div>
                     <div id="embedding-test-result" style="margin-top: 16px; display: none;"></div>

@@ -242,6 +242,7 @@ class KnowledgeBaseConfigRequest(BaseModel):
     onnx_tokenizer_dir: str = ""
     onnx_max_length: int = 512
     onnx_threads: Optional[int] = None
+    onnx_pooling: str = "cls"
     chunk_size: int = 500
     chunk_overlap: int = 50
     vector_weight: float = 0.7

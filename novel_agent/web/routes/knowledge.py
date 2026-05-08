@@ -5,6 +5,7 @@
 """
 
 import os
+import io
 import json
 import time
 import httpx
@@ -13,9 +14,11 @@ import sqlite3
 import datetime
 import logging
 import re
+import zipfile
+from pathlib import PurePosixPath
 from pathlib import Path
-from typing import List
-from fastapi import APIRouter, HTTPException, Query
+from typing import Any, Dict, List
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from ...constants import SERVER_DEFAULTS
@@ -60,6 +63,130 @@ def _atomic_write_text(path: Path, content: str, old_content: str = None) -> Non
         raise
 
 
+def _repo_default_onnx_model_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "models" / "embedding" / "default"
+
+
+def _public_default_onnx_model_dir() -> str:
+    return "novel_agent/models/embedding/default"
+
+
+def _resolve_onnx_model_dir(model_dir: str) -> Path:
+    raw = (model_dir or "").strip() or _public_default_onnx_model_dir()
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / path
+
+
+def _inspect_local_onnx_model(config: Dict[str, Any]) -> Dict[str, Any]:
+    model_dir = _resolve_onnx_model_dir(str(config.get("onnx_model_dir") or ""))
+    model_file = str(config.get("onnx_model_file") or "model.onnx")
+    tokenizer_dir = _resolve_onnx_model_dir(str(config.get("onnx_tokenizer_dir") or "")) if config.get("onnx_tokenizer_dir") else model_dir
+    model_path = model_dir / model_file
+    tokenizer_path = tokenizer_dir / "tokenizer.json"
+    metadata_path = model_dir / "metadata.json"
+    metadata: Dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug(f"[Knowledge] 读取本地模型 metadata 失败: {exc}")
+
+    installed = model_path.exists() and tokenizer_path.exists()
+    missing = []
+    if not model_path.exists():
+        missing.append(model_file)
+    if not tokenizer_path.exists():
+        missing.append("tokenizer.json")
+    return {
+        "installed": installed,
+        "model_dir": str(model_dir),
+        "model_file": model_file,
+        "tokenizer_dir": str(tokenizer_dir),
+        "missing": missing,
+        "metadata": metadata,
+    }
+
+
+def _safe_extract_zip_bytes(content: bytes, target_dir: Path) -> Dict[str, Any]:
+    max_total_size = 500 * 1024 * 1024
+    required_max_size = 300 * 1024 * 1024
+    with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        total_size = sum(info.file_size for info in infos)
+        if total_size > max_total_size:
+            raise HTTPException(status_code=400, detail="模型包太大，请使用 500MB 以内的 zip 文件")
+        if any(info.file_size > required_max_size for info in infos):
+            raise HTTPException(status_code=400, detail="模型包内存在异常大文件")
+
+        temp_dir = target_dir.parent / ".installing-default"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for info in infos:
+                rel = PurePosixPath(info.filename.replace("\\", "/"))
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise HTTPException(status_code=400, detail="模型包路径不安全")
+                output_path = temp_dir / Path(*rel.parts)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(archive.read(info))
+
+            def find_required(name: str) -> Path:
+                matches = sorted(temp_dir.rglob(name), key=lambda item: (len(item.parts), str(item)))
+                if not matches:
+                    raise HTTPException(status_code=400, detail=f"模型包缺少 {name}")
+                return matches[0]
+
+            model_source = find_required("model.onnx")
+            tokenizer_source = find_required("tokenizer.json")
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            copied = []
+            for source, name in [
+                (model_source, "model.onnx"),
+                (tokenizer_source, "tokenizer.json"),
+            ]:
+                shutil.copy2(source, target_dir / name)
+                copied.append(name)
+
+            for optional_name in [
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "vocab.txt",
+                "config.json",
+                "metadata.json",
+            ]:
+                matches = sorted(temp_dir.rglob(optional_name), key=lambda item: (len(item.parts), str(item)))
+                if matches:
+                    shutil.copy2(matches[0], target_dir / optional_name)
+                    copied.append(optional_name)
+
+            metadata_path = target_dir / "metadata.json"
+            if not metadata_path.exists():
+                metadata_path.write_text(
+                    json.dumps({
+                        "package_name": "local-onnx-embedding-model",
+                        "provider": "local_onnx",
+                        "model_file": "model.onnx",
+                        "tokenizer_file": "tokenizer.json",
+                        "pooling": "cls",
+                        "max_length": 512,
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                copied.append("metadata.json")
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+
+    return {"copied_files": copied}
+
+
 @router.get("/knowledge-base/config")
 async def get_knowledge_base_config():
     """获取知识库配置"""
@@ -76,6 +203,7 @@ async def get_knowledge_base_config():
         "onnx_tokenizer_dir": os.getenv("KB_ONNX_TOKENIZER_DIR", ""),
         "onnx_max_length": int(os.getenv("KB_ONNX_MAX_LENGTH", "512")),
         "onnx_threads": int(os.getenv("KB_ONNX_THREADS", "0") or "0") or None,
+        "onnx_pooling": os.getenv("KB_ONNX_POOLING", "cls"),
         "chunk_size": 500,
         "chunk_overlap": 50,
         "vector_weight": 0.7,
@@ -94,8 +222,10 @@ async def get_knowledge_base_config():
             logger.warning(f"[Knowledge] 读取知识库配置失败，使用默认值: {e}")
     
     api_key = default_config.get("siliconflow_api_key", "")
+    onnx_status = _inspect_local_onnx_model(default_config)
+    provider = str(default_config.get("embedding_provider", "api") or "api").lower()
     return JSONResponse({
-        "embedding_provider": default_config.get("embedding_provider", "api"),
+        "embedding_provider": provider,
         "siliconflow_api_key": api_key[:8] + "****" if len(api_key) > 8 else "",
         "siliconflow_api_key_set": bool(api_key),
         "siliconflow_base_url": default_config.get("siliconflow_base_url", ""),
@@ -106,12 +236,16 @@ async def get_knowledge_base_config():
         "onnx_tokenizer_dir": default_config.get("onnx_tokenizer_dir", ""),
         "onnx_max_length": default_config.get("onnx_max_length", 512),
         "onnx_threads": default_config.get("onnx_threads"),
+        "onnx_pooling": default_config.get("onnx_pooling", "cls"),
+        "onnx_model_installed": onnx_status["installed"],
+        "onnx_model_missing": onnx_status["missing"],
+        "onnx_model_metadata": onnx_status["metadata"],
         "chunk_size": default_config.get("chunk_size", 500),
         "chunk_overlap": default_config.get("chunk_overlap", 50),
         "vector_weight": default_config.get("vector_weight", 0.7),
         "fulltext_weight": default_config.get("fulltext_weight", 0.3),
         "default_top_k": default_config.get("default_top_k", 5),
-        "is_configured": bool(api_key),
+        "is_configured": onnx_status["installed"] if provider in {"local", "local_onnx"} else bool(api_key),
         # 检索策略配置
         "summary_search_enabled": default_config.get("summary_search_enabled", False),
         "chapter_search_mode": default_config.get("chapter_search_mode", "hybrid")
@@ -146,6 +280,7 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         "onnx_tokenizer_dir": request.onnx_tokenizer_dir,
         "onnx_max_length": request.onnx_max_length,
         "onnx_threads": request.onnx_threads,
+        "onnx_pooling": request.onnx_pooling,
         "chunk_size": request.chunk_size,
         "chunk_overlap": request.chunk_overlap,
         "vector_weight": request.vector_weight,
@@ -188,6 +323,7 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         env_content["KB_ONNX_TOKENIZER_DIR"] = request.onnx_tokenizer_dir
         env_content["KB_ONNX_MAX_LENGTH"] = str(request.onnx_max_length)
         env_content["KB_ONNX_THREADS"] = "" if request.onnx_threads is None else str(request.onnx_threads)
+        env_content["KB_ONNX_POOLING"] = request.onnx_pooling
 
         # 保留已有无关键，避免全量覆写导致环境变量丢失
         env_content.setdefault("OPENAI_API_KEY", "")
@@ -203,6 +339,7 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         env_content.setdefault("KB_ONNX_TOKENIZER_DIR", "")
         env_content.setdefault("KB_ONNX_MAX_LENGTH", "512")
         env_content.setdefault("KB_ONNX_THREADS", "")
+        env_content.setdefault("KB_ONNX_POOLING", "cls")
         env_content.setdefault("HOST", "0.0.0.0")
         env_content.setdefault("PORT", str(SERVER_DEFAULTS.PORT))
         env_content.setdefault("DEBUG", "false")
@@ -219,6 +356,40 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
             "success": False,
             "error": f"保存失败: {e}"
         }, status_code=500)
+
+
+@router.post("/knowledge-base/local-onnx/install")
+async def install_local_onnx_model(model_package: UploadFile = File(...)):
+    """安装本地 ONNX 模型包。"""
+    filename = model_package.filename or ""
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="请选择 zip 格式的本地模型包")
+
+    content = await model_package.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="模型包为空")
+
+    target_dir = _repo_default_onnx_model_dir()
+    install_result = _safe_extract_zip_bytes(content, target_dir)
+    status = _inspect_local_onnx_model({
+        "onnx_model_dir": _public_default_onnx_model_dir(),
+        "onnx_model_file": "model.onnx",
+        "onnx_tokenizer_dir": "",
+    })
+    if not status["installed"]:
+        raise HTTPException(status_code=400, detail="模型包安装后仍缺少必要文件")
+
+    return JSONResponse({
+        "success": True,
+        "onnx_model_dir": _public_default_onnx_model_dir(),
+        "onnx_model_file": "model.onnx",
+        "onnx_tokenizer_dir": "",
+        "onnx_max_length": 512,
+        "onnx_pooling": status["metadata"].get("pooling", "cls") if isinstance(status.get("metadata"), dict) else "cls",
+        "installed": True,
+        "metadata": status["metadata"],
+        "copied_files": install_result["copied_files"],
+    })
 
 
 @router.post("/knowledge-base/test-embedding")
