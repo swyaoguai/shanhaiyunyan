@@ -8,6 +8,9 @@ import pytest
 
 from novel_agent.agents.router_agent import RouterAgent, UserIntent, IntentAnalysis
 from novel_agent.workflow.coordinator import NovelCoordinator, NovelProject, WorkflowState
+from novel_agent.workflow.creative_workflow import CreativeWorkflowRun
+from novel_agent.workflow.workflow_context import Artifact, WorkflowContext
+from novel_agent.workflow.workflow_planner import build_workflow_plan
 from novel_agent.project_manager import ProjectManager
 from novel_agent.web.routes import projects as project_routes
 from novel_agent.web.models.requests import ChatRequest
@@ -357,6 +360,57 @@ def test_parse_targeted_natural_language_command(message, expected_name, expecte
     assert payload.get("message", "") == expected_payload
 
 
+def test_parse_targeted_natural_language_command_supports_character_cards():
+    payload = chat_routes._parse_targeted_natural_language_command("生成角色卡 林渡，宗门遗孤")
+
+    assert payload is not None
+    assert payload["name"] == "character"
+    assert payload.get("message", "") == "林渡，宗门遗孤"
+
+
+def test_parse_targeted_natural_language_command_supports_builtin_project_data_categories():
+    payload = chat_routes._parse_targeted_natural_language_command("生成道具物品 玄铁剑，林渡前期武器")
+
+    assert payload is not None
+    assert payload["name"] == "projectdata"
+    assert payload["category"]["key"] == "items"
+    assert payload["category"]["name"] == "道具物品"
+    assert payload.get("message", "") == "生成道具物品 玄铁剑，林渡前期武器"
+
+
+def test_parse_targeted_natural_language_command_leaves_advice_requests_for_chat():
+    payload = chat_routes._parse_targeted_natural_language_command(
+        "想写一本爽文小说，主要是修仙世界观和合欢宗，副本我没想好，你有什么建议吗？"
+    )
+
+    assert payload is None
+
+
+def test_parse_targeted_natural_language_command_supports_custom_project_data_categories(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    pm.save_project_state(
+        "knowledge_categories",
+        [
+            {
+                "id": "db-custom-force",
+                "key": "custom_force",
+                "name": "势力阵营",
+                "builtin": False,
+                "aliases": ["门派势力"],
+            }
+        ],
+    )
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+
+    payload = chat_routes._parse_targeted_natural_language_command("生成势力阵营 合欢宗，暗中控制边城商路")
+
+    assert payload is not None
+    assert payload["name"] == "projectdata"
+    assert payload["category"]["key"] == "custom_force"
+    assert payload["category"]["name"] == "势力阵营"
+
+
 @pytest.mark.asyncio
 async def test_chat_explicit_creation_uses_router_execution(monkeypatch):
     store = _FakeChatStore()
@@ -601,6 +655,126 @@ async def test_chat_workflow_control_commands_call_coordinator(monkeypatch):
     assert "已发送取消指令" in cancel_payload["reply"]
 
 
+def test_chat_revision_natural_language_command_routes_to_targeted_workflow():
+    command = chat_routes._parse_targeted_natural_language_command("把刚才的世界观改成末法时代")
+
+    assert command["name"] == "worldbuild"
+    assert command["message"] == "把刚才的世界观改成末法时代"
+    assert command["display"] == "修改世界观"
+
+
+def test_chat_records_workflow_interruption_into_creative_snapshot(monkeypatch):
+    pm = _FakeProjectManager()
+    coordinator = _FakeControlCoordinator()
+    plan = build_workflow_plan(user_request="先写世界观和角色卡", target_categories=["worldbuilding", "characters"])
+    run = CreativeWorkflowRun.create(
+        project_id="proj-test",
+        user_request="先写世界观和角色卡",
+        workflow_plan=plan,
+        canonical_context=WorkflowContext(original_request="先写世界观和角色卡"),
+        run_id="creative-chat-interrupt",
+    )
+    for task in run.task_queue:
+        task.status = "completed"
+    run.add_artifact(Artifact(
+        artifact_id="character-artifact",
+        artifact_type="characters",
+        task_id="create_characters",
+        content=[{"name": "林渡", "description": "以复仇为目标的少年剑修。"}],
+        status="committed",
+    ))
+
+    chat_routes.chat_sessions.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS["proj-test::copilot"] = {
+        "session_id": "copilot",
+        "project_id": "proj-test",
+        "run_id": run.run_id,
+        "status": "completed",
+        "creative_workflow": run.to_dict(),
+    }
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+
+    handled = chat_routes._record_workflow_interruption(
+        session_key="proj-test::copilot",
+        session_id="copilot",
+        message="不对，主角不是复仇，是寻找失踪师父。",
+        coordinator=coordinator,
+    )
+
+    updated = chat_routes._ACTIVE_WORKFLOW_RUNS["proj-test::copilot"]["creative_workflow"]
+    assert handled["resume_workflow"] is True
+    assert coordinator.pause_calls == 1
+    assert updated["status"] == "paused"
+    assert updated["task_queue"][2]["status"] == "pending"
+    assert updated["artifacts"]["character-artifact"]["status"] == "revision_requested"
+    assert updated["user_interruptions"][-1]["message"] == "不对，主角不是复仇，是寻找失踪师父。"
+
+
+@pytest.mark.asyncio
+async def test_chat_resume_restores_paused_creative_workflow_snapshot(monkeypatch):
+    pm = _FakeProjectManager()
+    store = _FakeChatStore()
+    coordinator = _FakeControlCoordinator()
+    plan = build_workflow_plan(user_request="生成角色卡", target_categories=["characters"])
+    run = CreativeWorkflowRun.create(
+        project_id="proj-test",
+        user_request="生成角色卡",
+        workflow_plan=plan,
+        canonical_context=WorkflowContext(original_request="生成角色卡"),
+        run_id="creative-chat-resume",
+    )
+    run.apply_user_interruption("不对，主角不是复仇，是寻找失踪师父。")
+
+    class _ResumeRouter(_FakeRouter):
+        async def resume_creative_workflow_run(self, run_payload, context=None):
+            assert run_payload["status"] == "paused"
+            assert context["run_id"] == "creative-chat-resume"
+            progress = context.get("progress_callback")
+            if progress:
+                await progress({
+                    "status": "running",
+                    "stage": "resuming",
+                    "creative_workflow": {**run_payload, "status": "running"},
+                    "task_queue": run_payload["task_queue"],
+                })
+            return {
+                "agent_name": "Coordinator",
+                "action": "creative_workflow_resume",
+                "response": "恢复完成。",
+                "is_complete": True,
+                "run_id": "creative-chat-resume",
+                "params": {"creative_workflow_run": {**run_payload, "status": "completed"}},
+            }
+
+    router = _ResumeRouter()
+    chat_routes.chat_sessions.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS["proj-test::copilot"] = {
+        "session_id": "copilot",
+        "project_id": "proj-test",
+        "run_id": run.run_id,
+        "status": "paused",
+        "creative_workflow": run.to_dict(),
+    }
+
+    monkeypatch.setattr("novel_agent.agents.CommunicatorAgent", _FakeCommunicatorAgent)
+    monkeypatch.setattr("novel_agent.agents.get_chat_session_store", lambda: store)
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_router_agent", lambda: router)
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_coordinator", lambda: coordinator)
+    monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
+    monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
+
+    response = await chat_routes.chat(ChatRequest(message="继续创作", session_id="copilot"))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert coordinator.resume_calls == 1
+    assert payload["is_complete"] is True
+    assert payload["workflow"]["creative_workflow"]["status"] == "completed"
+    assert payload["routed_to"] == "Coordinator"
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_workflow_control_commands_use_control_branch(monkeypatch):
     store = _FakeChatStore()
@@ -676,6 +850,222 @@ async def test_chat_explicit_create_command_persists_structured_workflow_status(
 
 
 @pytest.mark.asyncio
+async def test_chat_discussion_mode_keeps_creation_request_in_communicator(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    router = _FakeRouter()
+    store = _FakeChatStore()
+
+    _FakeCommunicatorAgent.chat_calls = 0
+    chat_routes.chat_sessions.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS.clear()
+
+    monkeypatch.setattr("novel_agent.agents.CommunicatorAgent", _FakeCommunicatorAgent)
+    monkeypatch.setattr("novel_agent.agents.get_chat_session_store", lambda: store)
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_router_agent", lambda: router)
+    monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
+    monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
+
+    response = await chat_routes.chat(ChatRequest(
+        message="那就先写主角角色卡，然后创建世界观",
+        session_id="copilot",
+        creative_mode="discussion",
+    ))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["reply"] == "communicator fallback"
+    assert payload.get("routed") is not True
+    assert router.last_context is None
+    assert _FakeCommunicatorAgent.chat_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_plan_mode_builds_confirmable_plan_without_auto_writing(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+    store = _FakeChatStore()
+
+    _FakeCommunicatorAgent.chat_calls = 0
+    chat_routes.chat_sessions.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS.clear()
+
+    monkeypatch.setattr("novel_agent.agents.CommunicatorAgent", _FakeCommunicatorAgent)
+    monkeypatch.setattr("novel_agent.agents.get_chat_session_store", lambda: store)
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_router_agent", lambda: router)
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_coordinator", lambda: coordinator)
+    monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
+    monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
+
+    response = await chat_routes.chat(ChatRequest(
+        message="开始创作 宗门覆灭后的复仇与重建",
+        session_id="copilot",
+        creative_mode="plan",
+    ))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["routing"]["target_agent"] == "Coordinator"
+    assert payload["workflow"]["status"] == "needs_confirmation"
+    assert payload["is_complete"] is False
+    assert not (project_dir / "worldbuilding.json").exists()
+    assert "确认" in payload["reply"]
+
+
+def test_build_router_context_execute_mode_saves_character_card():
+    agent = _FakeCommunicatorAgent()
+
+    context = chat_routes._build_router_context(
+        agent=agent,
+        session_id="copilot",
+        message="那就先写主角角色卡",
+        intent_name="create_character",
+        creative_mode="execute",
+    )
+
+    assert context["creative_mode"] == "execute"
+    assert context["auto_execute"] is True
+    assert context["character_request_mode"] == "save"
+
+
+@pytest.mark.parametrize(
+    "intent_name",
+    [
+        "create_eventlines",
+        "create_detail_outline",
+        "create_chapter_settings",
+        "continue_write",
+    ],
+)
+def test_chat_plan_mode_does_not_execute_write_capable_side_effect_intents(intent_name):
+    agent = _FakeCommunicatorAgent()
+    routing_hint = {"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.99}
+
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint=routing_hint,
+        targeted_command=None,
+        processed_message="继续推进这个创作任务",
+        agent=agent,
+        creative_mode="plan",
+    )
+    context = chat_routes._build_router_context(
+        agent=agent,
+        session_id="copilot",
+        message="继续推进这个创作任务",
+        intent_name=intent_name,
+        creative_mode="plan",
+    )
+
+    assert should_execute is False
+    assert context["auto_execute"] is False
+
+
+@pytest.mark.parametrize(
+    "intent_name",
+    [
+        "create_novel",
+        "create_character",
+        "create_eventlines",
+        "create_detail_outline",
+        "create_chapter_settings",
+        "continue_write",
+    ],
+)
+def test_chat_discussion_mode_never_executes_router_side_effect_intents(intent_name):
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint={"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.99},
+        targeted_command=None,
+        processed_message="开始执行",
+        agent=_FakeCommunicatorAgent(),
+        creative_mode="discussion",
+    )
+
+    assert should_execute is False
+
+
+@pytest.mark.parametrize(
+    "intent_name",
+    [
+        "create_novel",
+        "create_character",
+        "create_eventlines",
+        "create_detail_outline",
+        "create_chapter_settings",
+        "continue_write",
+    ],
+)
+def test_chat_execute_mode_allows_router_side_effect_intents(intent_name):
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint={"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.99},
+        targeted_command=None,
+        processed_message="开始执行",
+        agent=_FakeCommunicatorAgent(),
+        creative_mode="execute",
+    )
+
+    assert should_execute is True
+
+
+@pytest.mark.parametrize(
+    ("message", "intent_name"),
+    [
+        ("帮我看看这个角色卡要不要写入资料库", "create_character"),
+        ("这个世界观方案怎么样，先别保存", "create_novel"),
+        ("第3章应该怎么润色更好？", "polish_content"),
+    ],
+)
+def test_chat_auto_mode_keeps_discussion_like_creative_requests_in_communicator(message, intent_name):
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint={"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.96},
+        targeted_command=None,
+        processed_message=message,
+        agent=_FakeCommunicatorAgent(),
+        creative_mode="auto",
+    )
+
+    assert should_execute is False
+
+
+def test_chat_auto_mode_requires_enough_confidence_before_side_effect_execution():
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint={"intent": "create_character", "target_agent": "CharacterBuilder", "confidence": 0.61},
+        targeted_command=None,
+        processed_message="生成主角角色卡：林渡，少年剑修",
+        agent=_FakeCommunicatorAgent(),
+        creative_mode="auto",
+    )
+
+    assert should_execute is False
+
+
+@pytest.mark.parametrize(
+    ("message", "intent_name"),
+    [
+        ("生成主角角色卡：林渡，少年剑修", "create_character"),
+        ("把章纲也补出来", "create_chapter_settings"),
+        ("继续写第3章", "continue_write"),
+    ],
+)
+def test_chat_auto_mode_executes_clear_high_confidence_actions(message, intent_name):
+    should_execute = chat_routes._should_execute_router_request(
+        router_agent=object(),
+        routing_hint={"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.92},
+        targeted_command=None,
+        processed_message=message,
+        agent=_FakeCommunicatorAgent(),
+        creative_mode="auto",
+    )
+
+    assert should_execute is True
+
+
+@pytest.mark.asyncio
 async def test_chat_refreshes_model_config_for_existing_session_same_conversation(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
     store = _PersistentChatStore()
@@ -737,13 +1127,14 @@ async def test_chat_explicit_create_command_uses_formal_task_pool_when_available
 
     assert payload["routing"]["target_agent"] == "Coordinator"
     assert payload["workflow"]["status"] == "completed"
-    assert "正式多Agent协作执行链" in payload["reply"]
-    assert coordinator.last_execute_kwargs == {"max_tasks": 4, "max_chapter_tasks": 2}
+    assert coordinator.last_execute_kwargs == {"max_tasks": 5, "max_chapter_tasks": 2}
     assert saved_task_pool.get("metadata", {}).get("source") == "contract_confirmation"
-    assert saved_task_pool.get("metadata", {}).get("project_ready_execution", {}).get("executed_task_count") == 4
+    assert saved_task_pool.get("metadata", {}).get("project_ready_execution", {}).get("executed_task_count") == 5
     assert any(task.get("task_type") == "build_world" and task.get("status") == "completed" for task in saved_task_pool.get("tasks", []))
+    assert any(task.get("task_type") == "build_characters" and task.get("status") == "completed" for task in saved_task_pool.get("tasks", []))
     assert any(item.get("type") == "project_ready_execution_cycle" for item in saved_trace.get("events", []))
     assert any(item["kind"] == "worldbuilding" for item in payload["created_files"] + payload["updated_files"])
+    assert any(item["kind"] == "characters" for item in payload["created_files"] + payload["updated_files"])
     assert any(item["kind"] == "outline" for item in payload["created_files"] + payload["updated_files"])
 
 
@@ -811,7 +1202,7 @@ def test_router_formal_execution_limits_cap_large_projects():
         task_pool_payload={"tasks": [{} for _ in range(28)]},
     )
 
-    assert max_tasks == 4
+    assert max_tasks == 5
     assert max_chapter_tasks == 2
 
 
@@ -1082,7 +1473,7 @@ async def test_chat_character_card_request_routes_to_builder_draft_without_persi
     payload = json.loads(response.body.decode("utf-8"))
 
     assert payload["routing"]["target_agent"] == "CharacterBuilder"
-    assert payload["workflow"]["status"] == "completed"
+    assert payload["workflow"]["status"] == "needs_confirmation"
     assert payload["is_complete"] is False
     assert "已生成角色卡草稿" in payload["reply"]
     assert payload["delegated_result"]["characters"][0]["name"] == "林渡"
@@ -1197,7 +1588,7 @@ async def test_chat_character_card_custom_category_requires_manual_selection_eve
     payload = json.loads(response.body.decode("utf-8"))
 
     assert payload["routing"]["target_agent"] == "CharacterBuilder"
-    assert payload["workflow"]["status"] == "completed"
+    assert payload["workflow"]["status"] == "needs_confirmation"
     assert payload["is_complete"] is False
     assert "不会自动写入该分类" in payload["reply"]
     assert pm.load_project_data("characters") == []
@@ -1274,8 +1665,10 @@ async def test_chat_character_creation_request_routes_to_builder_even_without_ex
 
     assert payload["routing"]["target_agent"] == "CharacterBuilder"
     assert payload["workflow"]["target_agent"] == "CharacterBuilder"
-    assert payload["workflow"]["status"] == "completed"
-    assert any(item["kind"] == "characters" for item in payload["created_files"] + payload["updated_files"])
+    assert payload["workflow"]["status"] == "needs_confirmation"
+    assert payload["is_complete"] is False
+    assert not any(item["kind"] == "characters" for item in payload["created_files"] + payload["updated_files"])
+    assert pm.load_project_data("characters") == []
     assert _FakeCommunicatorAgent.chat_calls == 0
 
 
@@ -1530,6 +1923,7 @@ class _FakeCoordinator:
         plot_idea: str = "",
         volume_count: int = 1,
         chapters_per_volume: int = 5,
+        characters=None,
     ):
         return {
             "outline": {
@@ -1561,6 +1955,22 @@ class _FakeCoordinator:
         file_path.write_text(content, encoding="utf-8")
 
 
+class _MissingWorldCoordinator:
+    def __init__(self, project_dir: Path):
+        self.project_dir = project_dir
+
+    async def generate_world(self, novel_type: str, theme: str = "", requirements: str = ""):
+        return {
+            "world": {
+                "status": "missing_info",
+                "missing_info": ["副本核心机制", "主角能力限制"],
+            }
+        }
+
+    async def _check_pause_cancel(self):
+        return False
+
+
 class _FakeFormalCoordinator:
     def __init__(self, pm: ProjectManager, project_dir: Path):
         self.project_manager = pm
@@ -1577,6 +1987,7 @@ class _FakeFormalCoordinator:
             },
             "tasks": [
                 {"task_id": "world-1", "task_type": "build_world", "title": "生成世界观", "status": "pending", "result_ref": "", "assigned_agent": "", "inputs": {}},
+                {"task_id": "characters-1", "task_type": "build_characters", "title": "生成角色档案", "status": "pending", "result_ref": "", "assigned_agent": "", "inputs": {}},
                 {"task_id": "outline-1", "task_type": "build_outline", "title": "生成大纲", "status": "pending", "result_ref": "", "assigned_agent": "", "inputs": {}},
                 {"task_id": "chapter-1", "task_type": "write_chapter", "title": "创作第1章", "status": "pending", "result_ref": "", "assigned_agent": "", "inputs": {"chapter_number": 1}},
                 {"task_id": "chapter-2", "task_type": "write_chapter", "title": "创作第2章", "status": "pending", "result_ref": "", "assigned_agent": "", "inputs": {"chapter_number": 2}},
@@ -1611,6 +2022,13 @@ class _FakeFormalCoordinator:
             json.dumps({"world": {"world_name": "玄幻世界"}}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self.project_manager.save_project_data("characters", [
+            {
+                "name": "林渡",
+                "role": "主角",
+                "description": "宗门遗孤，少年剑修。",
+            }
+        ])
         outline_rows = [
             {"chapter_number": 1, "title": "第1章 旧城归来", "summary": "林渡回到旧城。", "content": "第1章正文"},
             {"chapter_number": 2, "title": "第2章 血债", "summary": "复仇升级。", "content": "第2章正文"},
@@ -1630,6 +2048,9 @@ class _FakeFormalCoordinator:
             if task_type == "build_world":
                 task["assigned_agent"] = "Worldbuilder"
                 task["result_ref"] = "worldbuilding.json"
+            elif task_type == "build_characters":
+                task["assigned_agent"] = "CharacterBuilder"
+                task["result_ref"] = "characters.json"
             elif task_type == "build_outline":
                 task["assigned_agent"] = "Outliner"
                 task["result_ref"] = "outline.json"
@@ -1640,7 +2061,7 @@ class _FakeFormalCoordinator:
                 task["assigned_agent"] = "ChapterWriter"
                 task["result_ref"] = str(chapter_two)
         task_pool["metadata"]["project_ready_execution"] = {
-            "executed_task_count": 4,
+            "executed_task_count": 5,
             "chapter_tasks_executed": 2,
             "stop_reason": "",
             "stopped_on_task_type": "",
@@ -1662,6 +2083,7 @@ class _FakeFormalCoordinator:
             "task_pool": task_pool,
             "executed_tasks": [
                 {"task_id": "world-1", "task_type": "build_world", "title": "生成世界观", "selected_agent": "Worldbuilder", "result_ref": "worldbuilding.json"},
+                {"task_id": "characters-1", "task_type": "build_characters", "title": "生成角色档案", "selected_agent": "CharacterBuilder", "result_ref": "characters.json"},
                 {"task_id": "outline-1", "task_type": "build_outline", "title": "生成大纲", "selected_agent": "Outliner", "result_ref": "outline.json"},
                 {"task_id": "chapter-1", "task_type": "write_chapter", "title": "创作第1章", "selected_agent": "ChapterWriter", "result_ref": str(chapter_one)},
                 {"task_id": "chapter-2", "task_type": "write_chapter", "title": "创作第2章", "selected_agent": "ChapterWriter", "result_ref": str(chapter_two)},
@@ -1674,6 +2096,27 @@ class _FakeFormalCoordinator:
     def _save_novel(self, file_path: Path, chapters):
         content = "\n\n".join(str(chapter.get("content") or "") for chapter in chapters)
         file_path.write_text(content, encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_router_worldbuild_missing_info_stops_without_persisting(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    (project_dir / "worldbuilding.json").unlink(missing_ok=True)
+    coordinator = _MissingWorldCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+
+    result = await router._execute_worldbuild_pipeline(
+        message="生成世界观",
+        context={"creation_requirements": {"novel_type": "玄幻"}},
+    )
+
+    assert result["is_complete"] is False
+    assert result["error"] == "missing_worldbuilding_info"
+    assert "副本核心机制" in result["response"]
+    assert not (project_dir / "worldbuilding.json").exists()
 
 
 @pytest.mark.asyncio
@@ -1716,6 +2159,153 @@ async def test_router_create_pipeline_persists_outline_and_chapter_files(tmp_pat
     assert len(chapter_files) == 2, "all generated chapter files should be created in project chapters directory"
     assert compiled_files, "compiled novel txt should be created"
     assert "真正的正文已经写入文件。" in chapter_files[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_router_world_and_character_request_saves_both_project_files(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    async def fake_multi_intent(message):
+        return [
+            router._build_intent_analysis(
+                message,
+                UserIntent.CREATE_NOVEL,
+                confidence=0.95,
+            )
+        ]
+
+    async def fake_character_execute(self, input_data, context=None):
+        return {
+            "success": True,
+            "agent": "CharacterBuilder",
+            "status": "ok",
+            "confidence": 0.95,
+            "characters": [
+                {
+                    "name": "林渡",
+                    "role": "主角",
+                    "identity": "宗门遗孤",
+                    "occupation": "宗门遗孤",
+                    "description": "宗门覆灭后幸存的少年剑修，背负复仇与重建秩序的目标。",
+                    "personality": ["克制", "坚韧"],
+                    "goals": ["查清宗门覆灭真相", "重建秩序"],
+                    "relationships": {},
+                    "notes": "继承当前世界观设定。",
+                }
+            ],
+            "missing_info": [],
+        }
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    monkeypatch.setattr(router, "_analyze_intents_with_llm", fake_multi_intent)
+    monkeypatch.setattr("novel_agent.agents.character_builder.CharacterBuilderAgent.execute", fake_character_execute)
+
+    result = await router.route_and_respond(
+        "先帮我写世界观和角色卡看看",
+        context={
+            "auto_execute": True,
+            "session_id": "copilot",
+            "collected_info": {
+                "novel_type": "玄幻",
+                "theme": "宗门复仇",
+                "protagonist": "林渡，宗门遗孤，少年剑修",
+                "plot_idea": "宗门覆灭后的复仇与重建",
+                "volume_count": 1,
+                "chapters_per_volume": 2,
+            },
+            "conversation_history": [
+                {"role": "user", "content": "我要偏黑暗修仙，主角叫林渡。"},
+                {"role": "assistant", "content": "确认：林渡是宗门遗孤，故事围绕复仇与重建。"},
+            ],
+        },
+    )
+
+    delegated = result["delegated_result"]
+    world_path = project_dir / "worldbuilding.json"
+    characters_path = project_dir / "characters.json"
+    characters = json.loads(characters_path.read_text(encoding="utf-8"))
+
+    assert result["routed_to"] == "Coordinator"
+    assert delegated["action"] == "world_and_character_setup"
+    assert delegated["is_complete"] is True
+    assert world_path.exists()
+    assert characters_path.exists()
+    assert any(item.get("name") == "林渡" for item in characters)
+    assert any(item["kind"] == "worldbuilding" for item in delegated["created_files"] + delegated["updated_files"])
+    assert any(item["kind"] == "characters" for item in delegated["created_files"] + delegated["updated_files"])
+    workflow_run = delegated["params"]["creative_workflow_run"]
+    assert workflow_run["status"] == "completed"
+    assert [task["task_type"] for task in workflow_run["task_queue"]] == ["prepare_context", "worldbuilding", "characters"]
+    assert all(review["passed"] is True for review in workflow_run["reviews"])
+    assert len(workflow_run["handoff_notes"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_router_projectdata_custom_category_persists_project_file(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+    category = {
+        "id": "db-custom-force",
+        "key": "custom_force",
+        "name": "势力阵营",
+        "builtin": False,
+    }
+
+    async def fake_multi_intent(message):
+        return [
+            router._build_intent_analysis(
+                message,
+                UserIntent.GENERAL_CHAT,
+                confidence=0.95,
+            )
+        ]
+
+    async def fake_generic_execute(self, input_data, context=None):
+        return {
+            "success": True,
+            "agent": "ProjectDataBuilder",
+            "rows": [
+                {
+                    "name": "合欢宗",
+                    "description": "暗中控制边城商路的隐秘宗门。",
+                    "details": "以商会和情报网渗透边城，是林渡前期需要绕开的势力。",
+                    "tags": ["势力阵营", "边城"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    monkeypatch.setattr(router, "_analyze_intents_with_llm", fake_multi_intent)
+    monkeypatch.setattr("novel_agent.agents.project_data_builders.GenericProjectDataBuilderAgent.execute", fake_generic_execute)
+
+    result = await router.route_and_respond(
+        "生成势力阵营 合欢宗，暗中控制边城商路",
+        context={
+            "auto_execute": True,
+            "explicit_command": {
+                "name": "projectdata",
+                "message": "生成势力阵营 合欢宗，暗中控制边城商路",
+                "category": category,
+            },
+            "requested_knowledge_category": category,
+        },
+    )
+
+    delegated = result["delegated_result"]
+    saved_rows = pm.load_project_data("custom_force")
+    custom_path = project_dir / "custom_force.json"
+
+    assert result["routed_to"] == "ProjectDataBuilder"
+    assert delegated["is_complete"] is True
+    assert delegated["params"]["data_type"] == "custom_force"
+    assert custom_path.exists()
+    assert any(item.get("name") == "合欢宗" for item in saved_rows)
+    assert any(item["kind"] == "custom_force" for item in delegated["created_files"] + delegated["updated_files"])
 
 
 @pytest.mark.asyncio
@@ -1845,6 +2435,7 @@ def test_router_build_creation_requirements_preserves_discussion_context_and_res
     requirements = router._build_creation_requirements(context, "继续完成这部小说")
 
     assert requirements["resume_existing"] is True
+    assert requirements["plot_idea"] == "宗门覆灭后的复仇与重建"
     assert "偏黑暗修仙" in requirements["discussion_context"]
     assert "不要低俗" in requirements["discussion_context"]
     assert "前期不要升级太快" in requirements["discussion_context"]

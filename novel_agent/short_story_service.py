@@ -47,7 +47,7 @@ class StepPolicy:
 
 def _step_policies() -> List[StepPolicy]:
     return [
-        StepPolicy("generate_fusion_options", "融合方案生成", True, 2),
+        StepPolicy("generate_fusion_options", "创意方案生成", True, 2),
         StepPolicy("generate_synopsis", "导语生成", True, 2),
         StepPolicy("generate_outline", "大纲生成", True, 2),
         StepPolicy("write_content", "正文创作", False, 2),
@@ -202,10 +202,10 @@ FUSION_OPTIONS_PROMPT_TEMPLATE = """你是一位专业的短篇小说策划编�
 【主分类】
 {category}
 
-请基于以上信息，生成 3 个“不同故事路数”的融合方案，供用户先选最带感的一版。
+请基于以上信息，生成 3 个"不同风格"的创意方案，供用户先选最满意的一版。
 
 要求：
-1. 必须是同一批素材下的 3 条不同故事路数，不是同一路数换文风
+1. 必须是同一批素材下的 3 条不同故事方向，不是同一方向换文风
 2. 如果存在例文/仿写参考，默认强借鉴其爽点、节奏、结构骨架
 3. 但人物、设定、关键事件必须明显换新，不能只是换名字
 4. 每个方案都要突出“为什么读者会继续看”的钩子
@@ -681,7 +681,7 @@ def parse_material_analysis(raw_text: str, fallback_source: str = "", fallback_c
 
     summary = str(data.get("summary") or "").strip()
     if not summary:
-        summary = f"输入已解析为 {', '.join(normalized_detected)} 素材，准备进入融合方案生成。"
+        summary = f"输入已解析为 {', '.join(normalized_detected)} 素材，准备进入创意方案生成。"
 
     genre_hint = str(data.get("genre_hint") or fallback_category or "其他").strip() or "其他"
 
@@ -698,7 +698,7 @@ def parse_material_analysis(raw_text: str, fallback_source: str = "", fallback_c
 
 
 def parse_fusion_candidates(raw_text: str) -> List[Dict[str, Any]]:
-    """从模型输出中解析 3 个融合方案。"""
+    """从模型输出中解析 3 个创意方案。"""
 
     text = (raw_text or "").strip()
     if not text:
@@ -1471,7 +1471,7 @@ class ShortStoryWorkflowStateMachine:
         current_state = ShortStoryStage(self.state["state"])
         if current_state not in allowed_states:
             self._assert_state([ShortStoryStage.AWAITING_FUSION_SELECTION])
-        selected = self._select_by_one_based_index(self.state["fusion_candidates"], selection, "融合方案")
+        selected = self._select_by_one_based_index(self.state["fusion_candidates"], selection, "创意方案")
         if current_state != ShortStoryStage.AWAITING_FUSION_SELECTION:
             self.state["selected_synopsis"] = ""
             self.state["selected_synopsis_index"] = None
@@ -2050,7 +2050,7 @@ class ShortStoryWorkflowStateMachine:
                 }
             )
         if expected is not None and len(normalized) != expected:
-            raise ValueError(f"融合方案数量必须为 {expected} 条")
+            raise ValueError(f"创意方案数量必须为 {expected} 条")
         return normalized
 
     @staticmethod
@@ -2206,7 +2206,7 @@ class ShortStoryCreatorService:
             "version": ShortStoryWorkflowStateMachine.STATE_VERSION,
             "states": [item.value for item in ShortStoryStage],
             "steps": [asdict(item) for item in _step_policies()],
-            "interaction_points": ["融合方案三选一", "导语五选一", "大纲确认或调整", "书名五选一"],
+            "interaction_points": ["创意方案三选一", "导语五选一", "大纲确认或调整", "书名五选一"],
             "target_total_words_range": [3000, 50000],
             "chapter_word_target_range": [500, 3000],
             "chapter_word_count_range": [400, 3100],
@@ -2243,7 +2243,7 @@ class ShortStoryCreatorService:
             "data": {
                 "workflow": machine.snapshot(),
                 "next_step": "analyze_input",
-                "user_message": "请先识别输入素材，再生成 3 个融合方案供用户选择。",
+                "user_message": "请先识别输入素材，再生成 3 个创意方案供用户选择。",
             },
         }
 
@@ -2260,7 +2260,7 @@ class ShortStoryCreatorService:
             "data": {
                 "workflow": state,
                 "prompt": prompt,
-                "user_message": "系统会先识别素材类型与重点，再进入融合方案生成。",
+                "user_message": "系统会先识别素材类型与重点，再进入创意方案生成。",
             },
         }
 
@@ -2285,7 +2285,7 @@ class ShortStoryCreatorService:
             "data": {
                 "workflow": state,
                 "prompt": prompt,
-                "user_message": "请从 3 个不同故事路数中选择最带感的一版。",
+                "user_message": "请从 3 个不同故事方向中选择最满意的一版。",
             },
         }
 
@@ -2325,7 +2325,7 @@ class ShortStoryCreatorService:
         if state.get("input_analysis"):
             prompt += f"\n\n【素材识别摘要】\n{state['input_analysis'].get('summary') or '待补充'}"
         if state.get("selected_fusion"):
-            prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
         if (feedback or "").strip():
             prompt += f"\n\n【用户对导语的新要求】\n{feedback.strip()}"
         return {
@@ -2366,7 +2366,7 @@ class ShortStoryCreatorService:
             chapter_word_max=state.get("chapter_word_max", 900),
         )
         if state.get("selected_fusion"):
-            prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
         if state.get("outline_feedback"):
             prompt += f"\n\n【上一版调整意见】\n{state['outline_feedback']}"
         return {
@@ -2558,7 +2558,7 @@ class ShortStoryCreatorService:
             current_chapter_outline=resolved_outline,
         )
         if state.get("selected_fusion"):
-            prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
         return {
             "success": True,
             "data": {
@@ -2678,7 +2678,7 @@ class ShortStoryCreatorService:
                 revised_full_text=self.render_chapters(chapters),
             )
             if state.get("selected_fusion"):
-                prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+                prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
             return {
                 "success": True,
                 "data": {
@@ -2705,7 +2705,7 @@ class ShortStoryCreatorService:
                 batch_end=batch_end,
             )
             if state.get("selected_fusion"):
-                batch_prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+                batch_prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
             
             batches.append({
                 "batch_index": len(batches),
@@ -2751,7 +2751,7 @@ class ShortStoryCreatorService:
             body_excerpt=excerpt,
         )
         if state.get("selected_fusion"):
-            prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
         if (feedback or "").strip():
             prompt += f"\n\n【用户对书名的新要求】\n{feedback.strip()}"
         return {
@@ -2876,7 +2876,7 @@ class ShortStoryCreatorService:
             full_text=self.render_chapters(state.get("chapters", [])),
         )
         if state.get("selected_fusion"):
-            prompt += f"\n\n【已选融合方案】\n{self._format_selected_fusion(state)}"
+            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
         return {"success": True, "data": {"workflow": state, "prompt": prompt}}
 
     def record_story_tags(self, workflow: Dict[str, Any], story_tags: Dict[str, Any]) -> Dict[str, Any]:

@@ -1739,7 +1739,9 @@ function renderMultiAgentWriteNavPanel() {
     chaptersContent.appendChild(importCard);
 
     // 章节列表
-    const chapters = (window.store && window.store.projectData && window.store.projectData.outline) || [];
+    const chapters = (typeof window.getMultiAgentChapters === 'function')
+        ? window.getMultiAgentChapters()
+        : ((window.store && window.store.projectData && window.store.projectData.chapters) || []);
 
     if (chapters.length === 0) {
         const emptyHint = document.createElement('div');
@@ -3560,12 +3562,12 @@ function showInfiniteWriteChapterPreview(chapter) {
 // ===== 保存章节到项目 =====
 async function saveChapterToProject(chapter) {
     try {
-        // 获取当前项目的大纲数量
-        const outlineRes = await apiCall('/api/project-data/outline', 'GET');
-        let outline = outlineRes.data || [];
+        // 获取当前项目的独立章节数量
+        const chaptersRes = await apiCall('/api/project-data/chapters', 'GET');
+        let outline = chaptersRes.data || [];
         console.log('[InfiniteWrite] saveToProject:', {
             projectId: store?.currentProjectId,
-            outlineLen: outline.length,
+            chapterLen: outline.length,
             chapterNumber: chapter.chapter_number,
             chapterIndex: chapter.chapter_number - 1,
             exists: !!outline[chapter.chapter_number - 1],
@@ -3612,11 +3614,11 @@ async function saveChapterToProject(chapter) {
         }
         
         // 保存到项目
-        await apiCall('/api/project-data/outline', 'POST', { data: outline });
+        await apiCall('/api/project-data/chapters', 'POST', { data: outline });
         
         // 刷新项目数据
         if (window.store && window.store.projectData) {
-            window.store.projectData.outline = outline;
+            window.store.projectData.chapters = outline;
         }
         
     } catch (e) {
@@ -4017,12 +4019,12 @@ async function executeFinishStory() {
             }
         }
         
-        // 获取目标项目的现有大纲数
-        const outlineRes = await apiCall('/api/project-data/outline', 'GET');
+        // 获取目标项目的现有章节数
+        const outlineRes = await apiCall('/api/project-data/chapters', 'GET');
         let outline = outlineRes.data || [];
         const startIndex = outline.length;
         
-        // 将无限续写的章节添加到大纲
+        // 将无限续写的章节添加到独立章节正文
         for (let i = 0; i < infiniteWriteState.chapters.length; i++) {
             const ch = infiniteWriteState.chapters[i];
             outline.push({
@@ -4035,12 +4037,12 @@ async function executeFinishStory() {
             });
         }
         
-        // 保存大纲
-        await apiCall('/api/project-data/outline', 'POST', { data: outline });
+        // 保存为独立章节正文，不再写入大纲资料。
+        await apiCall('/api/project-data/chapters', 'POST', { data: outline });
         
         // 更新store
         if (window.store && window.store.projectData) {
-            window.store.projectData.outline = outline;
+            window.store.projectData.chapters = outline;
         }
         
         // 清空无限续写数据（如果选中）

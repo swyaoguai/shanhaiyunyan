@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 设置页事件层
+ * 山海·云烟 - 设置页事件层
  */
 
 function bindThemeSettingsEvents() {
@@ -307,6 +307,8 @@ function showConfigEditModal(configId = null) {
     const config = configId ? currentApiConfigs.find((item) => item.id === configId) : null;
     const isEdit = !!config;
 
+    const currentApiType = config?.api_type || 'openai_chat';
+
     contentEl.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
             <h3 style="color: var(--text-primary); font-size: 18px; margin: 0;">
@@ -317,7 +319,18 @@ function showConfigEditModal(configId = null) {
         </div>
         <div style="display: grid; gap: 16px;">
             <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">配置名称 <span style="color: #ef4444;">*</span></label><input type="text" id="config-name" value="${safeAttr(config?.name || '')}" placeholder="例如: OpenAI官方、DeepSeek、本地Ollama..." style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
-            <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Base URL <span style="color: #ef4444;">*</span></label><input type="text" id="config-api-base" value="${safeAttr(config?.api_base || '')}" placeholder="https://api.openai.com/v1" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
+            <div>
+                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API 类型 <span style="color: #ef4444;">*</span></label>
+                <select id="config-api-type" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
+                    <option value="openai_chat" ${currentApiType === 'openai_chat' ? 'selected' : ''}>OpenAI Chat（默认）</option>
+                    <option value="openai_responses" ${currentApiType === 'openai_responses' ? 'selected' : ''}>OpenAI Responses（新版）</option>
+                    <option value="anthropic" ${currentApiType === 'anthropic' ? 'selected' : ''}>Anthropic（原生）</option>
+                </select>
+                <div id="api-type-hint" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+                    ${currentApiType === 'anthropic' ? 'Anthropic 使用原生消息接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）' : '使用 OpenAI 兼容的聊天补全端点'}
+                </div>
+            </div>
+            <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Base URL <span style="color: #ef4444;">*</span></label><input type="text" id="config-api-base" value="${safeAttr(config?.api_base || '')}" placeholder="${currentApiType === 'anthropic' ? 'https://api.anthropic.com 或中转地址' : 'https://api.openai.com/v1'}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
             <div>
                 <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Key ${config?.api_key_set ? '<span style="color: #10b981; font-size: 12px; margin-left: 8px;">✓ 已配置</span>' : ''}</label>
                 <div style="position: relative;">
@@ -326,7 +339,7 @@ function showConfigEditModal(configId = null) {
                 </div>
             </div>
             <div>
-                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">模型列表 <span style="font-size: 11px; color: var(--text-secondary);">(同一URL可配置多个模型)</span></label>
+                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">模型列表 <span style="font-size: 11px; color: var(--text-secondary);">（同一URL可配置多个模型）</span></label>
                 <div id="models-container" style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">
                     ${(config?.models || []).map((model) => `
                         <span class="model-tag" data-model="${safeAttr(model)}" style="background: rgba(59,130,246,0.2); color: #60a5fa; padding: 6px 12px; border-radius: 6px; font-size: 13px; display: flex; align-items: center; gap: 6px;">
@@ -342,8 +355,8 @@ function showConfigEditModal(configId = null) {
                 </div>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">Temperature</label><input type="number" id="config-temperature" value="${config?.temperature ?? 0.7}" min="0" max="2" step="0.1" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
-                <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">Max Tokens</label><input type="number" id="config-max-tokens" value="${config?.max_tokens || 4096}" min="100" max="128000" step="100" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
+                <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">温度参数</label><input type="number" id="config-temperature" value="${config?.temperature ?? 0.7}" min="0" max="2" step="0.1" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
+                <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">最大输出长度</label><input type="number" id="config-max-tokens" value="${config?.max_tokens || 4096}" min="100" max="128000" step="100" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
             </div>
         </div>
         <div style="margin-top: 24px; display: flex; gap: 12px; justify-content: flex-end;">
@@ -372,6 +385,24 @@ function showConfigEditModal(configId = null) {
 
     document.getElementById('close-config-modal')?.addEventListener('click', () => { modal.style.display = 'none'; });
     document.getElementById('cancel-config-btn')?.addEventListener('click', () => { modal.style.display = 'none'; });
+
+    // API类型切换事件
+    document.getElementById('config-api-type')?.addEventListener('change', (event) => {
+        const selectedType = event.target.value;
+        const hintEl = document.getElementById('api-type-hint');
+        const apiBaseInput = document.getElementById('config-api-base');
+
+        if (selectedType === 'anthropic') {
+            if (hintEl) hintEl.textContent = 'Anthropic 使用原生消息接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）';
+            if (apiBaseInput) apiBaseInput.placeholder = 'https://api.anthropic.com 或中转地址';
+        } else if (selectedType === 'openai_responses') {
+            if (hintEl) hintEl.textContent = '使用 OpenAI Responses 端点（/v1/responses），需要兼容的 API Key';
+            if (apiBaseInput) apiBaseInput.placeholder = 'https://api.openai.com/v1';
+        } else {
+            if (hintEl) hintEl.textContent = '使用 OpenAI 兼容的聊天补全端点';
+            if (apiBaseInput) apiBaseInput.placeholder = 'https://api.openai.com/v1';
+        }
+    });
 
     document.getElementById('toggle-config-key')?.addEventListener('click', () => {
         const keyInput = document.getElementById('config-api-key');
@@ -411,6 +442,7 @@ function showConfigEditModal(configId = null) {
         const button = event.currentTarget;
         const apiBase = document.getElementById('config-api-base')?.value;
         const apiKey = document.getElementById('config-api-key')?.value;
+        const apiType = document.getElementById('config-api-type')?.value || 'openai_chat';
         if (!apiBase) {
             showToast('请先填写API Base URL', 'error');
             return;
@@ -418,7 +450,7 @@ function showConfigEditModal(configId = null) {
         button.disabled = true;
         button.innerHTML = '<i class="ri-loader-4-line"></i>';
         try {
-            const requestData = { api_base: apiBase, api_key: apiKey || '' };
+            const requestData = { api_base: apiBase || '', api_key: apiKey || '', api_type: apiType };
             if (isEdit && !apiKey && editingConfigId) {
                 requestData.config_id = editingConfigId;
             }
@@ -447,6 +479,7 @@ function showConfigEditModal(configId = null) {
         const name = document.getElementById('config-name')?.value.trim();
         const apiBase = document.getElementById('config-api-base')?.value.trim();
         const apiKey = document.getElementById('config-api-key')?.value.trim();
+        const apiType = document.getElementById('config-api-type')?.value || 'openai_chat';
         const temperature = parseFloat(document.getElementById('config-temperature')?.value) || 0.7;
         const maxTokens = parseInt(document.getElementById('config-max-tokens')?.value, 10) || 4096;
         if (!name) {
@@ -463,14 +496,14 @@ function showConfigEditModal(configId = null) {
 
         try {
             if (isEdit) {
-                const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens };
+                const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType };
                 if (apiKey) {
                     updateData.api_key = apiKey;
                 }
                 await updateApiConfig(editingConfigId, updateData);
                 showToast('配置已更新 ✓', 'success');
             } else {
-                await createApiConfig({ name, api_base: apiBase, api_key: apiKey, models: currentModels, temperature, max_tokens: maxTokens });
+                await createApiConfig({ name, api_base: apiBase, api_key: apiKey, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType });
                 showToast('配置已创建 ✓', 'success');
             }
             modal.style.display = 'none';
@@ -502,6 +535,82 @@ function bindAgentSettingsEvents() {
             if (modelSelect) {
                 modelSelect.innerHTML = renderAgentModelOptions(event.target.value, '');
             }
+            const card = event.target.closest('.agent-config-card');
+            const resultEl = card?.querySelector('.agent-test-result');
+            const statusEl = card?.querySelector('.agent-test-status');
+            if (resultEl) {
+                resultEl.style.display = 'none';
+                resultEl.innerHTML = '';
+            }
+            if (statusEl) {
+                statusEl.textContent = '测试当前Agent选中的API配置和模型';
+            }
+        });
+    });
+
+    content.querySelectorAll('.agent-test-config').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+            const testButton = event.currentTarget;
+            const card = testButton.closest('.agent-config-card');
+            const agentId = card?.dataset.agent || testButton.dataset.agent || '';
+            const configId = card?.querySelector('.agent-api-config')?.value || '';
+            const model = card?.querySelector('.agent-model-select')?.value || '';
+            const resultEl = card?.querySelector('.agent-test-result');
+            const statusEl = card?.querySelector('.agent-test-status');
+
+            if (!configId) {
+                showToast('请先为这个Agent选择一个API配置', 'error');
+                card?.querySelector('.agent-api-config')?.focus();
+                return;
+            }
+
+            testButton.disabled = true;
+            testButton.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 测试中...';
+            if (statusEl) {
+                statusEl.textContent = '正在测试当前Agent的独立配置...';
+            }
+            if (resultEl) {
+                resultEl.style.display = 'block';
+                resultEl.innerHTML = `
+                    <div class="settings-inline-panel-title">测试结果</div>
+                    <div class="settings-inline-panel-copy">正在用这个Agent当前选中的API配置和模型发起试连。</div>
+                `;
+            }
+
+            try {
+                const result = await testAgentApiConnection(agentId, configId, model);
+                if (resultEl) {
+                    resultEl.innerHTML = renderApiTestResultPanel(result);
+                }
+                if (result.success) {
+                    if (statusEl) {
+                        statusEl.textContent = `已通过：${result.model_tested || model || '当前模型'} 可用`;
+                    }
+                    showToast(`${agentId} 连通了，${result.model_tested || model || '当前模型'} 可以用。`, 'success');
+                } else {
+                    if (statusEl) {
+                        statusEl.textContent = '测试未通过，请查看下方详情';
+                    }
+                    showToast(result.error || `${agentId} 的连接测试没过。`, 'error');
+                }
+            } catch (e) {
+                if (resultEl) {
+                    resultEl.innerHTML = renderApiTestResultPanel({
+                        success: false,
+                        error_code: 'request_failed',
+                        title: '测试没跑通',
+                        solution: '先检查这个Agent选中的API配置、模型名称和权限。',
+                        detail: e.message || '请求失败，请稍后再试。',
+                    });
+                }
+                if (statusEl) {
+                    statusEl.textContent = '测试请求失败';
+                }
+                showToast(`测试失败: ${e.message}`, 'error');
+            } finally {
+                testButton.disabled = false;
+                testButton.innerHTML = '<i class="ri-wifi-line"></i> 测试连接';
+            }
         });
     });
 
@@ -532,6 +641,9 @@ function bindAgentSettingsEvents() {
                     await saveAgentConfig(agentId, { use_global: true, api_config_id: '' });
                 }
             }
+            if (typeof checkGlobalAPIConfig === 'function') {
+                await checkGlobalAPIConfig();
+            }
             showToast('Agent配置已保存');
         } catch (e) {
             showToast(`保存失败: ${e.message}`, 'error');
@@ -553,6 +665,29 @@ function bindKnowledgeBaseEvents() {
         } else {
             keyInput.type = 'password';
             toggleKeyBtn.innerHTML = '<i class="ri-eye-line"></i>';
+        }
+    });
+
+    const summaryToggle = document.getElementById('cs-auto-summary-toggle');
+    const summaryBadge = document.getElementById('cs-status-badge');
+    summaryToggle?.addEventListener('change', async () => {
+        const enabled = summaryToggle.checked;
+        try {
+            await apiCall('/api/chapter-summary-config', 'POST', {
+                auto_summary_enabled: enabled
+            });
+            if (summaryBadge) {
+                summaryBadge.textContent = enabled ? '已启用' : '未启用';
+                summaryBadge.className = 'settings-badge ' + (enabled ? 'settings-badge--success' : 'settings-badge--muted');
+            }
+            const label = summaryToggle.closest('.settings-checkbox-label');
+            const statusText = label?.querySelector('.settings-status-text');
+            if (statusText) statusText.textContent = enabled ? '已启用' : '未启用';
+            showToast(enabled ? '已开启章节自动摘要' : '已关闭章节自动摘要');
+        } catch (e) {
+            console.error('保存自动摘要设置失败:', e);
+            summaryToggle.checked = !enabled;
+            showToast(`保存自动摘要设置失败: ${e.message}`, 'error');
         }
     });
 

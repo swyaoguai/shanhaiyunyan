@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 import novel_agent.project_manager as project_manager_module
 from novel_agent.project_manager import ProjectManager
 from novel_agent.web.app import create_app
+from novel_agent.worldbuilding_persistence import persist_worldbuilding_project_data
+from novel_agent.library_service import get_library_service
 
 
 def _build_projects_payload(project_id: str) -> dict:
@@ -121,7 +123,7 @@ def test_infinite_import_creates_isolated_memory(client_with_project):
     assert len(memory_payload.get("chapter_memory", [])) >= 2
 
 
-def test_outline_save_auto_refreshes_collab_memory(client_with_project):
+def test_chapters_save_auto_refreshes_collab_memory(client_with_project):
     client, manager = client_with_project
     outline_payload = [
         {
@@ -132,7 +134,7 @@ def test_outline_save_auto_refreshes_collab_memory(client_with_project):
     ]
 
     response = client.post(
-        "/api/project-data/outline",
+        "/api/project-data/chapters",
         json={"data": outline_payload},
     )
     assert response.status_code == 200
@@ -189,6 +191,289 @@ def test_worldbuilding_get_returns_rows_and_raw_data_for_object_payload(client_w
     assert any(row["name"] == "赤霄城" and "火山口" in row["description"] for row in payload["data"])
     assert any(row["name"] == "镇魂灯" and "心魔" in row["description"] for row in payload["data"])
     assert any(row["name"] == "星陨纪元" and "旧王朝" in row["description"] for row in payload["data"])
+
+
+def test_worldbuilding_get_recovers_from_context_when_project_file_missing(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data("worldbuilding", [])
+    manager.get_project_data_path("worldbuilding").unlink(missing_ok=True)
+    project_dir = manager.get_current_project_dir()
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "context.json").write_text(
+        json.dumps(
+            {
+                "contexts": {
+                    "world": {
+                        "key": "world",
+                        "value": {
+                            "world_name": "玄源大陆",
+                            "world_type": "东方玄幻",
+                            "core_concept": "废柴少年觉醒禁忌血脉。",
+                        },
+                        "category": "world",
+                    }
+                },
+                "history": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/project-data/worldbuilding")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert any(row["name"] == "玄源大陆" and row["description"] == "东方玄幻" for row in payload["data"])
+    saved_payload = manager.load_project_data("worldbuilding")
+    assert saved_payload["world"]["name"] == "玄源大陆"
+    assert saved_payload["world"]["world_name"] == "玄源大陆"
+    assert saved_payload["world"]["core_concept"] == "废柴少年觉醒禁忌血脉。"
+
+
+def test_worldbuilding_persistence_normalizes_and_preserves_extra_fields(client_with_project):
+    _client, manager = client_with_project
+    manager.save_project_data(
+        "worldbuilding",
+        {
+            "world": {"name": "旧世界", "world_type": "废土"},
+            "locations": {"黑塔": {"description": "旧时代观测站"}},
+        },
+    )
+
+    saved_payload = persist_worldbuilding_project_data(
+        {
+            "world": {
+                "world_name": "玄源大陆",
+                "core_concept": "禁忌血脉重塑秩序。",
+            }
+        },
+        project_manager=manager,
+    )
+
+    assert saved_payload["world"]["name"] == "玄源大陆"
+    assert saved_payload["world"]["world_name"] == "玄源大陆"
+    assert saved_payload["world"]["world_type"] == "废土"
+    assert saved_payload["world"]["core_concept"] == "禁忌血脉重塑秩序。"
+    assert saved_payload["locations"]["黑塔"]["description"] == "旧时代观测站"
+
+
+def test_worldbuilding_persistence_recovers_name_from_raw_content(client_with_project):
+    _client, manager = client_with_project
+
+    saved_payload = persist_worldbuilding_project_data(
+        {
+            "world": {
+                "raw_content": "```json\n{\"world_name\": \"合欢宗秘境\", \"world_type\": \"玄幻修仙\", \"rules\": [\"器物可被吸收\"]}\n```"
+            }
+        },
+        project_manager=manager,
+    )
+
+    assert saved_payload["world"]["name"] == "合欢宗秘境"
+    assert saved_payload["world"]["world_name"] == "合欢宗秘境"
+    assert saved_payload["world"]["world_type"] == "玄幻修仙"
+
+
+def test_worldbuilding_persistence_tolerates_fullwidth_json_commas(client_with_project):
+    _client, manager = client_with_project
+
+    saved_payload = persist_worldbuilding_project_data(
+        {
+            "world": {
+                "raw_content": (
+                    '{"world_name": "玄天大陆", "world_type": "玄幻", '
+                    '"culture": {"languages": ["大陆通用语"，"合欢宗暗语"]}}'
+                )
+            }
+        },
+        project_manager=manager,
+    )
+
+    assert saved_payload["world"]["name"] == "玄天大陆"
+    assert saved_payload["world"]["world_type"] == "玄幻"
+    assert "requirements" not in saved_payload["world"]
+
+
+def test_worldbuilding_get_suppresses_embedded_json_requirements_row(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data(
+        "worldbuilding",
+        {
+            "world": {
+                "name": "玄天大陆",
+                "world_type": "玄幻",
+                "requirements": '{"world_name": "玄天大陆", "power_system": {"name": "噬器魔功"}}',
+                "power_system": {"name": "噬器魔功"},
+            }
+        },
+    )
+
+    response = client.get("/api/project-data/worldbuilding")
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    assert any(row["name"] == "玄天大陆" for row in rows)
+    assert not any(row["name"] == "创作要求" for row in rows)
+
+
+def test_worldbuilding_get_shows_raw_content_as_named_row(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data(
+        "worldbuilding",
+        {"world": {"raw_content": "未解析但可展示的世界观正文"}},
+    )
+
+    response = client.get("/api/project-data/worldbuilding")
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    assert rows[0]["name"] == "世界观设定"
+    assert rows[0]["kind"] == "raw_content"
+
+
+def test_builtin_project_data_prefers_json_file_over_wiki_projection(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data(
+        "characters",
+        [{"name": "文件角色", "role": "主角", "description": "来自 characters.json"}],
+    )
+    get_library_service(manager.get_current_project_dir()).upsert_from_legacy(
+        "characters",
+        [{"name": "Wiki角色", "role": "配角", "description": "来自 wiki"}],
+    )
+
+    response = client.get("/api/project-data/characters")
+    assert response.status_code == 200
+    names = [item["name"] for item in response.json()["data"]]
+    assert "文件角色" in names
+    assert "Wiki角色" not in names
+
+
+@pytest.mark.parametrize(
+    "data_type",
+    [
+        "outline",
+        "chapters",
+        "worldbuilding",
+        "characters",
+        "items",
+        "eventlines",
+        "outline_settings",
+        "detail_settings",
+        "chapter_settings",
+        "chapter_summary",
+    ],
+)
+def test_empty_builtin_project_data_file_prevents_recovery_and_wiki_fallback(client_with_project, data_type):
+    client, manager = client_with_project
+    project_dir = manager.get_current_project_dir()
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "context.json").write_text(
+        json.dumps(
+            {
+                "contexts": {
+                    "world": {
+                        "key": "world",
+                        "value": {
+                            "world_name": "旧世界",
+                            "world_type": "旧类型",
+                        },
+                        "category": "world",
+                    },
+                    "outline": {
+                        "key": "outline",
+                        "value": {
+                            "chapters": [
+                                {"title": "旧大纲", "summary": "应被删除态屏蔽。"}
+                            ]
+                        },
+                        "category": "plot",
+                    },
+                    "characters": {
+                        "key": "characters",
+                        "value": [{"name": "旧角色", "description": "应被删除态屏蔽。"}],
+                        "category": "character",
+                    },
+                    "chapter_1_summary": {
+                        "key": "chapter_1_summary",
+                        "value": "旧正文摘要应被删除态屏蔽。",
+                        "category": "chapter",
+                    },
+                },
+                "history": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    chapters_dir = project_dir / "chapters"
+    chapters_dir.mkdir(parents=True, exist_ok=True)
+    (chapters_dir / "001_旧正文.md").write_text("旧正文内容应被删除态屏蔽。", encoding="utf-8")
+    svc = get_library_service(project_dir)
+    svc.upsert_from_legacy("outline", [{"title": "Wiki大纲", "summary": "应被屏蔽"}])
+    svc.upsert_from_legacy("characters", [{"name": "Wiki角色", "description": "应被屏蔽"}])
+    svc.upsert_from_legacy("worldbuilding", {"world": {"name": "Wiki世界观", "content": "应被屏蔽"}})
+    manager.save_project_data(data_type, [])
+
+    response = client.get(f"/api/project-data/{data_type}")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["data"] == []
+    assert manager.load_project_data(data_type) == []
+
+
+def test_outline_get_recovers_from_context_when_project_file_missing(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data("outline", [])
+    manager.get_project_data_path("outline").unlink(missing_ok=True)
+    project_dir = manager.get_current_project_dir()
+    (project_dir / "context.json").write_text(
+        json.dumps(
+            {
+                "contexts": {
+                    "outline": {
+                        "key": "outline",
+                        "value": {
+                            "title": "旧城录",
+                            "chapters": [
+                                {"title": "第一章 归来", "summary": "主角回到旧城。"}
+                            ],
+                        },
+                        "category": "plot",
+                    }
+                },
+                "history": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/project-data/outline")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data[0]["title"] == "第一章 归来"
+    assert "旧城" in data[0]["summary"]
+    assert manager.load_project_data("outline")[0]["title"] == "第一章 归来"
+
+
+def test_chapters_get_recovers_chapter_files_as_body_content(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data("chapters", [])
+    (manager.get_project_data_path("chapters")).unlink(missing_ok=True)
+    chapters_dir = manager.get_current_project_dir() / "chapters"
+    chapters_dir.mkdir(parents=True, exist_ok=True)
+    (chapters_dir / "001_第一章_归来.md").write_text("第一章正文内容", encoding="utf-8")
+
+    response = client.get("/api/project-data/chapters")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data[0]["title"] == "第一章_归来"
+    assert data[0]["content"] == "第一章正文内容"
+    assert manager.load_project_data("chapters")[0]["content"] == "第一章正文内容"
 
 
 

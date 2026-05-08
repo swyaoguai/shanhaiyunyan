@@ -13,6 +13,7 @@ import re
 from typing import Dict, Any, Optional, List
 from .base_agent import BaseAgent, AgentCapability
 from .knowledge_mixin import KnowledgeBaseMixin
+from ..content_sanitizer import strip_internal_author_markers
 from ..constants import WRITING_CONFIG, AGENT_TEMPERATURE, AGENT_TOKEN_CONFIG
 
 import logging
@@ -85,7 +86,15 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
         style = context.get("style", "") if context else ""
         aux_memory = context.get("aux_memory", {}) if context else {}
         plot_thread = context.get("plot_thread", {}) if context else {}
+        chapter_planning = str(context.get("chapter_planning", "") or "").strip() if context else ""
         trends_data = context.get("trends_data", []) if context else []
+        discussion_context = str(
+            input_data.get("discussion_context")
+            or input_data.get("recent_discussion")
+            or ((context or {}).get("discussion_context") if isinstance(context, dict) else "")
+            or ((context or {}).get("recent_discussion") if isinstance(context, dict) else "")
+            or ""
+        ).strip()
         
         # 进度：开始
         try:
@@ -120,7 +129,33 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
         trends_prompt = self._format_trends_context(trends_data)
         
-        prompt = f"""请撰写以下章节：
+        prompt = self._render_custom_task_prompt(
+            "write_chapter",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            chapter_outline=chapter_outline,
+            context={
+                "world": world,
+                "characters": characters,
+                "eventlines": eventlines,
+                "style": style,
+                "discussion_context": discussion_context,
+                "aux_memory": aux_memory,
+                "plot_thread": plot_thread,
+                "chapter_planning": chapter_planning,
+            },
+            previous_summary=previous_summary,
+            word_count=word_count,
+            world=world,
+            characters=characters,
+            eventlines=eventlines,
+            style=style,
+            discussion_context=discussion_context,
+            chapter_planning=chapter_planning,
+            plot_thread_state=plot_thread_prompt,
+        )
+        if not prompt:
+            prompt = f"""请撰写以下章节：
 
 ## 章节信息
 - 章节号：第{chapter_number}章
@@ -129,6 +164,12 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
 ## 章节大纲
 {chapter_outline}
+
+## 章纲/细纲约束
+{chapter_planning if chapter_planning else "无"}
+
+## 聊天讨论上下文（最高优先级）
+{discussion_context if discussion_context else "无"}
 
 ## 世界观背景
 {world if world else "通用现代/玄幻背景"}
@@ -147,7 +188,7 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
 ## 剧情线程状态（高优先级）
 {plot_thread_prompt}
-若本章已完成支线目标，可在文末添加隐藏注释：<!-- PLOT_THREAD:return_main -->
+如果本章完成支线目标，请用自然语言在剧情中制造回归主线的钩子，不要输出 HTML 注释或机器标记。
 
 {trends_prompt}
 
@@ -173,6 +214,7 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             temperature=AGENT_TEMPERATURE.CREATIVE_HIGH,  # 略高温度增加创意
             max_tokens=AGENT_TOKEN_CONFIG.CHAPTER_WRITER_MAX_TOKENS  # 确保足够字数
         )
+        response = strip_internal_author_markers(response)
         
         # 保存到知识库
         if self.has_knowledge_base:

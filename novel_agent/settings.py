@@ -61,7 +61,7 @@ class RateLimitSettings(BaseSettings):
     """频率限制配置"""
     model_config = SettingsConfigDict(env_prefix="RATE_LIMIT_", env_file=".env", extra="ignore")
 
-    enabled: bool = True
+    enabled: bool = False
     requests_per_minute: int = 60
     requests_per_hour: int = 1000
     burst_limit: int = 10
@@ -165,8 +165,8 @@ class AppSettings(BaseSettings):
     paths: PathsSettings = PathsSettings()
 
     # 应用信息
-    app_name: str = "小说创作智能体"
-    app_version: str = "1.2.0"
+    app_name: str = "山海·云烟"
+    app_version: str = "1.0"
     debug: bool = False
 
     def setup_logging(self) -> None:

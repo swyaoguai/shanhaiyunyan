@@ -1,6 +1,17 @@
-Startup failed: No module named 'uvicorn'
+Python executable: C:\Users\wen\Desktop\AGENT\.venv\Scripts\python.exe
+Working directory: C:\Users\wen\Desktop\AGENT
+Startup failed: invalid syntax. Perhaps you forgot a comma? (router_agent.py, line 1726)
 
 Traceback (most recent call last):
-  File "C:\Users\wen\Desktop\AGENT\run.py", line 139, in main
-    import uvicorn
-ModuleNotFoundError: No module named 'uvicorn'
+  File "C:\Users\wen\Desktop\AGENT\run.py", line 150, in main
+    from novel_agent.web import create_app
+  File "C:\Users\wen\Desktop\AGENT\novel_agent\web\__init__.py", line 2, in <module>
+    from .app import create_app
+  File "C:\Users\wen\Desktop\AGENT\novel_agent\web\app.py", line 26, in <module>
+    from ..agents import RouterAgent
+  File "C:\Users\wen\Desktop\AGENT\novel_agent\agents\__init__.py", line 20, in <module>
+    from .router_agent import RouterAgent, UserIntent, IntentAnalysis
+  File "C:\Users\wen\Desktop\AGENT\novel_agent\agents\router_agent.py", line 1726
+    "检测到您要进行短篇创作，请直接使用左侧固定入口「短篇创作」。"
+    ^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?

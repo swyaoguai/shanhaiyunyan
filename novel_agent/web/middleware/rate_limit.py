@@ -239,7 +239,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         "/",
         "/health",
         "/favicon.ico",
-        # 设置类只读接口不受限
+    }
+
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    # 切换页面时会频繁读取这些配置/状态接口，不应触发冷却封禁。
+    READ_ONLY_SKIP_PREFIXES = {
         "/api/settings",
         "/api/global-config",
         "/api/agents",
@@ -253,6 +258,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         "/api/project-data",
         "/api/projects",
         "/api/aux-memory",
+        "/api/token-stats",
     }
 
     # 需要更严格限制的路径（LLM调用等）
@@ -290,18 +296,37 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         logger.info("RateLimitMiddleware initialized")
 
-    def _should_skip(self, path: str) -> bool:
+    @staticmethod
+    def _canonical_api_path(path: str) -> str:
+        """Map versioned compatibility paths back to their canonical API form."""
+        if path == "/api/v1":
+            return "/api"
+        if path.startswith("/api/v1/"):
+            return "/api" + path[len("/api/v1"):]
+        return path
+
+    @staticmethod
+    def _matches_path_or_child(path: str, prefix: str) -> bool:
+        return path == prefix or path.startswith(prefix + "/")
+
+    def _should_skip(self, path: str, method: str = "GET") -> bool:
         """检查是否应该跳过频率限制"""
-        if path in self.SKIP_PATHS:
+        canonical_path = self._canonical_api_path(path)
+        if path in self.SKIP_PATHS or canonical_path in self.SKIP_PATHS:
             return True
-        if path.startswith("/static"):
+        if canonical_path.startswith("/static"):
             return True
+        if method.upper() in self.SAFE_METHODS:
+            for prefix in self.READ_ONLY_SKIP_PREFIXES:
+                if self._matches_path_or_child(canonical_path, prefix):
+                    return True
         return False
 
     def _is_strict_path(self, path: str) -> bool:
         """检查是否是严格限制路径"""
+        canonical_path = self._canonical_api_path(path)
         for strict_path in self.STRICT_PATHS:
-            if path.startswith(strict_path):
+            if self._matches_path_or_child(canonical_path, strict_path):
                 return True
         return False
 
@@ -310,7 +335,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # 跳过静态资源和健康检查
-        if self._should_skip(path):
+        if self._should_skip(path, request.method):
             return await call_next(request)
 
         # 选择限制器

@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 小说转剧本渲染层
+ * 山海·云烟 - 小说转剧本渲染层
  */
 
 function formatNovelToScriptSavedTime() {
@@ -48,7 +48,7 @@ function getNovelToScriptLoadingMeta() {
         text: batchCount > 1 ? `正在执行${modeLabel}` : '正在转换剧本',
         hint: batchCount > 1
             ? `预计共 ${batchCount} 批，当前请求会按批顺序处理并在完成后自动合并。`
-            : '当前文本会在一次请求内完成转换并生成场景台本。'
+            : '当前文本会在一次请求内完成转换并生成分场景剧本。'
     };
 }
 
@@ -145,7 +145,7 @@ function renderNovelToScriptWorkbenchPreview() {
         return `
             <div class="novel-to-script-empty-state">
                 <i class="ri-film-line"></i>
-                <div>转换结果会显示在这里，默认以纯文本台本形式预览。</div>
+                <div>转换结果会显示在这里，默认以纯文本剧本形式预览。</div>
             </div>
         `;
     }
@@ -192,7 +192,7 @@ function renderNovelToScriptScenesView() {
                 <article class="novel-to-script-info-card ${index === novelToScriptState.selectedSceneIndex ? 'active' : ''}">
                     <div class="novel-to-script-info-title">${escapeHtml(scene.scene_label || `场景${index + 1}`)}</div>
                     <div class="novel-to-script-info-copy">${escapeHtml(scene.heading || '未命名场景')}</div>
-                    <div class="novel-to-script-info-meta">人物：${escapeHtml(scene.characters_text || '待补充')} · 节拍：${Number(scene.beat_count || 0)}</div>
+                    <div class="novel-to-script-info-meta">人物：${escapeHtml(scene.characters_text || '待补充')} · 段落：${Number(scene.beat_count || 0)}</div>
                 </article>
             `).join('')}
         </div>
@@ -219,7 +219,7 @@ function renderNovelToScriptResultView() {
                 <div>
                     <div class="novel-to-script-kicker">Novel to Script</div>
                     <h1 class="novel-to-script-title"><i class="ri-movie-2-line"></i> 小说转剧本</h1>
-                    <div class="novel-to-script-subtitle">结果页默认展示纯文本台本，同时保留场景结构预览，方便继续改写与导出。</div>
+                    <div class="novel-to-script-subtitle">结果页默认展示纯文本剧本，同时保留分场景结构预览，方便继续改写与导出。</div>
                 </div>
                 <div class="novel-to-script-hero-tags">
                     <span class="novel-to-script-chip">${novelToScriptState.sourceFilename ? escapeHtml(novelToScriptState.sourceFilename) : '未命名输入'}</span>
@@ -229,7 +229,7 @@ function renderNovelToScriptResultView() {
             </div>
             <div class="novel-to-script-result-layout">
                 <aside class="novel-to-script-scene-list">
-                    <button type="button" class="novel-to-script-back-btn" id="novel-to-script-back-workbench">
+                    <button type="button" class="novel-to-script-back-btn app-back-button" id="novel-to-script-back-workbench">
                         <i class="ri-arrow-left-line"></i>
                         <span>返回工作台</span>
                     </button>
@@ -278,12 +278,12 @@ function renderNovelToScriptWorkbench() {
                 <div>
                     <div class="novel-to-script-kicker">Standalone Workbench</div>
                     <h1 class="novel-to-script-title"><i class="ri-movie-2-line"></i> 小说转剧本</h1>
-                    <div class="novel-to-script-subtitle">把已有小说内容改写为场景块台本。第一版支持粘贴正文、导入文件、生成结果、编辑复制与导出。</div>
+                    <div class="novel-to-script-subtitle">把已有小说内容改写为分场景剧本。支持粘贴正文、导入文件、生成结果、编辑复制与导出。</div>
                 </div>
                 <div class="novel-to-script-hero-tags">
                     <span class="novel-to-script-chip">推荐：${escapeHtml(strategySummary.recommendedModeLabel || '单次转换')}</span>
                     <span class="novel-to-script-chip">预计：${strategyBatchCount} ${strategyBatchCount > 1 ? '批' : '次'}</span>
-                    <span class="novel-to-script-chip">${novelToScriptState.config.scene_density === 'high' ? '高场景密度' : novelToScriptState.config.scene_density === 'low' ? '低场景密度' : '中场景密度'}</span>
+                    <span class="novel-to-script-chip">${novelToScriptState.config.scene_density === 'high' ? '场景详细' : novelToScriptState.config.scene_density === 'low' ? '场景简洁' : '场景适中'}</span>
                     <span class="novel-to-script-chip">${formatNovelToScriptSavedTime()}</span>
                 </div>
             </div>
@@ -325,7 +325,7 @@ function renderNovelToScriptWorkbench() {
                     <div class="novel-to-script-panel-head">
                         <div>
                             <div class="novel-to-script-panel-title">转换配置</div>
-                            <div class="novel-to-script-panel-copy">先保证输出稳定，再逐步增强对白、场景密度和风格差异。</div>
+                            <div class="novel-to-script-panel-copy">先保证输出稳定，再逐步调整对话比例、场景详细程度和风格差异。</div>
                         </div>
                     </div>
                     <div class="novel-to-script-form-grid">
@@ -344,40 +344,35 @@ function renderNovelToScriptWorkbench() {
                             </select>
                         </label>
                         <label class="novel-to-script-field-block">
-                            <span>剧本类型</span>
-                            <select id="novel-to-script-style" class="novel-to-script-field">
-                                ${renderNovelToScriptSelectOptions(options.script_styles, novelToScriptState.config.script_style)}
-                            </select>
-                        </label>
-                        <label class="novel-to-script-field-block">
-                            <span>输出粒度</span>
+                            <span>转换方式</span>
                             <select id="novel-to-script-convert-mode" class="novel-to-script-field">
                                 ${renderNovelToScriptSelectOptions(options.convert_modes, novelToScriptState.config.convert_mode)}
                             </select>
                         </label>
                         <label class="novel-to-script-field-block">
-                            <span>场景密度</span>
+                            <span>场景详细程度</span>
                             <select id="novel-to-script-scene-density" class="novel-to-script-field">
                                 ${renderNovelToScriptSelectOptions(options.scene_densities, novelToScriptState.config.scene_density)}
                             </select>
                         </label>
                         <label class="novel-to-script-field-block">
-                            <span>对白占比</span>
+                            <span>对话比例</span>
                             <select id="novel-to-script-dialogue-ratio" class="novel-to-script-field">
                                 ${renderNovelToScriptSelectOptions(options.dialogue_ratios, novelToScriptState.config.dialogue_ratio)}
                             </select>
                         </label>
                         <label class="novel-to-script-field-block">
-                            <span>人名策略</span>
+                            <span>角色名处理</span>
                             <select id="novel-to-script-human-name-strategy" class="novel-to-script-field">
                                 ${renderNovelToScriptSelectOptions(options.human_name_strategies, novelToScriptState.config.human_name_strategy)}
                             </select>
                         </label>
                         <label class="novel-to-script-toggle">
                             <input id="novel-to-script-keep-voice-style" type="checkbox" ${novelToScriptState.config.keep_voice_style ? 'checked' : ''}>
-                            <span>尽量保留原文人物语气和网文化表达</span>
+                            <span>保留原文语气和网络小说风格</span>
                         </label>
                     </div>
+                    <div class="novel-to-script-panel-copy" style="margin-top:8px;font-size:12px;opacity:0.7;">以上配置会在点击"开始转换"时生效，修改后需重新转换才能看到变化。</div>
                     <div class="novel-to-script-action-row">
                         <button id="novel-to-script-convert" class="novel-to-script-btn novel-to-script-btn-primary" ${isBusy ? 'disabled' : ''}>
                             ${isBusy ? `转换中...` : (hasResult ? '重新转换' : `开始转换`)}
@@ -397,7 +392,7 @@ function renderNovelToScriptWorkbench() {
                 <div class="novel-to-script-panel-head">
                     <div>
                         <div class="novel-to-script-panel-title">转换结果</div>
-                        <div class="novel-to-script-panel-copy">默认按纯文本台本连续展示，便于直接复制、修改、导出。</div>
+                        <div class="novel-to-script-panel-copy">默认按纯文本剧本连续展示，便于直接复制、修改、导出。</div>
                     </div>
                     <div class="novel-to-script-action-row">
                         <button id="novel-to-script-export-txt" class="novel-to-script-btn" ${hasResult ? '' : 'disabled'}>导出 TXT</button>

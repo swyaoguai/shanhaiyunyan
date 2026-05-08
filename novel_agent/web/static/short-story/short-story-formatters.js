@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作格式化与派生辅助
+ * 山海·云烟 - 短篇创作格式化与派生辅助
  */
 
 function renderShortStoryModelOptions(configId, selectedModel) {
@@ -67,7 +67,7 @@ function isShortStoryPlaceholderBlueprint(blueprint = {}) {
 
 function getShortStorySectionsMeta() {
     return [
-        { id: 'fusion', step: 1, title: '融合方案', icon: 'ri-magic-line', stages: ['awaiting_keywords', 'analyzing_source_input', 'generating_fusion_options', 'awaiting_fusion_selection'] },
+        { id: 'fusion', step: 1, title: '创意方案', icon: 'ri-magic-line', stages: ['awaiting_keywords', 'analyzing_source_input', 'generating_fusion_options', 'awaiting_fusion_selection'] },
         { id: 'synopsis', step: 2, title: '导语生成', icon: 'ri-chat-quote-line', stages: ['generating_synopsis', 'awaiting_synopsis_selection'] },
         { id: 'outline', step: 3, title: '大纲确认', icon: 'ri-git-branch-line', stages: ['generating_outline', 'awaiting_outline_confirm'] },
         { id: 'chapter', step: 4, title: '正文创作', icon: 'ri-book-open-line', stages: ['writing_content'] },
@@ -188,15 +188,15 @@ function getShortStoryLoadingMeta(actionName = shortStoryState.loadingAction) {
     if (synopsisSelectionMatch) {
         return {
             text: `正在确认第${synopsisSelectionMatch[1]}条导语...`,
-            hint: '确认后会自动推进到大纲阶段。'
+            hint: '确认后将自动进入大纲生成阶段。'
         };
     }
 
     const fusionSelectionMatch = actionName.match(/^select-fusion-(\d+)$/);
     if (fusionSelectionMatch) {
         return {
-            text: `正在确认第${fusionSelectionMatch[1]}个融合方案...`,
-            hint: '确认后会自动推进到导语阶段。'
+            text: `正在确认第${fusionSelectionMatch[1]}个创意方案...`,
+            hint: '确认后将自动进入导语生成阶段。'
         };
     }
 
@@ -211,11 +211,11 @@ function getShortStoryLoadingMeta(actionName = shortStoryState.loadingAction) {
     const actionMeta = {
         'generate-fusion': {
             text: '正在识别素材并生成方案...',
-            hint: '系统会自动拆解输入，并给出 3 个不同故事路数的融合方案。'
+            hint: '系统会自动拆解输入，并给出 3 个不同风格的创意方案。'
         },
         'generate-synopsis': {
             text: '正在生成导语...',
-            hint: '系统会按已选融合方案一次产出 5 条候选导语。'
+            hint: '系统会按已选创意方案一次产出 5 条候选导语。'
         },
         'generate-outline': {
             text: '正在生成大纲...',

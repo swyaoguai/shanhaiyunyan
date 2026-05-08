@@ -14,7 +14,9 @@ import pytest
 import asyncio
 import tempfile
 import os
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 
@@ -84,6 +86,131 @@ class TestLLMClient:
 
             assert result == "Test response"
             mock_create.assert_called_once()
+
+    def test_anthropic_base_url_strips_v1_suffix(self):
+        """测试 Anthropic base_url 以根地址传给 SDK，避免 /v1/v1/messages。"""
+        from novel_agent.agents.llm_client import LLMClient
+
+        assert LLMClient._normalize_anthropic_base_url("https://api.anthropic.com/v1") == "https://api.anthropic.com"
+        assert LLMClient._normalize_anthropic_base_url("https://proxy.example/anthropic/v1/") == "https://proxy.example/anthropic"
+        assert LLMClient._normalize_anthropic_base_url("https://proxy.example/anthropic") == "https://proxy.example/anthropic"
+
+    def test_anthropic_message_builder_preserves_tool_result_blocks(self):
+        """测试 Anthropic 多轮工具结果按 user content block 续传。"""
+        from novel_agent.agents.llm_client import LLMClient
+
+        client = object.__new__(LLMClient)
+        messages, system_prompt = client._build_anthropic_messages(
+            [
+                {"role": "system", "content": "system A"},
+                {"role": "user", "content": "调用工具"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "我将调用工具"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {"q": "Claude"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "结果"},
+                    ],
+                },
+            ],
+            "system B",
+        )
+
+        assert system_prompt == "system A\n\nsystem B"
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"][1]["type"] == "tool_use"
+        assert messages[2]["content"][0]["tool_use_id"] == "toolu_1"
+
+    @pytest.mark.asyncio
+    async def test_anthropic_stream_parses_content_block_tool_input_after_stop(self, caplog):
+        """测试 Anthropic 流式工具参数只拼接到 content_block_stop 后解析。"""
+        from novel_agent.agents.llm_client import LLMClient
+
+        caplog.set_level("INFO", logger="novel_agent.agents.llm_client")
+
+        class FakeAnthropicStream:
+            def __init__(self, events):
+                self._events = events
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def __aiter__(self):
+                self._iter = iter(self._events)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        class FakeMessages:
+            def stream(self, **params):
+                return FakeAnthropicStream([
+                    SimpleNamespace(
+                        type="content_block_delta",
+                        index=0,
+                        delta=SimpleNamespace(type="text_delta", text="先查"),
+                    ),
+                    SimpleNamespace(
+                        type="content_block_start",
+                        index=1,
+                        content_block=SimpleNamespace(type="tool_use", id="toolu_1", name="search", input={}),
+                    ),
+                    SimpleNamespace(
+                        type="content_block_delta",
+                        index=1,
+                        delta=SimpleNamespace(type="input_json_delta", partial_json='{"query":'),
+                    ),
+                    SimpleNamespace(
+                        type="content_block_delta",
+                        index=1,
+                        delta=SimpleNamespace(type="input_json_delta", partial_json='"Claude"}'),
+                    ),
+                    SimpleNamespace(type="content_block_stop", index=1),
+                    SimpleNamespace(
+                        type="message_delta",
+                        delta=SimpleNamespace(stop_reason="tool_use"),
+                        usage=SimpleNamespace(output_tokens=12),
+                    ),
+                ])
+
+        client = object.__new__(LLMClient)
+        client._client = SimpleNamespace(messages=FakeMessages())
+        client.metrics_namespace = "test"
+
+        chunks = []
+        async for chunk in client._stream_anthropic({"model": "claude-test"}):
+            chunks.append(chunk)
+
+        assert "".join(chunks) == "先查"
+        assert "Anthropic tool_use parsed" in caplog.text
+        assert "search" in caplog.text
+
+    def test_anthropic_non_stream_tool_use_returns_json_when_no_text(self):
+        """测试非流式 Anthropic tool_use 响应没有文本时返回可解析 JSON。"""
+        from novel_agent.agents.llm_client import LLMClient
+
+        client = object.__new__(LLMClient)
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="tool_use", id="toolu_1", name="search", input={"query": "Claude"}),
+            ]
+        )
+
+        content, tool_uses = client._extract_anthropic_content(response)
+        assert content == ""
+        assert tool_uses == [{"id": "toolu_1", "name": "search", "input": {"query": "Claude"}}]
+        assert json.loads(json.dumps({"tool_calls": tool_uses}, ensure_ascii=False))["tool_calls"][0]["id"] == "toolu_1"
 
 
 # ========================================

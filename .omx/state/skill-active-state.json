@@ -1,31 +1,17 @@
 {
   "version": 1,
   "active": true,
-  "skill": "ultrawork",
-  "keyword": "parallel",
-  "phase": "planning",
-  "activated_at": "2026-04-26T09:07:18.348Z",
-  "updated_at": "2026-04-26T09:07:18.348Z",
+  "skill": "cancel",
+  "keyword": "stop",
+  "phase": "reviewing",
+  "activated_at": "2026-05-01T17:54:08.225Z",
+  "updated_at": "2026-05-08T15:25:59.288Z",
   "source": "keyword-detector",
-  "session_id": "",
-  "thread_id": "019dc544-9d52-7251-ad6e-e383b8e19b9a",
-  "turn_id": "019dc8e6-7724-7ec1-8996-3226370830a7",
-  "active_skills": [
-    {
-      "skill": "ultrawork",
-      "phase": "planning",
-      "active": true,
-      "activated_at": "2026-04-26T09:07:18.348Z",
-      "updated_at": "2026-04-26T09:07:18.348Z",
-      "session_id": "",
-      "thread_id": "019dc544-9d52-7251-ad6e-e383b8e19b9a",
-      "turn_id": "019dc8e6-7724-7ec1-8996-3226370830a7"
-    }
-  ],
   "input_lock": {
     "active": false,
     "scope": "deep-interview-auto-approval",
     "acquired_at": "2026-04-25T14:00:40.498Z",
+    "released_at": "2026-05-01T17:54:08.225Z",
     "blocked_inputs": [
       "yes",
       "y",
@@ -37,9 +23,6 @@
       "next i should"
     ],
     "message": "Deep interview is active; auto-approval shortcuts are blocked until the interview finishes.",
-    "released_at": "2026-04-26T09:07:18.348Z",
     "exit_reason": "handoff"
-  },
-  "initialized_mode": "ultrawork",
-  "initialized_state_path": ".omx/state/ultrawork-state.json"
+  }
 }

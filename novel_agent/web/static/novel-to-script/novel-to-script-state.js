@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 小说转剧本状态层
+ * 山海·云烟 - 小说转剧本状态层
  */
 
 const NOVEL_TO_SCRIPT_PROJECT_STATE_KEY = 'novel_to_script_draft';

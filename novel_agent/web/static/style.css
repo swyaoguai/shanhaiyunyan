@@ -1059,6 +1059,11 @@ body.has-bg-image .copilot-panel {
     white-space: normal;
 }
 
+.msg.ai.streaming .msg-content {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .msg-content p {
     margin: 0 0 8px;
 }
@@ -1250,6 +1255,135 @@ body.has-bg-image .copilot-panel {
     flex-direction: column;
     gap: 8px;
     position: relative;
+}
+
+.copilot-creative-mode-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 32px;
+    width: 100%;
+}
+
+.copilot-creative-mode-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-shrink: 0;
+}
+
+.copilot-creative-mode-label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.copilot-creative-mode-select {
+    height: 30px;
+    max-width: 150px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.24);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1;
+    padding: 0 28px 0 10px;
+    cursor: pointer;
+}
+
+.copilot-creative-mode-select:hover {
+    border-color: rgba(var(--accent-rgb, 99, 102, 241), 0.55);
+}
+
+.copilot-creative-mode-hint {
+    min-width: 0;
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.copilot-auto-save-row {
+    display: flex;
+    align-items: center;
+    min-height: 30px;
+}
+
+.copilot-auto-save-row.is-disabled {
+    opacity: 0.58;
+}
+
+.copilot-auto-save-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+}
+
+.copilot-auto-save-row.is-disabled .copilot-auto-save-control {
+    cursor: not-allowed;
+}
+
+.copilot-auto-save-checkbox {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.copilot-auto-save-track {
+    position: relative;
+    width: 34px;
+    height: 18px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.28);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    flex: 0 0 auto;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.copilot-auto-save-track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.2s ease;
+}
+
+.copilot-auto-save-checkbox:checked + .copilot-auto-save-track {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+.copilot-auto-save-checkbox:checked + .copilot-auto-save-track::after {
+    transform: translateX(16px);
+}
+
+.copilot-auto-save-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.copilot-auto-save-status {
+    color: var(--text-secondary);
+    white-space: nowrap;
 }
 
 /* 输入框顶部拖动条 - 增强版 */
@@ -1625,6 +1759,23 @@ body.resizing-input * {
     animation: none;
 }
 
+.copilot-progress-trace {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding-left: 10px;
+    border-left: 2px solid rgba(99, 102, 241, 0.35);
+}
+
+.copilot-progress-trace-line {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+    word-break: break-word;
+    white-space: normal;
+}
+
 @keyframes copilot-status-fade-in {
     from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: translateY(0); }
@@ -1643,12 +1794,65 @@ body.resizing-input * {
 /* 简化的工作流状态显示 */
 .copilot-workflow-simple {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     justify-content: center;
+    gap: 8px;
     padding: 8px 12px;
     background: rgba(99, 102, 241, 0.08);
     border-radius: 8px;
     border: 1px solid rgba(99, 102, 241, 0.15);
+}
+
+.copilot-workflow-task-queue {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+}
+
+.copilot-workflow-task-row {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.copilot-workflow-task-index {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(148, 163, 184, 0.14);
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.copilot-workflow-task-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+
+.copilot-workflow-task-status,
+.copilot-workflow-task-review {
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.28);
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.copilot-workflow-review-note {
+    padding-top: 2px;
+    font-size: 11px;
+    color: #fca5a5;
 }
 
 .copilot-workflow-header {
@@ -3542,6 +3746,7 @@ select optgroup {
 .settings-button:focus-visible,
 .short-story-btn:focus-visible,
 .short-story-field:focus-visible,
+.copilot-creative-mode-select:focus-visible,
 .copilot-input textarea:focus-visible,
 .icon-btn:focus-visible {
     outline: none;
@@ -3549,6 +3754,7 @@ select optgroup {
 }
 
 .short-story-field:focus-visible,
+.copilot-creative-mode-select:focus-visible,
 .copilot-input textarea:focus-visible {
     border-color: color-mix(in srgb, var(--accent-color) 72%, white 10%);
 }
@@ -5207,6 +5413,84 @@ select optgroup {
     #kw-sidebar,
     #kw-relations {
         padding: 12px;
+    }
+}
+
+/* ===== 明显返回按钮 ===== */
+.app-back-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+button.app-back-button,
+a.app-back-button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center;
+    gap: 8px !important;
+    min-width: 128px;
+    min-height: 42px;
+    padding: 0 16px !important;
+    border-radius: 8px !important;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 58%, var(--border-color)) !important;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent-color) 24%, rgba(255, 255, 255, 0.08)), rgba(255, 255, 255, 0.055)) !important;
+    color: var(--text-primary) !important;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    text-decoration: none;
+    cursor: pointer;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+button.app-back-button:hover,
+a.app-back-button:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent-color) 78%, white 8%) !important;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent-color) 34%, rgba(255, 255, 255, 0.1)), rgba(255, 255, 255, 0.08)) !important;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28), 0 0 0 1px color-mix(in srgb, var(--accent-color) 22%, transparent);
+}
+
+button.app-back-button:active,
+a.app-back-button:active {
+    transform: translateY(0);
+}
+
+button.app-back-button:focus-visible,
+a.app-back-button:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring), 0 12px 28px rgba(0, 0, 0, 0.26);
+}
+
+.app-back-button i {
+    color: color-mix(in srgb, var(--accent-color) 72%, white);
+    font-size: 18px;
+    line-height: 1;
+}
+
+.app-back-button--floating {
+    position: absolute !important;
+    right: 24px;
+    bottom: 24px;
+    z-index: 30;
+    min-width: 152px;
+}
+
+@media (max-width: 640px) {
+    button.app-back-button,
+    a.app-back-button {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .app-back-button--floating {
+        left: 24px;
+        right: 24px;
+        width: auto !important;
     }
 }
 

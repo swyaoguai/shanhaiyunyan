@@ -238,7 +238,7 @@ describe('copilot realtime status', () => {
 
     expect(window.apiCall).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(window.store.collabRuntimePollingIntervalMs * 2);
+    await vi.advanceTimersByTimeAsync(window.store.collabRuntimePollingIntervalMs);
     expect(window.apiCall).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(12000);
@@ -285,6 +285,77 @@ describe('copilot realtime status', () => {
     await window.refreshNovelCollabRuntime();
     expect(window.apiCall).toHaveBeenCalledTimes(2);
 
+    vi.useRealTimers();
+  });
+
+  it('updates the session model label from runtime status polling', async () => {
+    window.apiCall.mockResolvedValue({
+      workflow_state: 'writing',
+      current_model: 'gpt-5.5',
+      checkpoint: {},
+      project: {},
+      task_pool: null,
+      collab_execution_trace: null
+    });
+
+    await window.refreshNovelCollabRuntime({ force: true });
+
+    expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：gpt-5.5');
+  });
+
+  it('updates the session model label when the global API config changes', () => {
+    window.bindEvents();
+
+    window.dispatchEvent(new CustomEvent('global-api-config-updated', {
+      detail: { activeModel: 'gpt-5.6-live' }
+    }));
+
+    expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：gpt-5.6-live');
+  });
+
+  it('extracts the active sub-agent model from runtime task metadata', async () => {
+    window.apiCall.mockResolvedValue({
+      workflow_state: 'writing',
+      checkpoint: {},
+      project: {},
+      task_pool: {
+        tasks: [
+          {
+            title: '生成世界观',
+            status: 'running',
+            assigned_agent: 'Worldbuilder',
+            metadata: { current_model: 'sub-agent-model-1' }
+          }
+        ]
+      },
+      collab_execution_trace: null
+    });
+
+    await window.refreshNovelCollabRuntime({ force: true });
+
+    expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：sub-agent-model-1');
+  });
+
+  it('keeps the ten-second runtime polling heartbeat active even when websocket is connected', async () => {
+    vi.useFakeTimers();
+    window.store.collabRealtimeConnected = true;
+    window.apiCall.mockResolvedValue({
+      workflow_state: 'writing',
+      current_model: 'heartbeat-model',
+      checkpoint: {},
+      project: {},
+      task_pool: null,
+      collab_execution_trace: null
+    });
+
+    expect(window.store.collabRuntimePollingIntervalMs).toBe(10000);
+    window.startNovelCollabRuntimePolling();
+    await vi.advanceTimersByTimeAsync(10000);
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/v1/status', 'GET');
+    expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：heartbeat-model');
+
+    window.stopNovelCollabRuntimePolling();
     vi.useRealTimers();
   });
 
@@ -338,12 +409,16 @@ describe('copilot realtime status', () => {
       payload: {
         agent: 'Worldbuilder',
         message: '正在生成世界观骨架（力量体系/地理/历史）...',
-        progress: 40
+        progress: 40,
+        model: 'claude-opus-4-6'
       }
     });
 
     expect(document.getElementById('copilot-workflow-panel')?.textContent).toContain('世界观构建');
     expect(document.getElementById('copilot-workflow-panel')?.textContent).toContain('正在生成世界观骨架');
+    expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：claude-opus-4-6');
+    expect(document.getElementById('copilot-session-agent')?.textContent).toContain('世界观构建师');
+    expect(document.getElementById('copilot-session-agent')?.textContent).not.toContain('准备就绪');
 
     await vi.advanceTimersByTimeAsync(1600);
     expect(statusFetchCount).toBe(1);

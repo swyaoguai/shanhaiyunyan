@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 章节管理模块
+ * 山海·云烟 - 章节管理模块
  * 包含：章节CRUD、章节编辑器、自动保存
  */
 
@@ -7,6 +7,74 @@
 
 let currentEditingChapterIndex = null;
 let autoSaveTimer = null;
+
+function getStoredChapters() {
+    if (!Array.isArray(store.projectData.chapters)) {
+        store.projectData.chapters = [];
+    }
+    return store.projectData.chapters;
+}
+
+function getChapterSettingPlaceholders() {
+    const settings = Array.isArray(store.projectData.chapter_settings) ? store.projectData.chapter_settings : [];
+    return settings.map((item, index) => {
+        const chapterNumber = Number(item.chapter_number || item.chapter || index + 1) || (index + 1);
+        return {
+            chapter_number: chapterNumber,
+            title: item.name || item.title || `第${chapterNumber}章`,
+            summary: item.description || item.chapter_goal || item.key_event || '',
+            content: '',
+            chapter_goal: item.chapter_goal || '',
+            key_event: item.key_event || '',
+            ending_hook: item.ending_hook || '',
+            source: 'chapter_settings'
+        };
+    });
+}
+
+function getMultiAgentChapters() {
+    const chapters = getStoredChapters();
+    if (chapters.length > 0) {
+        return chapters;
+    }
+    return getChapterSettingPlaceholders();
+}
+
+function ensureChapterRecord(index) {
+    const chapters = getStoredChapters();
+    if (chapters[index]) {
+        return chapters[index];
+    }
+
+    const placeholders = getChapterSettingPlaceholders();
+    if (chapters.length === 0 && placeholders.length > 0) {
+        placeholders.forEach((placeholder) => {
+            chapters.push({
+                ...placeholder,
+                content: placeholder.content || '',
+                created_at: new Date().toISOString(),
+                created_from: 'chapter_settings_placeholder'
+            });
+        });
+    }
+    if (chapters[index]) {
+        return chapters[index];
+    }
+
+    const placeholder = placeholders[index];
+    if (!placeholder) {
+        return null;
+    }
+
+    const chapter = {
+        ...placeholder,
+        content: placeholder.content || '',
+        created_at: new Date().toISOString(),
+        created_from: placeholder.source === 'chapter_settings' ? 'chapter_settings_placeholder' : 'manual'
+    };
+    chapters[index] = chapter;
+    return chapter;
+}
 
 function addNewChapter() {
     showAddChapterDialog();
@@ -93,8 +161,8 @@ function showCollaborativeImportDialog() {
             const importedCount = response.imported_chapters || 0;
             showToast(`已导入 ${importedCount} 章，协作记忆已自动整理`, 'success');
 
-            if (Array.isArray(store.projectData.outline) && store.projectData.outline.length > 0) {
-                const openIndex = Math.max(0, store.projectData.outline.length - importedCount);
+            if (Array.isArray(store.projectData.chapters) && store.projectData.chapters.length > 0) {
+                const openIndex = Math.max(0, store.projectData.chapters.length - importedCount);
                 openChapterEditor(openIndex);
             }
         } catch (e) {
@@ -110,7 +178,7 @@ function showAddChapterDialog() {
     const modal = document.getElementById('modal-container');
     modal.classList.remove('hidden');
     
-    const chapters = store.projectData.outline || [];
+    const chapters = getMultiAgentChapters();
     const nextChapterNum = chapters.length + 1;
     
     modal.innerHTML = `
@@ -165,13 +233,14 @@ function showAddChapterDialog() {
             return;
         }
         
-        store.projectData.outline.push({
+        getStoredChapters().push({
             title: title,
+            chapter_number: getStoredChapters().length + 1,
             summary: summary,
             content: '',
             created_at: new Date().toISOString()
         });
-        saveOutlineData();
+        saveChaptersData();
         renderNavPanel('write');
         
         modal.classList.add('hidden');
@@ -179,7 +248,7 @@ function showAddChapterDialog() {
         showToast(`章节「${title}」已创建`);
         
         // 自动打开新创建的章节
-        openChapterEditor(store.projectData.outline.length - 1);
+        openChapterEditor(getStoredChapters().length - 1);
     });
     
     // 回车确认
@@ -191,25 +260,25 @@ function showAddChapterDialog() {
 }
 
 function editChapterTitle(index) {
-    const chapter = store.projectData.outline[index];
+    const chapter = ensureChapterRecord(index);
     if (!chapter) return;
 
     const newTitle = prompt('修改章节标题：', chapter.title);
     if (newTitle && newTitle.trim() && newTitle !== chapter.title) {
-        store.projectData.outline[index].title = newTitle.trim();
-        saveOutlineData();
+        chapter.title = newTitle.trim();
+        saveChaptersData();
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
         showToast('标题已更新');
     }
 }
 
 function deleteChapter(index) {
-    const chapter = store.projectData.outline[index];
+    const chapter = getMultiAgentChapters()[index];
     if (!chapter) return;
 
     if (confirm(`确定要删除「${formatChapterDisplay(index + 1, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
-        store.projectData.outline.splice(index, 1);
-        saveOutlineData();
+        getStoredChapters().splice(index, 1);
+        saveChaptersData();
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
 
         // 如果正在编辑这个章节，清空编辑器
@@ -224,7 +293,7 @@ function deleteChapter(index) {
 
 
 function openChapterEditor(index) {
-    const chapter = store.projectData.outline[index];
+    const chapter = ensureChapterRecord(index);
     if (!chapter) return;
 
     currentEditingChapterIndex = index;
@@ -303,7 +372,7 @@ function openChapterEditor(index) {
         aiContinueBtn.innerHTML = '<i class="ri-loader-4-line"></i> AI续写中...';
         
         try {
-            const chapter = store.projectData.outline[currentEditingChapterIndex];
+            const chapter = ensureChapterRecord(currentEditingChapterIndex);
             const trendsEnabled = typeof trendsState !== 'undefined'
                 ? trendsState.enabled !== false
                 : false;
@@ -372,10 +441,12 @@ function saveCurrentChapter() {
     const contentInput = document.getElementById('chapter-content-input');
 
     if (titleInput && contentInput) {
-        store.projectData.outline[currentEditingChapterIndex].title = titleInput.value;
-        store.projectData.outline[currentEditingChapterIndex].content = contentInput.value;
-        store.projectData.outline[currentEditingChapterIndex].updated_at = new Date().toISOString();
-        saveOutlineData();
+        const chapter = ensureChapterRecord(currentEditingChapterIndex);
+        if (!chapter) return;
+        chapter.title = titleInput.value;
+        chapter.content = contentInput.value;
+        chapter.updated_at = new Date().toISOString();
+        saveChaptersData();
 
         // 更新左侧列表中的标题
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
@@ -383,12 +454,16 @@ function saveCurrentChapter() {
 }
 
 async function saveOutlineData() {
+    return saveChaptersData();
+}
+
+async function saveChaptersData() {
     try {
-        await apiCall('/api/project-data/outline', 'POST', {
-            data: store.projectData.outline
+        await apiCall('/api/project-data/chapters', 'POST', {
+            data: getStoredChapters()
         });
     } catch (e) {
-        console.error('Failed to save outline:', e);
+        console.error('Failed to save chapters:', e);
     }
 }
 
@@ -402,5 +477,7 @@ window.deleteChapter = deleteChapter;
 window.openChapterEditor = openChapterEditor;
 window.saveCurrentChapter = saveCurrentChapter;
 window.saveOutlineData = saveOutlineData;
+window.saveChaptersData = saveChaptersData;
+window.getMultiAgentChapters = getMultiAgentChapters;
 
 console.log('[app-chapters.js] 章节管理模块已加载');

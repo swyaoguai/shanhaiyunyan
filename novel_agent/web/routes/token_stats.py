@@ -10,6 +10,17 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
+def _get_current_project_id() -> str:
+    """Resolve the active project scope for token statistics."""
+    try:
+        from ...project_manager import get_project_manager
+
+        pm = get_project_manager()
+        return str(getattr(pm, "current_project_id", "") or "")
+    except Exception:
+        return ""
+
+
 @router.get("/token-stats/summary")
 async def get_token_stats_summary(
     days: int = 30,
@@ -20,7 +31,12 @@ async def get_token_stats_summary(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    summary = store.get_summary(days=days, model=model, agent_name=agent_name)
+    summary = store.get_summary(
+        days=days,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse(summary)
 
@@ -35,7 +51,12 @@ async def get_token_stats_daily(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    stats = store.get_daily_stats(days=days, model=model, agent_name=agent_name)
+    stats = store.get_daily_stats(
+        days=days,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "period": f"{days} days",
@@ -53,7 +74,12 @@ async def get_token_stats_weekly(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    stats = store.get_weekly_stats(weeks=weeks, model=model, agent_name=agent_name)
+    stats = store.get_weekly_stats(
+        weeks=weeks,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "period": f"{weeks} weeks",
@@ -71,7 +97,12 @@ async def get_token_stats_hourly(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    stats = store.get_hourly_stats(hours=hours, model=model, agent_name=agent_name)
+    stats = store.get_hourly_stats(
+        hours=hours,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "period": f"{hours} hours",
@@ -82,13 +113,19 @@ async def get_token_stats_hourly(
 @router.get("/token-stats/by-model")
 async def get_token_stats_by_model(
     days: int = 30,
+    model: str = None,
     agent_name: str = None
 ):
     """获取按模型分组的统计"""
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    stats = store.get_model_stats(days=days, agent_name=agent_name)
+    stats = store.get_model_stats(
+        days=days,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "period": f"{days} days",
@@ -105,7 +142,11 @@ async def get_token_stats_by_agent(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    stats = store.get_agent_stats(days=days, model=model)
+    stats = store.get_agent_stats(
+        days=days,
+        model=model,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "period": f"{days} days",
@@ -119,10 +160,11 @@ async def get_token_stats_filters():
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
+    project_id = _get_current_project_id()
     
     return JSONResponse({
-        "models": store.get_available_models(),
-        "agents": store.get_available_agents()
+        "models": store.get_available_models(project_id=project_id),
+        "agents": []
     })
 
 
@@ -136,7 +178,12 @@ async def get_token_stats_recent(
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    records = store.get_recent_records(limit=limit, model=model, agent_name=agent_name)
+    records = store.get_recent_records(
+        limit=limit,
+        model=model,
+        agent_name=agent_name,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "total": len(records),
@@ -150,7 +197,10 @@ async def cleanup_token_stats(days: int = 90):
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    deleted_count = store.cleanup_old_records(days=days)
+    deleted_count = store.cleanup_old_records(
+        days=days,
+        project_id=_get_current_project_id(),
+    )
     
     return JSONResponse({
         "success": True,
@@ -165,10 +215,10 @@ async def reset_token_stats():
     from ...utils.token_stats import get_token_stats_store
     
     store = get_token_stats_store()
-    deleted_count = store.reset_all()
+    deleted_count = store.reset_all(project_id=_get_current_project_id())
     
     return JSONResponse({
         "success": True,
         "deleted_count": deleted_count,
-        "message": f"已重置所有统计数据，共删除 {deleted_count} 条记录"
+        "message": f"已重置当前项目统计数据，共删除 {deleted_count} 条记录"
     })

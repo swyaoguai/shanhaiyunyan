@@ -63,6 +63,74 @@ def mock_context():
     }
 
 
+@pytest.mark.asyncio
+async def test_worldbuilder_prompt_includes_discussion_context(monkeypatch):
+    agent = WorldbuilderAgent()
+    captured = {}
+
+    async def fake_call_llm(messages, *args, **kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return '{"world_name": "玄荒界"}'
+
+    monkeypatch.setattr(agent, "call_llm", fake_call_llm)
+
+    await agent.execute({
+        "novel_type": "玄幻",
+        "discussion_context": "合欢宗元素危险克制，不要低俗。",
+    })
+
+    assert "聊天讨论上下文" in captured["prompt"]
+    assert "合欢宗元素危险克制" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_outliner_prompt_includes_discussion_context(monkeypatch):
+    agent = OutlinerAgent()
+    prompts = []
+
+    async def fake_call_llm(messages, *args, **kwargs):
+        prompts.append(messages[-1]["content"])
+        return '{"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}'
+
+    monkeypatch.setattr(agent, "call_llm", fake_call_llm)
+
+    await agent.execute({
+        "world": {"world_name": "玄荒界"},
+        "protagonist": "林渡",
+        "plot_idea": "宗门覆灭后的复仇与重建",
+        "discussion_context": "前期不要升级太快，先压抑后爆发。",
+    })
+
+    assert "聊天讨论上下文" in prompts[0]
+    assert "前期不要升级太快" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_chapter_writer_prompt_includes_discussion_context(monkeypatch):
+    agent = ChapterWriterAgent()
+    captured = {}
+
+    async def fake_call_llm(messages, *args, **kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return "第一章正文"
+
+    monkeypatch.setattr(agent, "call_llm", fake_call_llm)
+
+    await agent.execute(
+        {
+            "chapter_number": 1,
+            "chapter_title": "旧城归来",
+            "chapter_outline": "林渡回到旧城。",
+        },
+        context={
+            "discussion_context": "保持危险克制的合欢宗元素，不要低俗。",
+        },
+    )
+
+    assert "聊天讨论上下文" in captured["prompt"]
+    assert "危险克制" in captured["prompt"]
+
+
 # ==================== BaseAgent Tests ====================
 
 class ConcreteAgent(BaseAgent):

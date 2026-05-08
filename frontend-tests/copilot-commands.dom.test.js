@@ -62,10 +62,62 @@ beforeEach(() => {
     chapter_settings: [],
     custom_knowledge: []
   };
+  window.store.currentProjectId = '';
+  window.store.copilotCreativeMode = 'auto';
+  window.store.copilotAutoSave = { enabled: false, loaded: false, projectId: null };
   window.initCopilotEnhancements();
 });
 
 describe('copilot slash command prompts', () => {
+  it('keeps auto-save rate-limit failures quiet and retries the preference save', async () => {
+    vi.useFakeTimers();
+    const rateLimitError = new Error('HTTP 429: 请求过于频繁');
+    rateLimitError.status = 429;
+    rateLimitError.retryAfter = 12;
+    window.apiCall
+      .mockRejectedValueOnce(rateLimitError)
+      .mockResolvedValueOnce({ success: true });
+    window.store.currentProjectId = 'project-1';
+
+    await window.saveCopilotAutoSavePreference(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(window.apiCall).toHaveBeenCalledTimes(1);
+    expect(window.showToast).not.toHaveBeenCalled();
+    expect(window.store.copilotAutoSave.enabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(12000);
+
+    expect(window.apiCall).toHaveBeenCalledTimes(2);
+    expect(window.apiCall).toHaveBeenLastCalledWith('/api/project-state/copilot_chat_auto_save', 'POST', {
+      data: { enabled: true }
+    });
+    expect(window.showToast).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('renders the auto-save preference in the Copilot input area', () => {
+    expect(document.querySelector('.copilot-auto-save-row')).not.toBeNull();
+    expect(document.getElementById('copilot-auto-save-toggle')).not.toBeNull();
+    expect(document.getElementById('copilot-auto-save-status')?.textContent).toBe('未选择项目');
+
+    window.store.currentProjectId = 'project-1';
+    window.store.copilotAutoSave = { enabled: true, loaded: true, projectId: 'project-1' };
+    window.renderCopilotAutoSaveToggle();
+
+    expect(document.getElementById('copilot-auto-save-toggle')?.checked).toBe(true);
+    expect(document.getElementById('copilot-auto-save-status')?.textContent).toBe('已开启');
+  });
+
+  it('does not render a manual creative mode selector in the Copilot input area', () => {
+    window.bindCopilotCreativeModeSelector();
+
+    expect(document.querySelector('.copilot-creative-mode-row')).toBeNull();
+    expect(document.getElementById('copilot-creative-mode-select')).toBeNull();
+    expect(window.store.copilotCreativeMode).toBe('auto');
+  });
+
   it('keeps command prompts hidden by default and reveals them only after slash input', () => {
     const input = document.getElementById('copilot-input-text');
     const promptBar = document.querySelector('.copilot-command-prompts');
@@ -108,7 +160,7 @@ describe('copilot slash command prompts', () => {
   });
 
   it('offers chapter commands, accepts keyboard selection, and shows parameter guidance', () => {
-    window.store.projectData.outline = [
+    window.store.projectData.chapters = [
       { title: '雾港来信' },
       { title: '铁雨将至' }
     ];

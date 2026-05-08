@@ -69,6 +69,7 @@ class MemoryManager:
             # 构建项目状态摘要
             project_summary = f"""项目名称: {project.name}
 项目描述: {project.description}
+小说分类: {project.novel_type or '未指定'}
 创建时间: {project.created_at}
 章节数: {project.chapter_count}
 字数: {project.word_count}"""

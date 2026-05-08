@@ -1,21 +1,21 @@
 <div align="center">
-  <img src="logo.png" alt="Novel Agent Logo" width="128" height="128">
+  <img src="logo.png" alt="山海·云烟 Logo" width="128" height="128">
   
-  # 📚 小说创作Agent智能体 (Novel Agent)
+  # 山海·云烟
   
   **基于多Agent协作的AI小说创作系统**
   
   [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
   [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
-  [![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](./CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-1.0-brightgreen.svg)](./CHANGELOG.md)
 </div>
 
 ---
 
 基于 Karpathy LLM Wiki 模式的知识系统 + Coordinator-Worker 多Agent协作架构，提供完整的小说创作工作流。
 
-> **📢 v1.2.0 重大更新**
+> **📢 山海·云烟 v1.0**
 > 引入 LLM Wiki 知识系统，资料库和知识中心升级为预编译wiki页面。
 > 提示词系统修复，用户自定义提示词立即生效。
 
@@ -30,7 +30,7 @@
 - **无限续写Agent** - 支持灵感驱动的故事续写，自动维护剧情一致性
 - **沟通助手Agent** - 多轮对话收集创作需求，自动触发工具调用
 
-### 📖 Wiki 知识系统（v1.2 新增）
+### 📖 Wiki 知识系统
 基于 [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式，将知识从"临时检索"升级为"预编译wiki"。
 
 - **三层架构** - Raw Sources（原始文档）→ Wiki（LLM生成的结构化页面）→ Schema（规则与目标）
@@ -126,7 +126,7 @@ SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
 
 ```bash
 # Windows
-启动小说Agent.bat
+启动山海·云烟.bat
 
 # Linux/Mac
 python run.py
@@ -156,7 +156,7 @@ novel_agent/
 │   ├── router_agent.py     # 路由智能体
 │   └── message_bus.py      # Agent间消息总线
 │
-├── wiki/                   # Wiki知识系统（v1.2 新增）
+├── wiki/                   # Wiki知识系统
 │   ├── wiki_types.py       # 数据模型（WikiPage, Frontmatter, WikiGraph）
 │   ├── wiki_store.py       # 页面存储 + 双向链接 + SHA256缓存
 │   ├── wiki_index.py       # purpose.md/schema.md/index.md/overview.md
@@ -256,8 +256,9 @@ cp config.example.json config.json
 
 ## 📚 文档
 
-- [API 文档](./docs/API.md) - REST API 接口说明
-- [LLM Wiki 改造方案](./docs/LLM-Wiki知识系统改造方案.md) - 知识系统架构设计
+- [文档索引](./docs/README.md) - 按当前文档、设计方案、已实现归档、报告和待办分类
+- [API 文档](./docs/current/API.md) - REST API 接口说明
+- [LLM Wiki 改造方案](./docs/design/knowledge-base/LLM-Wiki知识系统改造方案.md) - 知识系统架构设计
 - [迁移指南](./MIGRATION_GUIDE.md) - v1.0 → v1.1 升级指南
 - [更新日志](./CHANGELOG.md) - 版本更新记录
 - [架构文档](./docs/) - 详细技术文档

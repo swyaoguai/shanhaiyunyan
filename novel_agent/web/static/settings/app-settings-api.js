@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 设置页接口包装
+ * 山海·云烟 - 设置页接口包装
  */
 
 async function fetchGlobalApiSettingsData() {
@@ -21,13 +21,20 @@ async function fetchGlobalApiSettingsData() {
 }
 
 async function saveActiveApiConfig(configId, model) {
-    await apiCall('/api/api-configs/active', 'POST', {
+    const response = await apiCall('/api/api-configs/active', 'POST', {
         config_id: configId,
         model
     });
 
     currentActiveConfigId = configId;
-    currentActiveModel = model;
+    currentActiveModel = response?.active_model || model;
+    window.dispatchEvent(new CustomEvent('global-api-config-updated', {
+        detail: {
+            activeConfigId: response?.active_config_id || configId,
+            activeModel: currentActiveModel
+        }
+    }));
+    return response;
 }
 
 async function testApiConnection(configId, model) {
@@ -40,7 +47,23 @@ async function testApiConnection(configId, model) {
     return apiCall('/api/test-connection', 'POST', {
         api_base: selectedConfig.api_base,
         config_id: configId,
-        model: model || (selectedConfig.models ? selectedConfig.models[0] : '')
+        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        api_type: selectedConfig.api_type || 'openai_chat'
+    });
+}
+
+async function testAgentApiConnection(agentId, configId, model) {
+    const selectedConfig = agentPageApiConfigs.find((item) => item.id === configId);
+
+    if (!selectedConfig) {
+        throw new Error('请先为这个Agent选择一个API配置');
+    }
+
+    return apiCall('/api/test-connection', 'POST', {
+        api_base: selectedConfig.api_base,
+        config_id: configId,
+        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        api_type: selectedConfig.api_type || 'openai_chat'
     });
 }
 
@@ -85,12 +108,13 @@ async function saveAgentConfig(agentId, payload) {
 }
 
 async function fetchKnowledgeBaseSettingsData() {
-    const [config, stats] = await Promise.all([
+    const [config, stats, chapterSummaryConfig] = await Promise.all([
         apiCall('/api/knowledge-base/config'),
-        apiCall('/api/knowledge-base/stats')
+        apiCall('/api/knowledge-base/stats'),
+        apiCall('/api/chapter-summary-config').catch(() => ({ auto_summary_enabled: false }))
     ]);
 
-    return { config, stats };
+    return { config, stats, chapterSummaryConfig };
 }
 
 async function testKnowledgeBaseConnection(payload) {
@@ -121,6 +145,7 @@ async function saveSkillsConfig(skills) {
 window.fetchGlobalApiSettingsData = fetchGlobalApiSettingsData;
 window.saveActiveApiConfig = saveActiveApiConfig;
 window.testApiConnection = testApiConnection;
+window.testAgentApiConnection = testAgentApiConnection;
 window.saveTimeoutSettings = saveTimeoutSettings;
 window.deleteApiConfig = deleteApiConfig;
 window.fetchModelsForApiConfig = fetchModelsForApiConfig;

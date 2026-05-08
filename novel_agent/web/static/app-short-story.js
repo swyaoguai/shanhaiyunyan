@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作入口
+ * 山海·云烟 - 短篇创作入口
  */
 
 window.renderShortStoryInterface = renderShortStoryInterface;

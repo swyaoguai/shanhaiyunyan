@@ -23,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import config
+from ..settings import get_settings
 from ..agents import RouterAgent
 from ..constants import TIMEOUTS
 from .dependencies import set_coordinator, set_router_agent
@@ -233,9 +234,9 @@ def create_app() -> FastAPI:
     """创建FastAPI应用"""
 
     app = FastAPI(
-        title="小说创作智能体",
+        title="山海·云烟",
         description="基于多智能体协作的智能小说创作系统",
-        version="1.2.0",  # 版本升级，表示重构后的版本
+        version="1.0",
         lifespan=lifespan
     )
 
@@ -254,30 +255,32 @@ def create_app() -> FastAPI:
         max_age=TIMEOUTS.CORS_MAX_AGE,
     )
 
-    # 频率限制中间件
-    # 默认配置：60次/分钟，1000次/小时
-    # 严格配置（LLM调用）：20次/分钟，200次/小时
-    default_rate_config = RateLimitConfig(
-        requests_per_minute=60,
-        requests_per_hour=1000,
-        burst_limit=10,
-        cooldown_seconds=60,
-        enable_burst=False
-    )
-    strict_rate_config = RateLimitConfig(
-        requests_per_minute=20,
-        requests_per_hour=200,
-        burst_limit=5,
-        cooldown_seconds=120,
-        enable_burst=True
-    )
-    app.add_middleware(
-        RateLimitMiddleware,
-        config=default_rate_config,
-        strict_config=strict_rate_config
-    )
-
-    logger.info("[Security] CORS和频率限制中间件已启用")
+    # 本地单用户软件默认不启用 HTTP 请求频率限制，避免切换界面/轮询状态触发 429。
+    # 如需把服务暴露给局域网或公网，可在 .env 中设置 RATE_LIMIT_ENABLED=true。
+    rate_limit_settings = get_settings().rate_limit
+    if rate_limit_settings.enabled:
+        default_rate_config = RateLimitConfig(
+            requests_per_minute=rate_limit_settings.requests_per_minute,
+            requests_per_hour=rate_limit_settings.requests_per_hour,
+            burst_limit=rate_limit_settings.burst_limit,
+            cooldown_seconds=rate_limit_settings.cooldown_seconds,
+            enable_burst=False
+        )
+        strict_rate_config = RateLimitConfig(
+            requests_per_minute=20,
+            requests_per_hour=200,
+            burst_limit=5,
+            cooldown_seconds=120,
+            enable_burst=True
+        )
+        app.add_middleware(
+            RateLimitMiddleware,
+            config=default_rate_config,
+            strict_config=strict_rate_config
+        )
+        logger.info("[Security] CORS和频率限制中间件已启用")
+    else:
+        logger.info("[Security] CORS已启用；本地模式下HTTP频率限制默认关闭")
 
     # ========================================
     # 静态文件和模板配置

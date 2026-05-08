@@ -39,6 +39,7 @@ class StubAgent(BaseAgent):
         self._priority = priority
         self._result = result if result is not None else {"success": True}
         self._raise_error = raise_error
+        self.calls = []
         super().__init__(
             name=name,
             model_config=model_config or AgentModelConfig(
@@ -67,9 +68,31 @@ class StubAgent(BaseAgent):
         )
 
     async def execute(self, input_data: Dict[str, Any], context=None) -> Dict[str, Any]:
+        self.calls.append({
+            "input_data": dict(input_data or {}),
+            "context": dict(context or {}) if isinstance(context, dict) else context,
+        })
         if self._raise_error:
             raise RuntimeError(f"{self.name} failed")
         return dict(self._result)
+
+
+def build_character_stub() -> StubAgent:
+    return StubAgent(
+        "AutoCharacterBuilder",
+        accepted_tasks=["build_characters"],
+        priority=98,
+        result={
+            "success": True,
+            "characters": [
+                {
+                    "name": "林渊",
+                    "role": "主角",
+                    "description": "旧案幸存者。",
+                }
+            ],
+        },
+    )
 
 
 @pytest.fixture
@@ -176,10 +199,11 @@ class TestContractModels:
         assert contract.scope["total_chapters"] == 6
         assert contract.user_confirmed is True
         assert contract.metadata["draft"] is False
-        assert len(task_graph) == 8
+        assert len(task_graph) == 9
         assert task_graph[0].task_type == "build_world"
-        assert task_graph[1].task_type == "build_outline"
-        assert task_graph[2].task_type == "write_chapter"
+        assert task_graph[1].task_type == "build_characters"
+        assert task_graph[2].task_type == "build_outline"
+        assert task_graph[3].task_type == "write_chapter"
         assert task_graph[-1].inputs["chapter_number"] == 6
 
     def test_build_default_task_graph_adds_stage_summary_tasks_for_ten_chapters(self):
@@ -201,6 +225,27 @@ class TestContractModels:
         assert summary_tasks[0].inputs["start_chapter"] == 1
         assert summary_tasks[0].inputs["end_chapter"] == 10
         assert summary_tasks[0].candidate_agents == ["SummaryOrchestrator"]
+
+    def test_build_default_task_graph_carries_discussion_context_to_generation_tasks(self):
+        contract = build_default_creation_contract(
+            novel_type="玄幻",
+            theme="黑暗修仙",
+            requirements="不要低俗",
+            protagonist="林渡",
+            plot_idea="宗门覆灭后的复仇与重建",
+            volume_count=1,
+            chapters_per_volume=1,
+            user_confirmed=True,
+        )
+        contract.scope["discussion_context"] = "用户讨论确认：合欢宗元素危险克制，前期不要升级太快。"
+
+        task_graph = build_default_task_graph(contract)
+        task_by_type = {task.task_type: task for task in task_graph}
+
+        assert "合欢宗元素" in task_by_type["build_world"].inputs["discussion_context"]
+        assert "合欢宗元素" in task_by_type["build_characters"].inputs["recent_discussion"]
+        assert "合欢宗元素" in task_by_type["build_outline"].inputs["discussion_context"]
+        assert "合欢宗元素" in task_by_type["write_chapter"].inputs["discussion_context"]
 
 
 class TestBaseAgentCapabilities:
@@ -911,9 +956,11 @@ class TestCoordinatorContractConfirmation:
             priority=95,
             result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
         )
-        registry.register_many([world_agent, outline_agent])
+        character_agent = build_character_stub()
+        registry.register_many([world_agent, character_agent, outline_agent])
         coordinator.capability_registry = registry
         coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
 
         contract = build_default_creation_contract(
@@ -929,7 +976,7 @@ class TestCoordinatorContractConfirmation:
         contract.task_graph = build_default_task_graph(contract)
 
         init_result = coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
-        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=2)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=3)
 
         task_by_type = {
             item["task_type"]: item
@@ -941,6 +988,8 @@ class TestCoordinatorContractConfirmation:
         assert init_result["task_pool"]["tasks"]
         assert task_by_type["build_world"]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_world"]["result_ref"] == "worldbuilding.json"
+        assert task_by_type["build_characters"]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["build_characters"]["result_ref"] == "characters.json"
         assert task_by_type["build_outline"]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_outline"]["result_ref"] == "outline.json"
         assert task_by_type["write_chapter"]["status"] == TaskStatus.PENDING
@@ -950,6 +999,100 @@ class TestCoordinatorContractConfirmation:
         assert "task_started" in event_types
         assert "task_completed" in event_types
         assert event_types[-1] == "project_ready_execution_cycle"
+
+    @pytest.mark.asyncio
+    async def test_project_ready_tasks_inherit_discussion_context_from_contract(self, coordinator):
+        registry = AgentCapabilityRegistry()
+        world_agent = StubAgent(
+            "AutoWorldbuilder",
+            accepted_tasks=["build_world"],
+            priority=100,
+            result={"success": True, "world": {"world_name": "玄荒界"}},
+        )
+        character_agent = build_character_stub()
+        outline_agent = StubAgent(
+            "AutoOutliner",
+            accepted_tasks=["build_outline"],
+            priority=95,
+            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+        )
+        registry.register_many([world_agent, character_agent, outline_agent])
+        coordinator.capability_registry = registry
+        coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
+        coordinator.outliner = outline_agent
+
+        contract = build_default_creation_contract(
+            novel_type="玄幻",
+            theme="黑暗修仙",
+            requirements="不要低俗，前期压抑",
+            protagonist="林渡",
+            plot_idea="宗门覆灭后的复仇与重建",
+            volume_count=1,
+            chapters_per_volume=1,
+            user_confirmed=True,
+        )
+        contract.scope["discussion_context"] = "用户明确要求合欢宗元素必须危险克制，不要低俗；前期不要升级太快。"
+        contract.task_graph = build_default_task_graph(contract)
+        for task in contract.task_graph:
+            task.inputs.pop("discussion_context", None)
+            task.inputs.pop("recent_discussion", None)
+
+        coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        await coordinator.execute_project_ready_tasks(max_tasks=3)
+
+        assert "合欢宗元素" in world_agent.calls[0]["input_data"]["discussion_context"]
+        assert "合欢宗元素" in character_agent.calls[0]["input_data"]["recent_discussion"]
+        assert "合欢宗元素" in outline_agent.calls[0]["input_data"]["discussion_context"]
+
+    @pytest.mark.asyncio
+    async def test_project_ready_character_task_does_not_use_unregistered_real_fallback(self, coordinator):
+        registry = AgentCapabilityRegistry()
+        world_agent = StubAgent(
+            "AutoWorldbuilder",
+            accepted_tasks=["build_world"],
+            priority=100,
+            result={"success": True, "world": {"world_name": "玄荒界"}},
+        )
+        outline_agent = StubAgent(
+            "AutoOutliner",
+            accepted_tasks=["build_outline"],
+            priority=95,
+            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+        )
+        registry.register_many([world_agent, outline_agent])
+        coordinator.capability_registry = registry
+        coordinator.worldbuilder = world_agent
+        coordinator.outliner = outline_agent
+        coordinator.character_builder.execute = AsyncMock(
+            return_value={"success": True, "characters": [{"name": "不应执行"}]}
+        )
+
+        contract = build_default_creation_contract(
+            novel_type="玄幻",
+            theme="复仇成长",
+            requirements="压抑递进",
+            protagonist="林渊",
+            plot_idea="旧城归来",
+            volume_count=1,
+            chapters_per_volume=2,
+            user_confirmed=False,
+        )
+        contract.task_graph = build_default_task_graph(contract)
+
+        coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=3)
+        task_by_type = {
+            item["task_type"]: item
+            for item in execute_result["task_pool"]["tasks"]
+        }
+
+        assert task_by_type["build_world"]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["build_characters"]["status"] == TaskStatus.FAILED
+        assert task_by_type["build_outline"]["status"] == TaskStatus.PENDING
+        assert execute_result["stop_reason"] == "task_failed"
+        assert execute_result["stopped_on_task_type"] == "build_characters"
+        coordinator.character_builder.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_project_ready_tasks_stops_on_fallback_and_persists_runtime_metadata(self, coordinator):
@@ -1019,10 +1162,12 @@ class TestCoordinatorContractConfirmation:
             priority=95,
             result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
         )
-        registry.register_many([world_agent, outline_agent])
+        character_agent = build_character_stub()
+        registry.register_many([world_agent, character_agent, outline_agent])
 
         coordinator.capability_registry = registry
         coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
 
         contract = build_default_creation_contract(
@@ -1036,10 +1181,10 @@ class TestCoordinatorContractConfirmation:
             user_confirmed=False,
         )
         contract.task_graph = build_default_task_graph(contract)
-        contract.task_graph[1].metadata["stop_on_review_required"] = True
+        contract.task_graph[2].metadata["stop_on_review_required"] = True
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
-        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=3)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=4)
 
         assert execute_result["stop_reason"] == "review_required"
         assert execute_result["stopped_on_task_type"] == "build_outline"
@@ -1090,6 +1235,7 @@ class TestCoordinatorContractConfirmation:
                 },
             },
         )
+        character_agent = build_character_stub()
         context_agent = StubAgent(
             "AutoContextStrategy",
             accepted_tasks=["context_plan"],
@@ -1134,6 +1280,7 @@ class TestCoordinatorContractConfirmation:
         )
         registry.register_many([
             world_agent,
+            character_agent,
             outline_agent,
             context_agent,
             reader_agent,
@@ -1145,6 +1292,7 @@ class TestCoordinatorContractConfirmation:
 
         coordinator.capability_registry = registry
         coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
         coordinator.context_strategy = context_agent
         coordinator.content_reader = reader_agent
@@ -1167,7 +1315,7 @@ class TestCoordinatorContractConfirmation:
         contract.task_graph = build_default_task_graph(contract)
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
-        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=3)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=4)
 
         task_by_type = {}
         for item in execute_result["task_pool"]["tasks"]:
@@ -1178,6 +1326,7 @@ class TestCoordinatorContractConfirmation:
         chapter_path = Path(first_write_task["result_ref"])
 
         assert task_by_type["build_world"][0]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["build_characters"][0]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_outline"][0]["status"] == TaskStatus.COMPLETED
         assert first_write_task["status"] == TaskStatus.COMPLETED
         assert first_write_task["assigned_agent"] == "ChapterWriter"
@@ -1217,6 +1366,7 @@ class TestCoordinatorContractConfirmation:
                 },
             },
         )
+        character_agent = build_character_stub()
         context_agent = StubAgent(
             "AutoContextStrategy",
             accepted_tasks=["context_plan"],
@@ -1261,6 +1411,7 @@ class TestCoordinatorContractConfirmation:
         )
         registry.register_many([
             world_agent,
+            character_agent,
             outline_agent,
             context_agent,
             reader_agent,
@@ -1272,6 +1423,7 @@ class TestCoordinatorContractConfirmation:
 
         coordinator.capability_registry = registry
         coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
         coordinator.context_strategy = context_agent
         coordinator.content_reader = reader_agent
@@ -1295,7 +1447,7 @@ class TestCoordinatorContractConfirmation:
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
         execute_result = await coordinator.execute_project_ready_tasks(
-            max_tasks=5,
+            max_tasks=6,
             max_chapter_tasks=2,
         )
 
@@ -1307,6 +1459,7 @@ class TestCoordinatorContractConfirmation:
         outline_rows = coordinator.project_manager.load_project_data("outline")
 
         assert task_by_type["build_world"][0]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["build_characters"][0]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_outline"][0]["status"] == TaskStatus.COMPLETED
         assert write_tasks[0]["status"] == TaskStatus.COMPLETED
         assert write_tasks[1]["status"] == TaskStatus.COMPLETED
@@ -1366,6 +1519,13 @@ class TestCoordinatorContractConfirmation:
                     TaskStatus.COMPLETED,
                     assigned_agent="Worldbuilder",
                     result_ref="worldbuilding.json",
+                )
+            elif task.task_type == "build_characters":
+                runtime_pool.update_task_status(
+                    task.task_id,
+                    TaskStatus.COMPLETED,
+                    assigned_agent="CharacterBuilder",
+                    result_ref="characters.json",
                 )
             elif task.task_type == "build_outline":
                 runtime_pool.update_task_status(

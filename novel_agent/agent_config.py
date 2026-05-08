@@ -29,6 +29,7 @@ class APIConfigItem:
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
     created_at: str = ""
+    api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
     
     def __post_init__(self):
         if not self.id:
@@ -52,7 +53,8 @@ class APIConfigItem:
             "models": self.models,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "created_at": self.created_at
+            "created_at": self.created_at,
+            "api_type": self.api_type
         }
 
 
@@ -97,6 +99,7 @@ class GlobalAPIConfig:
     model: str = ""
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
+    api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
     
     def is_configured(self) -> bool:
         """检查是否已配置"""
@@ -116,6 +119,7 @@ class AgentModelConfig:
     enabled: bool = True
     description: str = ""
     use_global: bool = True  # 是否使用全局配置
+    api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
     
     def is_configured(self) -> bool:
         """检查是否已配置"""
@@ -342,7 +346,8 @@ class AgentConfigManager:
                 api_key=active.api_key,
                 model=self.multi_config.get_effective_model(),
                 temperature=active.temperature,
-                max_tokens=active.max_tokens
+                max_tokens=active.max_tokens,
+                api_type=active.api_type
             )
     
     def _save_configs(self) -> None:
@@ -480,7 +485,8 @@ class AgentConfigManager:
     
     def add_api_config(self, name: str, api_base: str, api_key: str,
                        models: List[str], temperature: float = LLM_DEFAULTS.TEMPERATURE,
-                       max_tokens: int = LLM_DEFAULTS.MAX_TOKENS) -> APIConfigItem:
+                       max_tokens: int = LLM_DEFAULTS.MAX_TOKENS,
+                       api_type: str = "openai_chat") -> APIConfigItem:
         """添加新的API配置"""
         normalized_max_tokens = self._normalize_config_max_tokens(max_tokens, source=f"APIConfig:add:{name}")
         config_item = APIConfigItem(
@@ -489,7 +495,8 @@ class AgentConfigManager:
             api_key=api_key,
             models=models,
             temperature=temperature,
-            max_tokens=normalized_max_tokens
+            max_tokens=normalized_max_tokens,
+            api_type=api_type
         )
         self.multi_config.configs.append(config_item)
         
@@ -616,7 +623,7 @@ class AgentConfigManager:
 
         # 如果Agent选择使用全局配置，且全局配置已设置
         if config.use_global and global_auth_configured:
-            # 全局模型为空时，回退到 Agent 自身模型，避免“测试可用但聊天缺模型/缺Key”
+            # 全局模型为空时，回退到 Agent 自身模型，避免"测试可用但聊天缺模型/缺Key"
             effective_model = self.global_config.model or config.model
             return AgentModelConfig(
                 agent_name=config.agent_name,
@@ -628,13 +635,15 @@ class AgentConfigManager:
                 max_tokens=self.global_config.max_tokens if self.global_config.model else config.max_tokens,
                 enabled=config.enabled,
                 description=config.description,
-                use_global=True
+                use_global=True,
+                api_type=self.global_config.api_type
             )
 
         # 独立配置优先按 api_config_id 解析真实 API 配置，避免仅靠 api_base 误匹配。
         if not config.use_global and selected_api_config:
             merged_api_base = selected_api_config.api_base or config.api_base
             merged_api_key = selected_api_config.api_key or config.api_key
+            merged_api_type = selected_api_config.api_type or config.api_type
 
             selected_model = config.model
             if not selected_model:
@@ -660,7 +669,8 @@ class AgentConfigManager:
                     max_tokens=config.max_tokens,
                     enabled=config.enabled,
                     description=config.description,
-                    use_global=False
+                    use_global=False,
+                    api_type=merged_api_type
                 )
 
         # 独立配置缺失关键字段时，回退使用全局配置补齐缺失值，避免认证失败。
@@ -684,7 +694,8 @@ class AgentConfigManager:
                     max_tokens=config.max_tokens,
                     enabled=config.enabled,
                     description=config.description,
-                    use_global=False
+                    use_global=False,
+                    api_type=config.api_type or self.global_config.api_type
                 )
 
         return config

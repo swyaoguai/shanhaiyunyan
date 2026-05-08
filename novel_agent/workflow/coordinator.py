@@ -36,6 +36,13 @@ from ..context import ContextManager, CharacterManager, WorldManager
 from ..utils.metrics import get_metrics_collector
 from ..constants import WRITING_CONFIG, TIMEOUTS
 from ..utils.atomic_write import atomic_write_text, atomic_write_json
+from ..content_sanitizer import strip_internal_author_markers
+from ..outline_utils import (
+    build_outline_overview_row,
+    extract_eventlines_from_outline,
+    merge_eventline_rows,
+    normalize_outline_payload,
+)
 from ..memory_manager import get_memory_manager
 from ..aux_memory import get_aux_memory_service
 from ..project_manager import get_project_manager
@@ -264,8 +271,13 @@ class NovelCoordinator:
 
         # 问题9修复：为需要 LLM 的 Service 创建共享 LLMClient 并注入
         from ..agents.llm_client import create_llm_client
+        from ..agent_config import get_config_manager
+        _cfg_mgr = get_config_manager()
+        _active_cfg = _cfg_mgr.multi_config.get_active_config()
+        _active_api_type = getattr(_active_cfg, 'api_type', 'openai_chat') if _active_cfg else 'openai_chat'
         self._service_llm_client = create_llm_client(
             metrics_namespace="collab_service",
+            api_type=_active_api_type,
         )
         for service_name in ("content_expansion", "summary_orchestrator"):
             svc = self.collab_service_registry.get(service_name)
@@ -306,6 +318,36 @@ class NovelCoordinator:
             svc.upsert_from_legacy("outline", outline_rows)
         except Exception as e:
             logger.warning(f"[Coordinator] Library outline sync failed: {e}")
+
+    def _sync_eventlines_to_library(self, eventline_rows: List[Dict[str, Any]]) -> None:
+        """Dedup: sync eventlines to library service."""
+        try:
+            from ..library_service import get_library_service
+            svc = get_library_service()
+            svc.upsert_from_legacy("eventlines", eventline_rows)
+        except Exception as e:
+            logger.warning(f"[Coordinator] Library eventlines sync failed: {e}")
+
+    def _sync_eventlines_from_outline(self, outline_data: Any) -> Dict[str, Any]:
+        generated_rows = extract_eventlines_from_outline(outline_data)
+        if not generated_rows:
+            return {"eventline_count": 0, "status": "skipped"}
+
+        existing_rows = self.project_manager.load_project_data("eventlines")
+        merged_rows = merge_eventline_rows(existing_rows, generated_rows)
+        if merged_rows != existing_rows:
+            self.project_manager.save_project_data("eventlines", merged_rows)
+            self._sync_eventlines_to_library(merged_rows)
+            return {
+                "eventline_count": len(generated_rows),
+                "merged_count": len(merged_rows),
+                "status": "updated",
+            }
+        return {
+            "eventline_count": len(generated_rows),
+            "merged_count": len(merged_rows),
+            "status": "unchanged",
+        }
 
     def _build_metadata_patch(self, run_result: Dict[str, Any]) -> Dict[str, Any]:
         """Dedup: build metadata patch for project-ready task execution."""
@@ -479,10 +521,14 @@ class NovelCoordinator:
         total_chapters: int,
         reset: bool,
     ) -> Dict[str, Any]:
+        eventlines = self.project_manager.load_project_data("eventlines")
+        if not isinstance(eventlines, list):
+            eventlines = []
         return self._plot_thread_machine.sync_with_outline_external(
             outline_data if isinstance(outline_data, dict) else {},
             total_chapters=total_chapters,
             reset=reset,
+            eventlines=[row for row in eventlines if isinstance(row, dict)],
         )
 
     async def _plan_plot_thread_for_chapter(
@@ -905,6 +951,7 @@ class NovelCoordinator:
 
         dependency_map = {
             "world_ready": first_by_type.get("build_world"),
+            "characters_ready": first_by_type.get("build_characters"),
             "outline_ready": first_by_type.get("build_outline"),
         }
 
@@ -939,25 +986,186 @@ class NovelCoordinator:
             return []
         return [row for row in outline_rows if isinstance(row, dict)]
 
+    @staticmethod
+    def _normalize_chapter_number(value: Any, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return number if number > 0 else default
+
+    @staticmethod
+    def _is_global_outline_overview_row(row: Dict[str, Any]) -> bool:
+        title = str(row.get("title") or row.get("name") or "").strip()
+        return (
+            title == "主线大纲"
+            or bool(row.get("global_outline"))
+            or bool(row.get("volume_plan"))
+            or bool(row.get("volumes"))
+        )
+
+    @classmethod
+    def _sort_chapter_rows(cls, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        indexed_rows: List[Dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            copied = dict(row)
+            copied["chapter_number"] = cls._normalize_chapter_number(
+                copied.get("chapter_number") or copied.get("chapter") or copied.get("number"),
+                index,
+            )
+            indexed_rows.append(copied)
+        return sorted(indexed_rows, key=lambda item: int(item.get("chapter_number") or 0))
+
+    def _chapter_rows_with_slot(
+        self,
+        rows: List[Dict[str, Any]],
+        chapter_number: int,
+        timestamp: str,
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        by_number: Dict[int, Dict[str, Any]] = {}
+        for row in self._sort_chapter_rows([row for row in rows if isinstance(row, dict)]):
+            number = self._normalize_chapter_number(row.get("chapter_number"), len(by_number) + 1)
+            if number not in by_number:
+                by_number[number] = row
+                continue
+            existing = by_number[number]
+            if not str(existing.get("content") or "").strip() and str(row.get("content") or "").strip():
+                by_number[number] = row
+
+        for number in range(1, max(1, int(chapter_number or 1)) + 1):
+            by_number.setdefault(
+                number,
+                {
+                    "chapter_number": number,
+                    "title": f"第{number}章",
+                    "summary": "",
+                    "content": "",
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+
+        ordered_rows = [by_number[number] for number in sorted(by_number)]
+        return ordered_rows, by_number[max(1, int(chapter_number or 1))]
+
+    def _chapter_rows_from_settings(self, settings_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for index, row in enumerate(settings_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            chapter_number = self._normalize_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            title = str(row.get("name") or row.get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+            rows.append(
+                {
+                    "chapter_number": chapter_number,
+                    "title": title,
+                    "summary": str(
+                        row.get("description")
+                        or row.get("chapter_goal")
+                        or row.get("key_event")
+                        or ""
+                    ).strip(),
+                    "content": "",
+                    "chapter_goal": row.get("chapter_goal", ""),
+                    "key_event": row.get("key_event", ""),
+                    "ending_hook": row.get("ending_hook", ""),
+                    "plot_thread": row.get("plot_thread"),
+                    "source": "chapter_settings",
+                }
+            )
+        return self._sort_chapter_rows(rows)
+
+    def _load_project_chapter_rows(self) -> List[Dict[str, Any]]:
+        """Load executable chapter rows, preferring chapters and then chapter settings."""
+        chapter_rows = self.project_manager.load_project_data("chapters")
+        if isinstance(chapter_rows, list) and any(isinstance(row, dict) for row in chapter_rows):
+            return self._sort_chapter_rows([row for row in chapter_rows if isinstance(row, dict)])
+
+        chapter_settings = self.project_manager.load_project_data("chapter_settings")
+        if isinstance(chapter_settings, list) and any(isinstance(row, dict) for row in chapter_settings):
+            return self._chapter_rows_from_settings([row for row in chapter_settings if isinstance(row, dict)])
+
+        outline_rows = self._load_project_outline_rows()
+        legacy_rows = [
+            row for row in outline_rows
+            if isinstance(row, dict) and not self._is_global_outline_overview_row(row)
+        ]
+        return self._sort_chapter_rows(legacy_rows)
+
     def _load_project_previous_chapters(self, chapter_number: int, outline_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """为项目级章节任务收集前序章节内容。"""
         previous_chapters: List[Dict[str, Any]] = []
-        for index in range(1, max(1, int(chapter_number or 1))):
-            if index > len(outline_rows):
-                break
-            row = outline_rows[index - 1]
+        for row in self._sort_chapter_rows([row for row in outline_rows if isinstance(row, dict)]):
+            row_number = int(row.get("chapter_number") or 0)
+            if row_number >= max(1, int(chapter_number or 1)):
+                continue
             content = str(row.get("content") or "").strip()
             if not content:
                 continue
-            title = str(row.get("title") or f"第{index}章").strip() or f"第{index}章"
+            title = str(row.get("title") or f"第{row_number}章").strip() or f"第{row_number}章"
             previous_chapters.append({
-                "number": index,
-                "chapter_number": index,
+                "number": row_number,
+                "chapter_number": row_number,
                 "title": title,
                 "chapter_title": title,
                 "content": content,
             })
         return previous_chapters
+
+    def _find_project_row_by_chapter(self, data_type: str, chapter_number: int) -> Dict[str, Any]:
+        rows = self.project_manager.load_project_data(data_type)
+        if not isinstance(rows, list):
+            return {}
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            row_number = self._normalize_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            if row_number == chapter_number:
+                return dict(row)
+        return {}
+
+    @staticmethod
+    def _format_project_row_for_prompt(label: str, row: Dict[str, Any]) -> str:
+        if not isinstance(row, dict) or not row:
+            return ""
+        visible_fields = [
+            ("名称", row.get("name") or row.get("title")),
+            ("说明", row.get("description")),
+            ("章节目标", row.get("chapter_goal")),
+            ("场景目标", row.get("scene_goal")),
+            ("关键事件", row.get("key_event") or row.get("event")),
+            ("冲突", row.get("conflict")),
+            ("章末钩子", row.get("ending_hook") or row.get("hook")),
+            ("备注", row.get("notes")),
+        ]
+        lines = [f"【{label}】"]
+        for field_label, value in visible_fields:
+            text = str(value or "").strip()
+            if text:
+                lines.append(f"- {field_label}：{text}")
+        return "\n".join(lines).strip() if len(lines) > 1 else ""
+
+    def _get_chapter_planning_context(self, chapter_number: int) -> Dict[str, Any]:
+        chapter_setting = self._find_project_row_by_chapter("chapter_settings", chapter_number)
+        detail_setting = self._find_project_row_by_chapter("detail_settings", chapter_number)
+        blocks = [
+            self._format_project_row_for_prompt("章纲设定", chapter_setting),
+            self._format_project_row_for_prompt("细纲设定", detail_setting),
+        ]
+        return {
+            "chapter_setting": chapter_setting,
+            "detail_setting": detail_setting,
+            "prompt": "\n\n".join(block for block in blocks if block).strip(),
+            "plot_thread": chapter_setting.get("plot_thread") if isinstance(chapter_setting.get("plot_thread"), dict) else {},
+        }
 
     async def _persist_project_ready_chapter_result(
         self,
@@ -967,6 +1175,8 @@ class NovelCoordinator:
         """将项目级 ready-task 产出的章节结果写回项目数据。"""
         outline_path = self.project_manager.get_project_data_path("outline")
         outline_existed_before = outline_path.exists()
+        chapters_path = self.project_manager.get_project_data_path("chapters")
+        chapters_existed_before = chapters_path.exists()
         chapter_number = int(
             chapter_result.get("chapter_number")
             or chapter_result.get("number")
@@ -977,31 +1187,36 @@ class NovelCoordinator:
             or chapter_result.get("title")
             or f"第{chapter_number}章"
         ).strip() or f"第{chapter_number}章"
-        chapter_content = str(chapter_result.get("content") or "").strip()
+        chapter_content = strip_internal_author_markers(chapter_result.get("content"))
         timestamp = datetime.now().isoformat()
 
-        while len(outline_rows) < chapter_number:
-            placeholder_num = len(outline_rows) + 1
-            outline_rows.append({
-                "chapter_number": placeholder_num,
-                "title": f"第{placeholder_num}章",
-                "summary": "",
-                "content": "",
-                "created_at": timestamp,
-                "updated_at": timestamp,
-            })
-
-        row = outline_rows[chapter_number - 1]
+        chapter_rows = self.project_manager.load_project_data("chapters")
+        if not isinstance(chapter_rows, list) or not any(isinstance(row, dict) for row in chapter_rows):
+            chapter_rows = [
+                dict(row) for row in outline_rows
+                if isinstance(row, dict) and not self._is_global_outline_overview_row(row)
+            ]
+        chapter_rows, row = self._chapter_rows_with_slot(chapter_rows, chapter_number, timestamp)
         row["chapter_number"] = chapter_number
         row["title"] = chapter_title
         row["content"] = chapter_content
         row["updated_at"] = timestamp
 
-        self.project_manager.save_project_data("outline", outline_rows)
-        self._sync_outline_to_library(outline_rows)
+        self.project_manager.save_project_data("chapters", chapter_rows)
 
-        chapters_dir = self.project_manager.get_project_data_path("chapters")
-        chapters_dir.mkdir(parents=True, exist_ok=True)
+        legacy_outline_rows = self._load_project_outline_rows()
+        if legacy_outline_rows and not all(
+            self._is_global_outline_overview_row(row) for row in legacy_outline_rows if isinstance(row, dict)
+        ):
+            legacy_rows, legacy_row = self._chapter_rows_with_slot(legacy_outline_rows, chapter_number, timestamp)
+            legacy_row["chapter_number"] = chapter_number
+            legacy_row["title"] = chapter_title
+            legacy_row["content"] = chapter_content
+            legacy_row["updated_at"] = timestamp
+            self.project_manager.save_project_data("outline", legacy_rows)
+            self._sync_outline_to_library(legacy_rows)
+
+        chapters_dir = self.project_manager.get_chapters_dir()
         suggested_filename = str(chapter_result.get("suggested_filename") or "").strip()
         if suggested_filename:
             safe_filename = re.sub(r'[\\/:*?"<>|]+', "_", suggested_filename).strip()
@@ -1037,6 +1252,8 @@ class NovelCoordinator:
         return {
             "outline_path": str(outline_path),
             "outline_status": "updated" if outline_existed_before else "created",
+            "chapters_path": str(chapters_path),
+            "chapters_status": "updated" if chapters_existed_before else "created",
             "chapter_path": str(chapter_file),
             "chapter_status": "updated" if chapter_existed_before else "created",
         }
@@ -1052,10 +1269,12 @@ class NovelCoordinator:
         normalized_start = max(1, int(start_chapter or 1))
         normalized_end = max(normalized_start, int(end_chapter or normalized_start))
 
+        rows_by_number = {
+            int(row.get("chapter_number") or 0): row
+            for row in self._sort_chapter_rows([row for row in outline_rows if isinstance(row, dict)])
+        }
         for chapter_number in range(normalized_start, normalized_end + 1):
-            if chapter_number > len(outline_rows):
-                break
-            row = outline_rows[chapter_number - 1]
+            row = rows_by_number.get(chapter_number)
             if not isinstance(row, dict):
                 continue
             content = str(row.get("content") or "").strip()
@@ -1253,6 +1472,8 @@ class NovelCoordinator:
         self.context_manager.save("world", world_data, "world")
         if isinstance(world_data, dict):
             from ..context.world_manager import WorldSetting
+            from ..worldbuilding_persistence import persist_worldbuilding_project_data
+
             world_setting = WorldSetting(
                 name=world_data.get("world_name", "未命名世界"),
                 world_type=novel_type,
@@ -1263,6 +1484,7 @@ class NovelCoordinator:
                 culture=world_data.get("culture", {}),
             )
             self.world_manager.set_world(world_setting)
+            persist_worldbuilding_project_data({"world": world_data})
 
         self._update_checkpoint(add_stage="worldbuilding")
         await self._sync_memory_stage("worldbuilding")
@@ -1324,6 +1546,12 @@ class NovelCoordinator:
                 logger.warning(f"[Coordinator] 角色档案写入失败: {exc}")
 
         self.context_manager.save("characters", self.character_manager.export_for_llm(), "character")
+        try:
+            from ..project_data_recovery import persist_project_data
+
+            persist_project_data("characters", self.character_manager.export_for_llm(), project_manager=self.project_manager)
+        except Exception as exc:
+            logger.warning(f"[Coordinator] 角色档案同步到项目资料库失败: {exc}")
         progress.append({
             "stage": "character_building",
             "message": f"角色档案构建完成，共 {len(self.character_manager.get_all_characters())} 个角色",
@@ -1377,11 +1605,12 @@ class NovelCoordinator:
             expected_outputs=["outline"],
         )
         outline_result = outline_run_result.get("result", {}) if isinstance(outline_run_result, dict) else {}
-        outline_data = outline_result.get("outline", {})
+        outline_data = normalize_outline_payload(outline_result.get("outline", {}))
 
         self.context_manager.save("outline", outline_data, "plot")
         outline_rows = self._outline_to_project_rows(outline_data)
         self._persist_outline_rows(outline_rows)
+        self._sync_eventlines_from_outline(outline_data)
 
         if isinstance(outline_data, dict):
             self.project.title = outline_data.get("title", f"{novel_type}小说")
@@ -1462,7 +1691,8 @@ class NovelCoordinator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pm_project = self.project_manager.create_project(
             name=f"{novel_type}小说_{timestamp}",
-            description=f"类型：{novel_type}，主题：{effective_theme or '未指定'}"
+            description=f"类型：{novel_type}，主题：{effective_theme or '未指定'}",
+            novel_type=novel_type,
         )
         
         # 切换到新项目（这会同步所有管理器的目录）
@@ -1614,36 +1844,10 @@ class NovelCoordinator:
             }
             raise
 
-    def _outline_to_project_rows(self, outline_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        chapters = self._extract_chapters(outline_data)
+    def _outline_to_project_rows(self, outline_data: Any) -> List[Dict[str, Any]]:
         timestamp = datetime.now().isoformat()
-        rows: List[Dict[str, Any]] = []
-        for index, chapter in enumerate(chapters, start=1):
-            title = f"第{index}章"
-            summary = ""
-            if isinstance(chapter, dict):
-                title = str(chapter.get("title") or title).strip() or title
-                summary = str(
-                    chapter.get("summary")
-                    or chapter.get("outline")
-                    or chapter.get("description")
-                    or chapter.get("content")
-                    or ""
-                ).strip()
-            elif chapter is not None:
-                summary = str(chapter).strip()
-
-            rows.append(
-                {
-                    "chapter_number": index,
-                    "title": title,
-                    "summary": summary,
-                    "content": "",
-                    "created_at": timestamp,
-                    "updated_at": timestamp,
-                }
-            )
-        return rows
+        overview = build_outline_overview_row(outline_data, timestamp=timestamp)
+        return [overview] if overview else []
 
     def _persist_outline_rows(self, outline_rows: List[Dict[str, Any]]) -> Dict[str, str]:
         outline_path = self.project_manager.get_project_data_path("outline")
@@ -1761,12 +1965,30 @@ class NovelCoordinator:
         previous_chapters: List[Dict]
     ) -> Dict[str, Any]:
         """写作单个章节的内部实现"""
+        chapter_outline = dict(chapter_outline or {})
+        planning_context = self._get_chapter_planning_context(chapter_num)
+        if planning_context.get("plot_thread") and not isinstance(chapter_outline.get("plot_thread"), dict):
+            chapter_outline["plot_thread"] = planning_context["plot_thread"]
+
         # 获取上下文
         context = await self.context_manager.get_optimized_context("ChapterWriter")
         context["world"] = self.world_manager.get_world_context()
         context["characters"] = self.character_manager.get_character_context()
         context["eventlines"] = self._get_eventline_context()
         context["project_dir"] = str(self.project_dir)
+        context["chapter_setting"] = planning_context.get("chapter_setting", {})
+        context["detail_setting"] = planning_context.get("detail_setting", {})
+        context["chapter_planning"] = planning_context.get("prompt", "")
+        try:
+            contract_payload = self.project_manager.load_project_state("creation_contract", default={})
+        except Exception:
+            contract_payload = {}
+        contract_scope = contract_payload.get("scope", {}) if isinstance(contract_payload, dict) else {}
+        if isinstance(contract_scope, dict):
+            discussion_context = str(contract_scope.get("discussion_context") or "").strip()
+            if discussion_context:
+                context["discussion_context"] = discussion_context
+                context["recent_discussion"] = discussion_context
 
         if previous_chapters:
             context["previous_summary"] = self._summarize_chapter(
@@ -1779,6 +2001,12 @@ class NovelCoordinator:
 
         chapter_title = chapter_outline.get("title", f"第{chapter_num}章")
         chapter_outline_text = chapter_outline.get("summary", str(chapter_outline))
+        if planning_context.get("prompt"):
+            chapter_outline_text = (
+                f"{chapter_outline_text}\n\n"
+                "【本章章纲/细纲约束】\n"
+                f"{planning_context['prompt']}"
+            ).strip()
         context["chapter_title"] = chapter_title
         context["chapter_outline"] = chapter_outline_text
         context["previous_chapters"] = list(previous_chapters or [])
@@ -1826,7 +2054,7 @@ class NovelCoordinator:
             chapter_num=chapter_num,
             chapter_title=chapter_title,
         )
-        chapter_content = resolved["chapter_content"]
+        raw_chapter_content = resolved["chapter_content"]
         evaluation = resolved["evaluation"]
         expanded_result = resolved["expanded_result"]
         summary_result = resolved["summary_result"]
@@ -1837,9 +2065,10 @@ class NovelCoordinator:
         plot_thread_result = await self._complete_plot_thread_for_chapter(
             chapter_num=chapter_num,
             chapter_outline=chapter_outline,
-            chapter_content=chapter_content,
+            chapter_content=raw_chapter_content,
             evaluation=evaluation,
         )
+        chapter_content = strip_internal_author_markers(raw_chapter_content)
 
         file_naming_result = await self.file_naming.execute({
             "chapter_number": chapter_num,
@@ -2025,35 +2254,56 @@ class NovelCoordinator:
             "theme": theme,
             "requirements": requirements
         })
-        
+
         world_data = result.get("world", {})
-        self.context_manager.save("world", world_data, "world")
-        
+        missing_status = isinstance(world_data, dict) and str(world_data.get("status") or "").strip().lower() in {
+            "missing_info",
+            "needs_input",
+            "needs_confirmation",
+            "pending_confirmation",
+        }
+        has_missing_info = isinstance(world_data, dict) and bool(world_data.get("missing_info"))
+        if not missing_status and not has_missing_info:
+            self.context_manager.save("world", world_data, "world")
+        if isinstance(world_data, dict) and world_data and not missing_status and not has_missing_info:
+            from ..worldbuilding_persistence import persist_worldbuilding_project_data
+
+            persist_worldbuilding_project_data({"world": world_data})
+
         return result
     
     async def generate_outline(
-        self, 
+        self,
         world: Optional[Dict] = None,
         protagonist: str = "",
         plot_idea: str = "",
         volume_count: int = 1,
-        chapters_per_volume: int = 10
+        chapters_per_volume: int = 10,
+        characters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """单独生成大纲"""
         if world is None:
             world = self.context_manager.get("world", {})
+        if characters is None:
+            characters = self.character_manager.export_for_llm()
         
         result = await self.outliner.execute({
             "world": world,
+            "characters": characters,
             "protagonist": protagonist,
             "plot_idea": plot_idea,
             "volume_count": volume_count,
             "chapters_per_volume": chapters_per_volume
-        }, context={"world": world})
-        
-        outline_data = result.get("outline", {})
+        }, context={"world": world, "characters": characters})
+
+        outline_data = normalize_outline_payload(result.get("outline", {}))
+        result["outline"] = outline_data
         self.context_manager.save("outline", outline_data, "plot")
-        
+        outline_rows = self._outline_to_project_rows(outline_data)
+        if outline_rows:
+            self._persist_outline_rows(outline_rows)
+        self._sync_eventlines_from_outline(outline_data)
+
         return result
     
     async def write_single_chapter(
@@ -2094,6 +2344,18 @@ class NovelCoordinator:
                     f"[Coordinator] 协作写章注入热点: count={len(trends_data)}, query={trends_query[:80]}"
                 )
                 result["trends_data"] = trends_data
+
+        try:
+            persist_result = await self._persist_project_ready_chapter_result(
+                result,
+                self._load_project_chapter_rows(),
+            )
+            result.update({
+                "chapter_path": persist_result.get("chapter_path", ""),
+                "outline_path": persist_result.get("outline_path", ""),
+            })
+        except Exception as exc:
+            logger.warning(f"[Coordinator] 单章正文同步到项目资料库失败: {exc}")
 
         return result
 
@@ -2265,6 +2527,7 @@ class NovelCoordinator:
     def _extract_chapters(self, outline_data: Dict) -> List[Dict]:
         """从大纲中提取章节列表"""
         chapters = []
+        outline_data = normalize_outline_payload(outline_data)
         
         if isinstance(outline_data, dict):
             # 尝试从volumes中提取
@@ -2333,6 +2596,47 @@ class NovelCoordinator:
         """查询指定任务的候选 Agent 列表。"""
         return self.collab_agent_registry.find_candidates(task)
 
+    def _resolve_runtime_model_label(self) -> str:
+        """解析当前运行态可见模型名称，用于前端实时状态显示。"""
+        try:
+            task_pool = self.project_manager.load_project_state("task_pool", default={})
+            tasks = task_pool.get("tasks", []) if isinstance(task_pool, dict) else []
+            active_task = next(
+                (
+                    task for task in tasks
+                    if isinstance(task, dict)
+                    and str(task.get("status") or "").strip().lower() in {"running", "claimed", "blocked"}
+                ),
+                None,
+            )
+            metadata = active_task.get("metadata", {}) if isinstance(active_task, dict) else {}
+            if isinstance(metadata, dict):
+                for key in ("current_model", "model", "model_used", "active_model"):
+                    value = str(metadata.get(key) or "").strip()
+                    if value:
+                        return value
+            agent_name = str(
+                (active_task or {}).get("assigned_agent")
+                or (metadata or {}).get("selected_agent")
+                or ""
+            ).strip()
+            if agent_name:
+                from ..agent_config import get_config_manager
+                cfg = get_config_manager().get_effective_config(agent_name)
+                model_name = str(getattr(cfg, "model", "") or "").strip()
+                if model_name:
+                    return model_name
+        except Exception as exc:
+            logger.debug(f"[Coordinator] resolve runtime active model failed: {exc}")
+
+        try:
+            from ..agent_config import get_config_manager
+            active_config = get_config_manager().multi_config.get_active_config()
+            return str(getattr(active_config, "model", "") or "").strip()
+        except Exception as exc:
+            logger.debug(f"[Coordinator] resolve active model failed: {exc}")
+            return ""
+
     def get_project_status(self) -> Dict[str, Any]:
         """获取项目状态"""
         workflow_state = self.workflow_state.value
@@ -2340,9 +2644,14 @@ class NovelCoordinator:
             workflow_state = "cancelled"
         elif self._paused:
             workflow_state = WorkflowState.PAUSED.value
+        model_label = self._resolve_runtime_model_label()
         return {
             "project": self.project.to_dict() if self.project else None,
             "workflow_state": workflow_state,
+            "model": model_label,
+            "current_model": model_label,
+            "active_model": model_label,
+            "model_used": model_label,
             "checkpoint": self.checkpoint.to_dict() if self.checkpoint else None,
             "world": self.world_manager.export_for_llm(),
             "characters": self.character_manager.export_for_llm(),

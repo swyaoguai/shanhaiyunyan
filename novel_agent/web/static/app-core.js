@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 核心状态和初始化模块
+ * 山海·云烟 - 核心状态和初始化模块
  * 包含：全局状态store、UI引用、初始化、事件绑定、模块切换
  */
 
@@ -18,6 +18,7 @@ const store = {
     projectData: {
         characters: [],
         outline: [],
+        chapters: [],
         worldbuilding: [],
         items: [],
         // 资料库扩展分类
@@ -32,7 +33,7 @@ const store = {
     knowledgeCategories: [
         { id: 'db-outline-main', key: 'outline', name: '大纲', icon: 'ri-draft-line', builtin: true },
         { id: 'db-char', key: 'characters', name: '角色档案', icon: 'ri-user-smile-line', builtin: true },
-        { id: 'db-world', key: 'worldbuilding', name: '世界设定', icon: 'ri-earth-line', builtin: true },
+        { id: 'db-world', key: 'worldbuilding', name: '世界观设定', icon: 'ri-earth-line', builtin: true },
         { id: 'db-item', key: 'items', name: '道具物品', icon: 'ri-sword-line', builtin: true },
         { id: 'db-event', key: 'eventlines', name: '事件线', icon: 'ri-git-branch-line', builtin: true },
         { id: 'db-detail', key: 'detail_settings', name: '细纲设定', icon: 'ri-file-text-line', builtin: true },
@@ -50,6 +51,7 @@ const store = {
         loaded: false,
         projectId: null
     },
+    copilotCreativeMode: 'plan',
     lastWorkflowFocusedRunId: '',
     pendingCreationContract: null,
     currentTaskPool: null,
@@ -58,7 +60,7 @@ const store = {
     runtimeProjectStatus: null,
     collabRuntimePollingTimer: null,
     collabRuntimePollingBusy: false,
-    collabRuntimePollingIntervalMs: 5000,
+    collabRuntimePollingIntervalMs: 10000,
     collabRuntimeMinRefreshIntervalMs: 1500,
     collabRuntimeNextPollAt: 0,
     collabRuntimeLastFetchAt: 0,
@@ -173,6 +175,7 @@ async function init() {
     restoreSidebarState(); // 恢复侧边栏状态
     loadKnowledgeCategories(); // 加载自定义资料库分类
     await loadProjects(); // 加载项目列表
+    await loadCopilotCreativeModePreference(); // 加载当前项目的Copilot创作方式
     await checkGlobalAPIConfig(); // 检查全局API配置
     switchModule('dashboard');
     await restoreCopilotHistory();
@@ -207,6 +210,15 @@ async function checkGlobalAPIConfig() {
 
 // 绑定事件
 function bindEvents() {
+    window.addEventListener('global-api-config-updated', (event) => {
+        const activeModel = String(event.detail?.activeModel || event.detail?.active_model || '').trim();
+        if (activeModel) {
+            updateCopilotSessionModelLabel(activeModel);
+        } else {
+            checkGlobalAPIConfig();
+        }
+    });
+
     // 资源栏切换
     ui.resItems.forEach(item => {
         item.addEventListener('click', () => switchModule(item.dataset.module));
@@ -323,7 +335,7 @@ function switchModule(moduleId) {
     if (!isWritingModule && store.copilotVisible) {
         setCopilotVisible(false);
     }
-    // 首次进入创作模块时默认打开文思助手
+    // 首次进入创作模块时默认打开山海·云烟助手
     if (isWritingModule && !wasWritingModule && !store.copilotVisible) {
         setCopilotVisible(true);
     }
@@ -457,6 +469,7 @@ function setCopilotVisible(visible) {
     }
     if (store.currentModule === 'write') {
         connectNovelCollabRealtime();
+        startNovelCollabRuntimePolling();
     }
     syncCopilotToggleButton();
 }
@@ -529,14 +542,48 @@ function normalizeWorkflowFiles(files) {
         .map((item) => ({
             path: String(item.path || '').trim(),
             label: String(item.label || item.name || '').trim(),
-            kind: String(item.kind || 'file').trim(),
+            kind: translateTechnicalText(String(item.kind || 'file').trim()),
             status: String(item.status || 'created').trim()
         }))
         .filter((item) => item.path);
 }
 
+function normalizeWorkflowTaskQueue(tasks) {
+    if (!Array.isArray(tasks)) return [];
+    return tasks
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+            task_id: String(item.task_id || '').trim(),
+            title: String(item.title || item.task_type || item.task_id || '').trim(),
+            task_type: String(item.task_type || '').trim(),
+            target_agent: String(item.target_agent || '').trim(),
+            status: String(item.status || 'pending').trim() || 'pending',
+            retry_count: Number(item.retry_count || 0) || 0,
+            review_required: Boolean(item.review_required)
+        }))
+        .filter((item) => item.task_id || item.title);
+}
+
+function normalizeWorkflowReviews(reviews) {
+    if (!Array.isArray(reviews)) return [];
+    return reviews
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+            task_id: String(item.task_id || '').trim(),
+            artifact_type: String(item.artifact_type || '').trim(),
+            passed: Boolean(item.passed),
+            severity: String(item.severity || '').trim(),
+            revision_target: String(item.revision_target || '').trim(),
+            issues: Array.isArray(item.issues) ? item.issues.map((issue) => {
+                if (typeof issue === 'string') return issue;
+                return String(issue?.message || issue?.type || '').trim();
+            }).filter(Boolean) : []
+        }));
+}
+
 function normalizeCopilotWorkflow(workflow) {
     if (!workflow || typeof workflow !== 'object') return null;
+    const modelLabel = extractModelLabelFromPayload(workflow);
     return {
         run_id: String(workflow.run_id || '').trim(),
         status: String(workflow.status || '').trim() || 'idle',
@@ -544,23 +591,110 @@ function normalizeCopilotWorkflow(workflow) {
         current_agent: String(workflow.current_agent || '').trim(),
         target_agent: String(workflow.target_agent || '').trim(),
         stage: String(workflow.stage || '').trim(),
-        last_progress: String(workflow.last_progress || '').trim(),
+        last_progress: formatWorkflowProgressText(workflow.last_progress || ''),
         last_error: String(workflow.last_error || '').trim(),
         output_dir: String(workflow.output_dir || '').trim(),
         focus_module: String(workflow.focus_module || '').trim(),
         focus_chapter: Number(workflow.focus_chapter || 0) || 0,
+        model: modelLabel,
+        current_model: String(workflow.current_model || modelLabel || '').trim(),
+        active_model: String(workflow.active_model || modelLabel || '').trim(),
+        model_used: String(workflow.model_used || modelLabel || '').trim(),
         created_files: normalizeWorkflowFiles(workflow.created_files),
-        updated_files: normalizeWorkflowFiles(workflow.updated_files)
+        updated_files: normalizeWorkflowFiles(workflow.updated_files),
+        reused_files: normalizeWorkflowFiles(workflow.reused_files),
+        workflow_plan: workflow.workflow_plan && typeof workflow.workflow_plan === 'object' ? workflow.workflow_plan : {},
+        task_queue: normalizeWorkflowTaskQueue(workflow.task_queue),
+        completed_tasks: Array.isArray(workflow.completed_tasks) ? workflow.completed_tasks : [],
+        reviews: normalizeWorkflowReviews(workflow.reviews),
+        handoff_notes: Array.isArray(workflow.handoff_notes) ? workflow.handoff_notes : []
     };
 }
 
 function normalizeRuntimeProjectStatus(status) {
     if (!status || typeof status !== 'object') return null;
+    const modelLabel = extractModelLabelFromPayload(status);
     return {
         workflow_state: String(status.workflow_state || 'idle').trim() || 'idle',
         checkpoint: status.checkpoint && typeof status.checkpoint === 'object' ? status.checkpoint : {},
-        project: status.project && typeof status.project === 'object' ? status.project : {}
+        project: status.project && typeof status.project === 'object' ? status.project : {},
+        model: modelLabel,
+        current_model: String(status.current_model || modelLabel || '').trim(),
+        active_model: String(status.active_model || modelLabel || '').trim(),
+        model_used: String(status.model_used || modelLabel || '').trim()
     };
+}
+
+function translateTechnicalText(text) {
+    let value = String(text || '').trim();
+    if (!value) return '';
+    const replacements = [
+        [/OpenAI Chat Completions/gi, '聊天补全接口'],
+        [/OpenAI Responses API/gi, '响应接口'],
+        [/OpenAI Responses/gi, '响应接口'],
+        [/Anthropic Messages API/gi, 'Anthropic 消息接口'],
+        [/Anthropic Messages/gi, 'Anthropic 消息接口'],
+        [/Max Tokens/gi, '最大输出长度'],
+        [/Temperature/gi, '温度参数'],
+        [/Markdown/gi, '格式化文本'],
+        [/Slash 命令/gi, '快捷命令'],
+        [/Agent/gi, '助手'],
+        [/Coordinator/gi, '创作协调器'],
+        [/Communicator/gi, '沟通助手'],
+        [/Worldbuilder/gi, '世界观构建师'],
+        [/Outliner/gi, '大纲规划师'],
+        [/DetailOutlineBuilder/gi, '细纲构建师'],
+        [/ChapterSettingBuilder/gi, '章纲构建师'],
+        [/EventlineBuilder/gi, '事件线构建师'],
+        [/ChapterWriter/gi, '章节写手'],
+        [/ContinuousWriter/gi, '续写助手'],
+        [/Polisher/gi, '润色助手'],
+        [/SummaryOrchestrator/gi, '摘要编排助手'],
+        [/ContextStrategy/gi, '上下文策略助手'],
+        [/ContentReader/gi, '内容读取助手'],
+        [/ContentExpansion/gi, '内容扩展助手'],
+        [/FileNaming/gi, '文件命名助手'],
+        [/CharacterBuilder/gi, '角色构建师'],
+        [/ProjectDataBuilder/gi, '项目资料构建器'],
+        [/Router/gi, '智能路由'],
+        [/WebSearch/gi, '网络搜索助手'],
+        [/TrendsSearch/gi, '热点搜索助手'],
+        [/running/gi, '执行中'],
+        [/starting/gi, '准备中'],
+        [/completed/gi, '已完成'],
+        [/failed/gi, '执行失败'],
+        [/paused/gi, '已暂停'],
+        [/cancelled/gi, '已取消'],
+        [/pending/gi, '等待中'],
+        [/claimed/gi, '已接收'],
+        [/blocked/gi, '受阻'],
+        [/idle/gi, '空闲'],
+        [/file/gi, '文件'],
+        [/created/gi, '已创建'],
+        [/updated/gi, '已更新'],
+        [/reused/gi, '已复用']
+    ];
+    replacements.forEach(([pattern, replacement]) => {
+        value = value.replace(pattern, replacement);
+    });
+    return value;
+}
+
+function stripVisibleMarkdownHeadingMarkers(text) {
+    return String(text || '')
+        .split(/\r?\n/)
+        .map((line) => line
+            .replace(/^\s{0,3}#{1,6}\s*/, '')
+            .replace(/\s+#{1,6}\s*$/, '')
+            .trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function formatWorkflowProgressText(text) {
+    return translateTechnicalText(stripVisibleMarkdownHeadingMarkers(text));
 }
 
 function getWorkflowStageDisplayName(stageName) {
@@ -586,15 +720,61 @@ function getWorkflowStageDisplayName(stageName) {
         starting: '准备中'
     };
     const key = String(stageName || '').trim();
-    return labels[key] || key;
+    return labels[key] || translateTechnicalText(key);
+}
+
+function renderCompactWorkflowQueue(flow) {
+    const tasks = Array.isArray(flow?.task_queue) ? flow.task_queue.slice(0, 6) : [];
+    const reviews = Array.isArray(flow?.reviews) ? flow.reviews : [];
+    if (!tasks.length && !reviews.length) return '';
+
+    const statusLabels = {
+        pending: '等待中',
+        running: '执行中',
+        completed: '已完成',
+        failed: '失败',
+        revision_requested: '待修订'
+    };
+    const taskRows = tasks.map((task, index) => {
+        const title = window.escapeHtml ? window.escapeHtml(translateTechnicalText(task.title || task.task_type || `任务 ${index + 1}`)) : translateTechnicalText(task.title || task.task_type || `任务 ${index + 1}`);
+        const status = String(task.status || 'pending').trim().toLowerCase();
+        const statusText = statusLabels[status] || translateTechnicalText(status);
+        const review = reviews.find((item) => item.task_id === task.task_id);
+        const reviewText = review ? (review.passed ? '审查通过' : '审查退回') : (task.review_required ? '待审查' : '');
+        return `
+            <div class="copilot-workflow-task-row">
+                <span class="copilot-workflow-task-index">${index + 1}</span>
+                <span class="copilot-workflow-task-title">${title}</span>
+                <span class="copilot-workflow-task-status">${window.escapeHtml ? window.escapeHtml(statusText) : statusText}</span>
+                ${reviewText ? `<span class="copilot-workflow-task-review">${window.escapeHtml ? window.escapeHtml(reviewText) : reviewText}</span>` : ''}
+            </div>
+        `;
+    }).join('');
+    const latestIssue = reviews
+        .flatMap((review) => Array.isArray(review.issues) ? review.issues : [])
+        .filter(Boolean)
+        .slice(-1)[0] || '';
+    const issueHtml = latestIssue
+        ? `<div class="copilot-workflow-review-note">${window.escapeHtml ? window.escapeHtml(latestIssue) : latestIssue}</div>`
+        : '';
+    return `
+        <div class="copilot-workflow-task-queue">
+            ${taskRows}
+            ${issueHtml}
+        </div>
+    `;
 }
 
 function normalizeCopilotRouting(routing) {
     if (!routing || typeof routing !== 'object') return null;
+    const modelLabel = extractModelLabelFromPayload(routing);
     return {
         intent: String(routing.intent || '').trim(),
         target_agent: String(routing.target_agent || '').trim(),
-        model: String(routing.model || '').trim(),
+        model: modelLabel,
+        current_model: String(routing.current_model || modelLabel || '').trim(),
+        active_model: String(routing.active_model || modelLabel || '').trim(),
+        model_used: String(routing.model_used || modelLabel || '').trim(),
         confidence: Number(routing.confidence || 0) || 0
     };
 }
@@ -609,11 +789,36 @@ function shouldShowWorkflowPanel(workflow) {
     if (workflow.run_id || workflow.last_progress) return true;
     if (Array.isArray(workflow.created_files) && workflow.created_files.length > 0) return true;
     if (Array.isArray(workflow.updated_files) && workflow.updated_files.length > 0) return true;
+    if (Array.isArray(workflow.task_queue) && workflow.task_queue.length > 0) return true;
+    if (Array.isArray(workflow.reviews) && workflow.reviews.length > 0) return true;
     return false;
 }
 
 function hasMeaningfulWorkflowState(workflow) {
     return Boolean(workflow && shouldShowWorkflowPanel(workflow));
+}
+
+async function handleAssistantAutoSaveResult(autoSave) {
+    if (!autoSave || !autoSave.applied) return;
+    try {
+        if (typeof loadCurrentProjectData === 'function') {
+            await loadCurrentProjectData();
+        }
+        if (typeof updateMentionData === 'function') {
+            updateMentionData();
+        }
+        if (typeof renderKnowledgeNavPanel === 'function') {
+            renderKnowledgeNavPanel();
+        }
+        if (store.currentModule === 'write' && typeof window.renderMultiAgentWriteNavPanel === 'function') {
+            window.renderMultiAgentWriteNavPanel();
+        }
+        if (typeof showToast === 'function' && autoSave.summary) {
+            showToast(autoSave.summary, 'success');
+        }
+    } catch (error) {
+        console.warn('[Copilot] 助手回复自动同步后刷新失败:', error);
+    }
 }
 
 function buildRealtimeWorkflowHint(payload, messageType) {
@@ -632,12 +837,15 @@ function buildRealtimeWorkflowHint(payload, messageType) {
     const status = payload.error
         ? 'failed'
         : (messageType === 'alert' ? 'failed' : 'running');
+    const modelLabel = extractModelLabelFromPayload(payload);
     const hint = normalizeCopilotWorkflow({
         status,
         current_agent: agent || 'Coordinator',
         target_agent: agent || '',
         stage,
-        last_progress: progressMessage
+        last_progress: progressMessage,
+        model: modelLabel,
+        current_model: modelLabel
     });
     return hasMeaningfulWorkflowState(hint) ? hint : null;
 }
@@ -797,14 +1005,8 @@ function updateCopilotWorkflowPanel(workflow, routing) {
     const hasValidStatus = status && status !== 'idle' && status !== '';
     const hasMeaningfulData = effectiveAgent || progress || hasValidStatus;
     if (!hasMeaningfulData) {
-        ui.copilotWorkflowPanel.innerHTML = `
-            <div class="copilot-workflow-simple">
-                <span class="agent-status" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px;">
-                    <span style="color: var(--text-secondary);">🎯 多Agent创作模式已就绪</span>
-                </span>
-            </div>
-        `;
-        ui.copilotWorkflowPanel.classList.remove('hidden');
+        ui.copilotWorkflowPanel.innerHTML = '';
+        ui.copilotWorkflowPanel.classList.add('hidden');
         return;
     }
 
@@ -837,6 +1039,7 @@ function updateCopilotWorkflowPanel(workflow, routing) {
 
     const currentAgentDisplay = agentDisplayMap[currentAgent] || getAgentDisplayName(currentAgent) || '等待中';
     const statusInfo = statusMap[status] || { text: '待机', color: '#6b7280' };
+    const queueHtml = renderCompactWorkflowQueue(flow);
 
     // 如果有活跃子Agent实时状态，优先展示
     const subAgent = store.activeSubAgent;
@@ -861,8 +1064,8 @@ function updateCopilotWorkflowPanel(workflow, routing) {
             'Evaluator': '🔍 质量评估器',
             'CharacterBuilder': '👤 角色构建器'
         };
-        const subAgentDisplay = subAgentDisplayMap[subAgent.agent] || subAgent.agent;
-        const subAgentTitle = subAgent.title || subAgent.taskType || '';
+        const subAgentDisplay = subAgentDisplayMap[subAgent.agent] || getAgentDisplayName(subAgent.agent);
+        const subAgentTitle = translateTechnicalText(subAgent.title || subAgent.taskType || '');
 
         const subStatusMap = {
             'running': { indicator: '🟢', color: '#22c55e', label: '执行中', pulseClass: 'copilot-sub-agent-pulse' },
@@ -911,6 +1114,7 @@ function updateCopilotWorkflowPanel(workflow, routing) {
     ui.copilotWorkflowPanel.innerHTML = `
         <div class="copilot-workflow-simple">
             ${statusHtml}
+            ${queueHtml}
         </div>
     `;
     ui.copilotWorkflowPanel.classList.remove('hidden');
@@ -953,6 +1157,7 @@ async function refreshNovelCollabRuntime(options = {}) {
             store.currentTaskPool = res && res.task_pool ? res.task_pool : null;
             store.collabExecutionTrace = res && res.collab_execution_trace ? res.collab_execution_trace : null;
             store.projectReadyExecution = res && res.project_ready_execution ? res.project_ready_execution : null;
+            updateCopilotSessionModelLabel(extractModelLabelFromPayload(res));
             if (res && res.creation_contract) {
                 store.pendingCreationContract = res.creation_contract;
             }
@@ -1048,6 +1253,11 @@ function getNovelCollabRealtimeSocketUrl() {
 function handleNovelCollabRealtimePayload(messageType, payload) {
     if (!payload || typeof payload !== 'object') {
         return;
+    }
+    updateCopilotSessionModelLabel(extractModelLabelFromPayload(payload));
+    const realtimeAgentLabel = String(payload.agent || payload.current_agent || payload.target_agent || '').trim();
+    if (realtimeAgentLabel) {
+        updateCopilotSessionAgentLabel(realtimeAgentLabel, payload.status || payload.type || messageType || '');
     }
     // 处理子Agent实时状态事件
     const subAgentEventType = String(payload.type || '').trim();
@@ -1176,12 +1386,12 @@ function connectNovelCollabRealtime() {
             return;
         }
         store.collabRealtimeConnected = true;
-        stopNovelCollabRuntimePolling();
         try {
             socket.send(JSON.stringify({ action: 'subscribe', topic: 'novel_progress' }));
         } catch (_) {
             // ignore send errors; close handler will reconnect
         }
+        startNovelCollabRuntimePolling();
         scheduleNovelCollabRuntimeRefresh(0);
     });
 
@@ -1218,10 +1428,6 @@ function connectNovelCollabRealtime() {
 
 function startNovelCollabRuntimePolling() {
     if (!shouldPollNovelCollabRuntime()) {
-        stopNovelCollabRuntimePolling();
-        return;
-    }
-    if (store.collabRealtimeConnected) {
         stopNovelCollabRuntimePolling();
         return;
     }
@@ -1262,6 +1468,7 @@ async function fetchCopilotWorkflowStatus() {
     const res = await apiCall(`/api/v1/chat/workflow-status?session_id=${encodeURIComponent(sessionId)}`, 'GET');
     const workflow = normalizeCopilotWorkflow(res && res.workflow);
     store.copilotWorkflow = workflow;
+    updateCopilotSessionModelLabel(extractModelLabelFromPayload(res));
     store.lastCopilotWorkflowFetchAt = Date.now();
     return workflow;
 }
@@ -1345,7 +1552,7 @@ function navigateToFileLocation(fileKind) {
         }
     }
     
-    showToast(`已跳转到${fileKind === 'worldbuilding' ? '世界设定' : fileKind === 'characters' ? '角色档案' : fileKind === 'items' ? '道具物品' : fileKind === 'outline' ? '大纲' : '章节'}`, 'success');
+    showToast(`已跳转到${fileKind === 'worldbuilding' ? '世界观设定' : fileKind === 'characters' ? '角色档案' : fileKind === 'items' ? '道具物品' : fileKind === 'outline' ? '大纲' : '章节'}`, 'success');
 }
 
 function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
@@ -1366,7 +1573,7 @@ function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
                 <div class="copilot-preview-header">
                     <div class="copilot-preview-title">
                         <strong>${escapeHtml(filename)}</strong>
-                        <span>${language === 'markdown' ? 'Markdown 预览' : '内容预览'}</span>
+                        <span>${language === 'markdown' ? '格式化文本预览' : '内容预览'}</span>
                     </div>
                     <div class="copilot-preview-actions">
                         <button type="button" class="copilot-preview-download" data-preview-download="${escapeHtml(downloadUrl || '')}" title="下载文件">
@@ -1465,13 +1672,16 @@ function maybeFocusWorkflowTarget(workflow) {
                     renderNavPanelFn('write');
                 }
                 // 如果有指定章节，打开章节编辑器
+                const chapters = typeof window.getMultiAgentChapters === 'function'
+                    ? window.getMultiAgentChapters()
+                    : (store.projectData.chapters || []);
                 if (focusChapter > 0 && typeof openChapterEditorFn === 'function') {
-                    if (Array.isArray(store.projectData.outline) && store.projectData.outline[focusChapter - 1]) {
+                    if (Array.isArray(chapters) && chapters[focusChapter - 1]) {
                         openChapterEditorFn(focusChapter - 1);
                         showToast(`已定位到第${focusChapter}章`, 'success');
                     }
-                } else if (Array.isArray(store.projectData.outline) && store.projectData.outline.length > 0) {
-                    showToast(`章节列表已更新，共${store.projectData.outline.length}章`, 'success');
+                } else if (Array.isArray(chapters) && chapters.length > 0) {
+                    showToast(`章节列表已更新，共${chapters.length}章`, 'success');
                 }
             }).catch((err) => {
                 console.warn('[maybeFocusWorkflowTarget] 加载项目数据失败', err);
@@ -1484,8 +1694,11 @@ function maybeFocusWorkflowTarget(workflow) {
             if (renderNavPanelFn) {
                 window.setTimeout(() => renderNavPanelFn('write'), 100);
             }
+            const chapters = typeof window.getMultiAgentChapters === 'function'
+                ? window.getMultiAgentChapters()
+                : (store.projectData.chapters || []);
             if (focusChapter > 0 && typeof openChapterEditorFn === 'function' &&
-                Array.isArray(store.projectData.outline) && store.projectData.outline[focusChapter - 1]) {
+                Array.isArray(chapters) && chapters[focusChapter - 1]) {
                 openChapterEditorFn(focusChapter - 1);
             }
         }
@@ -1521,7 +1734,7 @@ function getAgentDisplayName(agentName) {
         FileNaming: '文件命名助手（内部）'
     };
     const key = String(agentName || '').trim();
-    return labels[key] || key || '系统';
+    return labels[key] || translateTechnicalText(key) || '系统';
 }
 
 function getIntentDisplayName(intentName) {
@@ -1554,17 +1767,17 @@ function buildRoutingStatusLines(routing, workflow) {
     const targetAgent = String(route.target_agent || flow.target_agent || flow.current_agent || '').trim();
     const currentAgent = String(flow.current_agent || targetAgent || '').trim();
     const stage = String(flow.stage || '').trim();
-    const progress = String(flow.last_progress || '').trim();
+    const progress = formatWorkflowProgressText(flow.last_progress || '');
     const status = String(flow.status || '').trim().toLowerCase();
 
     if (targetAgent && targetAgent !== 'Communicator') {
-        lines.push(`沟通助手：已识别你的请求，准备转交给${getAgentDisplayName(targetAgent)}处理${intent ? `（${getIntentDisplayName(intent)}）` : ''}`);
+        lines.push(`已转交给${getAgentDisplayName(targetAgent)}处理${intent ? `（${getIntentDisplayName(intent)}）` : ''}`);
         if (status === 'running' || status === 'starting' || !status) {
-            lines.push('转交状态：进行中...');
+            lines.push('处理状态：进行中');
         } else if (status === 'completed') {
-            lines.push('转交状态：已完成');
+            lines.push('处理状态：已完成');
         } else if (status === 'failed') {
-            lines.push('转交状态：失败');
+            lines.push('处理状态：失败');
         }
     } else if (targetAgent === 'Communicator') {
         lines.push('沟通助手：正在继续处理当前对话');
@@ -1573,9 +1786,9 @@ function buildRoutingStatusLines(routing, workflow) {
     if (currentAgent && currentAgent !== 'Communicator') {
         let agentLine = `${getAgentDisplayName(currentAgent)}：已接收任务`;
         if (progress) {
-            agentLine += `，${progress.replace(/\s+/g, ' ').trim()}`;
+            agentLine += `，${translateTechnicalText(progress).replace(/\s+/g, ' ').trim()}`;
         } else if (stage) {
-            agentLine += `，当前阶段：${stage}`;
+            agentLine += `，当前阶段：${translateTechnicalText(stage)}`;
         }
         lines.push(agentLine);
 
@@ -1754,7 +1967,7 @@ async function createCopilotSession() {
 
 function setCopilotSessionHeader(modelLabel, agentLabel) {
     const normalizedModelLabel = String(modelLabel || '').trim() || '未识别模型';
-    const normalizedAgentLabel = String(agentLabel || '').trim() || '准备就绪';
+    const normalizedAgentLabel = translateTechnicalText(String(agentLabel || '').trim());
     if (ui.copilotSessionMode) {
         ui.copilotSessionMode.textContent = `模型：${normalizedModelLabel}`;
     }
@@ -1763,61 +1976,216 @@ function setCopilotSessionHeader(modelLabel, agentLabel) {
     }
 }
 
-function updateCopilotSessionHeaderFromRouting(routing) {
-    if (!routing || typeof routing !== 'object') {
-        // 不显示错误信息，保持友好的默认状态
+function updateCopilotSessionAgentLabel(agentLabel, statusLabel = '') {
+    if (!ui.copilotSessionAgent) {
         return;
     }
+    const normalizedAgentLabel = translateTechnicalText(String(agentLabel || '').trim());
+    const normalizedStatusLabel = translateTechnicalText(String(statusLabel || '').trim());
+    ui.copilotSessionAgent.textContent = [normalizedAgentLabel, normalizedStatusLabel].filter(Boolean).join(' · ');
+}
 
-    const intent = String(routing.intent || '').trim();
-    const targetAgent = String(routing.target_agent || '').trim();
-    const routingModel = String(routing.model || '').trim();
-
-    // 意图中文映射
-    const intentLabels = {
-        'create_novel': '创作小说',
-        'create_character': '角色建档',
-        'create_eventlines': '生成事件线',
-        'create_detail_outline': '生成细纲',
-        'create_chapter_settings': '生成章纲',
-        'continue_write': '续写章节',
-        'polish_content': '润色内容',
-        'search_web': '网络搜索',
-        'search_trends': '热点搜索',
-        'query_knowledge': '查询知识库',
-        'general_chat': '对话交流',
-        'ask_help': '寻求帮助',
-        'provide_feedback': '提供反馈',
-        'project_manage': '项目管理',
-        'config_settings': '配置设置'
-    };
-
-    // Agent中文映射
-    const agentLabels = {
-        'Communicator': '沟通助手',
-        'Coordinator': '创作协调器',
-        'Worldbuilder': '世界观构建',
-        'Outliner': '大纲规划',
-        'EventlineBuilder': '事件线构建',
-        'DetailOutlineBuilder': '细纲构建',
-        'ChapterSettingBuilder': '章纲构建',
-        'ChapterWriter': '章节写手',
-        'ContinuousWriter': '无限续写',
-        'Polisher': '润色助手',
-        'Router': '智能路由',
-        'WebSearch': '网络搜索',
-        'TrendsSearch': '热点搜索'
-    };
-
-    // 只有在有有效路由信息时才更新显示
-    if (intent && targetAgent) {
-        const currentLabel = ui.copilotSessionMode
-            ? String(ui.copilotSessionMode.textContent || '').replace(/^模型：/, '').trim()
-            : '';
-        const modelLabel = routingModel || currentLabel || '未识别模型';
-        const agentName = agentLabels[targetAgent] || targetAgent;
-        setCopilotSessionHeader(modelLabel, agentName);
+function updateCopilotSessionModelLabel(modelLabel) {
+    const normalizedModelLabel = String(modelLabel || '').trim();
+    if (!normalizedModelLabel || !ui.copilotSessionMode) {
+        return;
     }
+    const currentLabel = String(ui.copilotSessionMode.textContent || '').replace(/^模型：/, '').trim();
+    if (normalizedModelLabel !== currentLabel) {
+        ui.copilotSessionMode.textContent = `模型：${normalizedModelLabel}`;
+    }
+}
+
+function extractModelLabelFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    const buckets = [
+        payload,
+        payload.routing,
+        payload.routing_info,
+        payload.workflow,
+        payload.runtime,
+        payload.project,
+        payload.checkpoint,
+        payload.metadata,
+        payload.task_pool,
+        payload.task_pool && payload.task_pool.metadata,
+        payload.collab_execution_trace,
+        payload.delegated_result,
+        payload.delegated_result && payload.delegated_result.params,
+        payload.data,
+        payload.payload
+    ];
+    for (const bucket of buckets) {
+        if (!bucket || typeof bucket !== 'object') continue;
+        for (const key of ['model', 'current_model', 'active_model', 'model_used', 'last_model']) {
+            const value = String(bucket[key] || '').trim();
+            if (value) return value;
+        }
+    }
+    const taskLists = [
+        payload.tasks,
+        payload.task_pool && payload.task_pool.tasks,
+        payload.runtime_task_pool && payload.runtime_task_pool.tasks,
+        payload.data && payload.data.tasks
+    ];
+    for (const tasks of taskLists) {
+        if (!Array.isArray(tasks)) continue;
+        const activeTask = tasks.find((task) => task && typeof task === 'object' && ['running', 'claimed', 'blocked'].includes(String(task.status || '').trim().toLowerCase()))
+            || tasks.find((task) => task && typeof task === 'object' && String(task.status || '').trim().toLowerCase() === 'pending')
+            || null;
+        const modelLabel = extractModelLabelFromPayload(activeTask);
+        if (modelLabel) return modelLabel;
+    }
+    const events = payload.collab_execution_trace && Array.isArray(payload.collab_execution_trace.events)
+        ? payload.collab_execution_trace.events
+        : (Array.isArray(payload.events) ? payload.events : []);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+        const modelLabel = extractModelLabelFromPayload(events[index]);
+        if (modelLabel) return modelLabel;
+    }
+    return '';
+}
+
+function updateCopilotSessionHeaderFromRouting(routing) {
+    if (!routing || typeof routing !== 'object') {
+        return;
+    }
+    updateCopilotSessionModelLabel(extractModelLabelFromPayload(routing));
+    updateCopilotSessionAgentLabel(routing.current_agent || routing.target_agent || '');
+}
+
+const COPILOT_CREATIVE_MODE_STATE_KEY = 'copilot_creative_mode';
+const COPILOT_CREATIVE_MODE_DEFAULT = 'plan';
+const COPILOT_CREATIVE_MODE_LABELS = {
+    plan: '计划后确认',
+    discussion: '只讨论',
+    execute: '直接执行',
+    auto: '智能判断'
+};
+
+function normalizeCopilotCreativeMode(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(COPILOT_CREATIVE_MODE_LABELS, mode)
+        ? mode
+        : COPILOT_CREATIVE_MODE_DEFAULT;
+}
+
+function readCopilotCreativeModeFromLocalStorage() {
+    try {
+        return localStorage.getItem(COPILOT_CREATIVE_MODE_STATE_KEY);
+    } catch (_error) {
+        return null;
+    }
+}
+
+function writeCopilotCreativeModeToLocalStorage(mode) {
+    try {
+        localStorage.setItem(COPILOT_CREATIVE_MODE_STATE_KEY, normalizeCopilotCreativeMode(mode));
+    } catch (_error) {
+        // 本地存储不可用时仍保留内存态。
+    }
+}
+
+function getCurrentCopilotCreativeMode() {
+    if (store.copilotCreativeMode) {
+        return normalizeCopilotCreativeMode(store.copilotCreativeMode);
+    }
+    return normalizeCopilotCreativeMode(readCopilotCreativeModeFromLocalStorage());
+}
+
+function renderCopilotCreativeModeSelector() {
+    const inputRoot = document.querySelector('.copilot-input');
+    if (!inputRoot) return;
+
+    document.querySelector('.copilot-creative-mode-row')?.remove();
+
+    const mode = getCurrentCopilotCreativeMode();
+    store.copilotCreativeMode = mode;
+
+    const row = document.createElement('div');
+    row.className = 'copilot-creative-mode-row';
+    row.innerHTML = `
+        <div class="copilot-creative-mode-main">
+            <label class="copilot-creative-mode-label" for="copilot-creative-mode-select">创作方式</label>
+            <select id="copilot-creative-mode-select" class="copilot-creative-mode-select" aria-label="选择Copilot创作方式">
+                ${Object.entries(COPILOT_CREATIVE_MODE_LABELS).map(([value, label]) => (
+                    `<option value="${value}"${value === mode ? ' selected' : ''}>${label}</option>`
+                )).join('')}
+            </select>
+        </div>
+        <div id="copilot-creative-mode-hint" class="copilot-creative-mode-hint" aria-live="polite"></div>
+    `;
+
+    const inputWrapper = inputRoot.querySelector('.copilot-input-wrapper');
+    if (inputWrapper) {
+        inputRoot.insertBefore(row, inputWrapper);
+    } else {
+        inputRoot.insertBefore(row, inputRoot.firstChild);
+    }
+    bindCopilotCreativeModeSelector();
+    updateCopilotCreativeModeHint();
+}
+
+function updateCopilotCreativeModeHint() {
+    const select = document.getElementById('copilot-creative-mode-select');
+    const hint = document.getElementById('copilot-creative-mode-hint');
+    const mode = normalizeCopilotCreativeMode(select?.value || store.copilotCreativeMode);
+    store.copilotCreativeMode = mode;
+    if (select) select.value = mode;
+    if (hint) {
+        hint.textContent = {
+            plan: '先整理方案和任务，确认后再写入项目。',
+            discussion: '只聊天和完善想法，不写入资料或正文。',
+            execute: '明确执行创作任务，并把结果写入项目。',
+            auto: '系统按意图判断，明确指令可能直接写入。'
+        }[mode];
+    }
+}
+
+async function loadCopilotCreativeModePreference() {
+    let mode = normalizeCopilotCreativeMode(readCopilotCreativeModeFromLocalStorage());
+    if (typeof apiCall === 'function') {
+        try {
+            const response = await apiCall(`/api/project-state/${COPILOT_CREATIVE_MODE_STATE_KEY}`, 'GET');
+            const data = response && Object.prototype.hasOwnProperty.call(response, 'data') ? response.data : null;
+            if (data && typeof data === 'object' && data.mode) {
+                mode = normalizeCopilotCreativeMode(data.mode);
+            } else if (typeof data === 'string') {
+                mode = normalizeCopilotCreativeMode(data);
+            }
+        } catch (error) {
+            console.warn('[Copilot] 加载创作方式失败，使用本地偏好:', error);
+        }
+    }
+    store.copilotCreativeMode = mode;
+    writeCopilotCreativeModeToLocalStorage(mode);
+    renderCopilotCreativeModeSelector();
+}
+
+async function saveCopilotCreativeModePreference(mode) {
+    const normalizedMode = normalizeCopilotCreativeMode(mode);
+    store.copilotCreativeMode = normalizedMode;
+    writeCopilotCreativeModeToLocalStorage(normalizedMode);
+    updateCopilotCreativeModeHint();
+
+    if (typeof apiCall !== 'function') return;
+    try {
+        await apiCall(`/api/project-state/${COPILOT_CREATIVE_MODE_STATE_KEY}`, 'POST', { data: { mode: normalizedMode } });
+        if (typeof showToast === 'function') {
+            showToast(`已切换到${COPILOT_CREATIVE_MODE_LABELS[normalizedMode]}`);
+        }
+    } catch (error) {
+        console.warn('[Copilot] 保存创作方式失败:', error);
+    }
+}
+
+function bindCopilotCreativeModeSelector() {
+    const select = document.getElementById('copilot-creative-mode-select');
+    if (!select || select.dataset.bound === 'true') return;
+    select.dataset.bound = 'true';
+    select.addEventListener('change', () => {
+        saveCopilotCreativeModePreference(select.value);
+    });
 }
 
 // 新建会话 - 清空聊天记录
@@ -1847,7 +2215,7 @@ async function clearCopilotChat() {
     const currentLabel = ui.copilotSessionMode
         ? String(ui.copilotSessionMode.textContent || '').replace(/^模型：/, '').trim()
         : '';
-    setCopilotSessionHeader(currentLabel || '未识别模型', '准备就绪');
+    setCopilotSessionHeader(currentLabel || '未识别模型', '');
     updateCopilotWorkflowPanel(null);
     clearInlineStatus();
 
@@ -1929,16 +2297,16 @@ function renderTaskPoolSummaryCard(taskPool) {
     const statusEntries = Object.entries(summary.statusCount);
     const statusHtml = statusEntries.length
         ? statusEntries.map(([status, count]) => {
-            const safeStatus = window.escapeHtml ? window.escapeHtml(status) : status;
-            return `<span class="copilot-taskpool-badge" data-status="${safeStatus}">${safeStatus} · ${count}</span>`;
+            const safeStatus = window.escapeHtml ? window.escapeHtml(translateTechnicalText(status)) : translateTechnicalText(status);
+            return `<span class="copilot-taskpool-badge" data-status="${window.escapeHtml ? window.escapeHtml(status) : status}">${safeStatus} · ${count}</span>`;
         }).join('')
         : '<span class="copilot-taskpool-empty">暂无任务</span>';
     const previewHtml = summary.preview.length
         ? summary.preview.map((task) => {
             const safeTitle = window.escapeHtml ? window.escapeHtml(task.title) : task.title;
-            const safeStatus = window.escapeHtml ? window.escapeHtml(task.status) : task.status;
+            const safeStatus = window.escapeHtml ? window.escapeHtml(translateTechnicalText(task.status)) : translateTechnicalText(task.status);
             const candidateText = task.candidateAgents.length
-                ? `候选智能体：${task.candidateAgents.join('、')}`
+                ? `候选助手：${task.candidateAgents.map((agent) => getAgentDisplayName(agent)).join('、')}`
                 : '候选智能体：待分配';
             const safeCandidateText = window.escapeHtml ? window.escapeHtml(candidateText) : candidateText;
             return `
@@ -2017,6 +2385,44 @@ function renderCreationContractCard(contractPayload) {
     `;
 }
 
+function decodeHtmlAttributeValue(value) {
+    const raw = String(value || '');
+    if (!raw || !/[&][a-z#0-9]+;/i.test(raw)) return raw;
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = raw;
+    return textarea.value;
+}
+
+function getFallbackCreationContractForButton(button) {
+    const fallback = store.pendingCreationContract;
+    if (!fallback || typeof fallback !== 'object') return null;
+    const card = button && button.closest ? button.closest('.copilot-contract-card') : null;
+    const cardContractId = String(card?.dataset?.contractId || '').trim();
+    const fallbackContractId = String(fallback.contract_id || '').trim();
+    if (cardContractId && fallbackContractId && cardContractId !== fallbackContractId) {
+        return null;
+    }
+    return fallback;
+}
+
+function parseCreationContractFromButton(button) {
+    const raw = String(button?.dataset?.contractConfirm || '').trim();
+    const candidates = [raw, decodeHtmlAttributeValue(raw)]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+    for (const candidate of candidates) {
+        try {
+            const payload = JSON.parse(candidate);
+            if (payload && typeof payload === 'object') {
+                return payload;
+            }
+        } catch (_) {
+            // Try the next representation, then fall back to the runtime copy.
+        }
+    }
+    return getFallbackCreationContractForButton(button);
+}
+
 async function confirmCreationContract(contractPayload) {
     if (!contractPayload || typeof contractPayload !== 'object') {
         throw new Error('缺少合同草案数据');
@@ -2045,12 +2451,8 @@ function bindContractCardActions(container) {
         if (button.dataset.bound === '1') return;
         button.dataset.bound = '1';
         button.addEventListener('click', async () => {
-            const raw = String(button.dataset.contractConfirm || '').trim();
-            if (!raw) return;
-            let payload = null;
-            try {
-                payload = JSON.parse(raw);
-            } catch (e) {
+            const payload = parseCreationContractFromButton(button);
+            if (!payload) {
                 showToast('合同草案解析失败', 'error');
                 return;
             }
@@ -2096,6 +2498,7 @@ async function sendCopilotMessage() {
 
     appendMessage(text, 'user');
     const sid = getCurrentCopilotSessionId();
+    const creativeMode = getCurrentCopilotCreativeMode();
 
     // 显示思考中状态
     showInlineStatus('Router', '正在思考...', 'running');
@@ -2110,7 +2513,7 @@ async function sendCopilotMessage() {
         const response = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, session_id: sid }),
+            body: JSON.stringify({ message: text, session_id: sid, creative_mode: creativeMode }),
             signal: currentStreamAbort.signal
         });
 
@@ -2119,8 +2522,10 @@ async function sendCopilotMessage() {
             aiDiv.remove();
             const res = await apiCall('/api/chat', 'POST', {
                 message: text,
-                session_id: sid
+                session_id: sid,
+                creative_mode: creativeMode
             });
+            updateCopilotSessionModelLabel(extractModelLabelFromPayload(res));
             updateCopilotSessionHeaderFromRouting(res && res.routing);
             updateCopilotWorkflowPanel(res && res.workflow, res && res.routing);
             clearInlineStatus();
@@ -2139,6 +2544,7 @@ async function sendCopilotMessage() {
                     maybeFocusWorkflowTarget(res.workflow);
                 }
             }
+            await handleAssistantAutoSaveResult(res && res.assistant_auto_save);
 
             appendMessage((res.reply || '收到'), 'ai');
 
@@ -2164,14 +2570,25 @@ async function sendCopilotMessage() {
         let fullText = '';
         const contentEl = aiDiv.querySelector('.msg-content');
 
-        // 防抖滚动：500ms 内最多执行一次滚动
-        let scrollTimeout = null;
-        function debouncedScrollToBottom() {
-            if (scrollTimeout) return;
-            scrollTimeout = setTimeout(() => {
-                scrollCopilotToBottom();
-                scrollTimeout = null;
-            }, 500);
+        // 批量缓冲渲染：累积chunk后统一刷新，减少DOM操作次数
+        let pendingChunks = '';
+        let flushTimer = null;
+        const FLUSH_INTERVAL = 50; // 50ms 批量刷新一次
+
+        function flushPendingChunks() {
+            if (!pendingChunks) return;
+            const textNode = document.createTextNode(pendingChunks);
+            contentEl.appendChild(textNode);
+            pendingChunks = '';
+            scrollCopilotToBottom();
+        }
+
+        function scheduleFlush() {
+            if (flushTimer) return;
+            flushTimer = setTimeout(() => {
+                flushTimer = null;
+                flushPendingChunks();
+            }, FLUSH_INTERVAL);
         }
 
         while (true) {
@@ -2196,15 +2613,21 @@ async function sendCopilotMessage() {
                             contentEl.innerHTML = ''; // 初始化空容器
                         }
                         fullText += evt.content;
-                        // 只追加转义后的文本，避免每次重新渲染整个 Markdown（O(n²) 问题）
-                        contentEl.innerHTML += escapeHtml(evt.content);
-                        debouncedScrollToBottom();
+                        // 累积到缓冲区，批量渲染而非逐字渲染
+                        pendingChunks += evt.content;
+                        scheduleFlush();
                     } else if (evt.type === 'workflow') {
+                        updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
                         showInlineStatusFromWorkflow(evt.workflow);
                         updateCopilotWorkflowPanel(evt.workflow);
+                        appendStreamWorkflowProgress(aiDiv, evt.workflow);
                     } else if (evt.type === 'done') {
+                        updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
                         // 清除内联状态指示器
                         clearInlineStatus();
+                        // 刷新剩余缓冲内容
+                        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                        flushPendingChunks();
                         // 最终完整回复
                         if (evt.reply) {
                             fullText = evt.reply;
@@ -2227,6 +2650,7 @@ async function sendCopilotMessage() {
                                 maybeFocusWorkflowTarget(evt.workflow);
                             }
                         }
+                        await handleAssistantAutoSaveResult(evt && evt.assistant_auto_save);
 
                         const delegatedParams = evt && evt.delegated_result && evt.delegated_result.params && typeof evt.delegated_result.params === 'object'
                             ? evt.delegated_result.params
@@ -2242,6 +2666,7 @@ async function sendCopilotMessage() {
                         // 移除打字光标
                         aiDiv.classList.remove('streaming');
                     } else if (evt.type === 'error') {
+                        updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
                         clearInlineStatus();
                         fullText = evt.message || '处理请求时出错';
                         contentEl.innerHTML = renderMarkdown(fullText);
@@ -2256,7 +2681,9 @@ async function sendCopilotMessage() {
             }
         }
 
-        // 流结束，确保移除打字光标
+        // 流结束，刷新剩余缓冲并确保移除打字光标
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        flushPendingChunks();
         aiDiv.classList.remove('streaming');
         if (!fullText) {
             contentEl.innerHTML = renderMarkdown('收到');
@@ -2264,11 +2691,13 @@ async function sendCopilotMessage() {
 
     } catch (e) {
         clearInlineStatus();
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        flushPendingChunks();
         aiDiv.classList.remove('streaming');
         const contentEl = aiDiv.querySelector('.msg-content');
         if (e.name === 'AbortError') {
             if (contentEl && !contentEl.textContent.trim()) {
-                contentEl.innerHTML = renderMarkdown('*已停止生成*');
+                contentEl.innerHTML = renderMarkdown('已停止生成');
             }
         } else {
             console.error('[sendCopilotMessage] stream error:', e);
@@ -2293,6 +2722,33 @@ function createStreamMessage() {
     ui.copilotMsgs.appendChild(div);
     scrollCopilotToBottom();
     return div;
+}
+
+function appendStreamWorkflowProgress(aiDiv, workflow) {
+    if (!aiDiv || !workflow || typeof workflow !== 'object') return;
+    const progressText = formatWorkflowProgressText(workflow.last_progress || '');
+    if (!progressText) return;
+
+    let traceEl = aiDiv.querySelector('.copilot-progress-trace');
+    if (!traceEl) {
+        traceEl = document.createElement('div');
+        traceEl.className = 'copilot-progress-trace';
+        const contentEl = aiDiv.querySelector('.msg-content');
+        aiDiv.insertBefore(traceEl, contentEl || null);
+    }
+
+    if (traceEl.dataset.lastProgress === progressText) return;
+    traceEl.dataset.lastProgress = progressText;
+
+    const lineEl = document.createElement('div');
+    lineEl.className = 'copilot-progress-trace-line';
+    lineEl.textContent = progressText;
+    traceEl.appendChild(lineEl);
+
+    while (traceEl.children.length > 6) {
+        traceEl.removeChild(traceEl.firstElementChild);
+    }
+    scrollCopilotToBottom();
 }
 
 function appendMessage(text, role, shouldScroll = true) {
@@ -2382,19 +2838,19 @@ let _inlineStatusFadeTimer = null;
 function getAgentActivity(agentName, stage, status) {
     const agent = AGENT_ACTIVITY_MAP[agentName];
     if (!agent) {
-        return { icon: '⚙️', text: `正在处理 (${agentName || '未知'})...` };
+        return { icon: '⚙️', text: `正在处理（${getAgentDisplayName(agentName) || '未知'}）` };
     }
     if (status === 'completed' || status === 'done') {
         return { icon: '✅', text: agent.done };
     }
     if (status === 'failed') {
-        return { icon: '❌', text: `${agent.done.replace('完成', '失败')}` };
+        return { icon: '❌', text: agent.done.replace('完成', '失败') };
     }
     // 根据阶段给出更具体的描述
     if (stage && STAGE_ACTIVITY_MAP[stage]) {
         return { icon: agent.icon, text: STAGE_ACTIVITY_MAP[stage] };
     }
-    return { icon: agent.icon, text: agent.activity + '...' };
+    return { icon: agent.icon, text: agent.activity };
 }
 
 function showInlineStatus(agentName, detail, status, stage) {
@@ -2403,7 +2859,7 @@ function showInlineStatus(agentName, detail, status, stage) {
     const normalizedStatus = String(status || 'running').trim().toLowerCase();
     const normalizedAgent = String(agentName || '').trim();
     const normalizedStage = String(stage || '').trim();
-    const normalizedDetail = String(detail || '').trim();
+    const normalizedDetail = formatWorkflowProgressText(detail || '');
 
     // 不对Communicator常规对话显示状态（太频繁）
     if (normalizedAgent === 'Communicator' && normalizedStatus === 'running' && !normalizedDetail) return;
@@ -2477,7 +2933,7 @@ function showInlineStatusFromWorkflow(workflow) {
     const agent = String(workflow.current_agent || workflow.target_agent || '').trim();
     const status = String(workflow.status || '').trim().toLowerCase();
     const stage = String(workflow.stage || '').trim();
-    const progress = String(workflow.last_progress || '').trim();
+    const progress = formatWorkflowProgressText(workflow.last_progress || '');
 
     if (!agent && !status && !progress) return;
     // 最终完成时清除（让done事件的消息来代替）
@@ -2532,8 +2988,10 @@ window.NovelAgentApp.core = {
     renderCreationContractCard,
     renderTaskPoolSummaryCard,
     confirmCreationContract,
+    parseCreationContractFromButton,
     bindContractCardActions,
     createStreamMessage,
+    appendStreamWorkflowProgress,
     scrollCopilotToBottom,
     updateCopilotWorkflowPanel,
     restoreCopilotWorkflowStatus,
@@ -2543,7 +3001,12 @@ window.NovelAgentApp.core = {
     showInlineStatus,
     clearInlineStatus,
     showInlineStatusFromWorkflow,
-    showInlineStatusFromSubAgent
+    showInlineStatusFromSubAgent,
+    handleAssistantAutoSaveResult,
+    getCurrentCopilotCreativeMode,
+    renderCopilotCreativeModeSelector,
+    loadCopilotCreativeModePreference,
+    saveCopilotCreativeModePreference
 };
 
 // 兼容旧版全局访问，后续模块优先使用 window.NovelAgentApp.core
@@ -2567,8 +3030,10 @@ window.renderTaskPoolSummaryCard = renderTaskPoolSummaryCard;
 window.startNovelCollabRuntimePolling = startNovelCollabRuntimePolling;
 window.stopNovelCollabRuntimePolling = stopNovelCollabRuntimePolling;
 window.confirmCreationContract = confirmCreationContract;
+window.parseCreationContractFromButton = parseCreationContractFromButton;
 window.bindContractCardActions = bindContractCardActions;
 window.createStreamMessage = createStreamMessage;
+window.appendStreamWorkflowProgress = appendStreamWorkflowProgress;
 window.scrollCopilotToBottom = scrollCopilotToBottom;
 window.updateCopilotWorkflowPanel = updateCopilotWorkflowPanel;
 window.restoreCopilotWorkflowStatus = restoreCopilotWorkflowStatus;
@@ -2577,5 +3042,10 @@ window.showInlineStatus = showInlineStatus;
 window.clearInlineStatus = clearInlineStatus;
 window.showInlineStatusFromWorkflow = showInlineStatusFromWorkflow;
 window.showInlineStatusFromSubAgent = showInlineStatusFromSubAgent;
+window.handleAssistantAutoSaveResult = handleAssistantAutoSaveResult;
+window.getCurrentCopilotCreativeMode = getCurrentCopilotCreativeMode;
+window.renderCopilotCreativeModeSelector = renderCopilotCreativeModeSelector;
+window.loadCopilotCreativeModePreference = loadCopilotCreativeModePreference;
+window.saveCopilotCreativeModePreference = saveCopilotCreativeModePreference;
 
 console.log('[app-core.js] 核心模块已加载');

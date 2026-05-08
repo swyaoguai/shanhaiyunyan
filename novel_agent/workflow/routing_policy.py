@@ -114,46 +114,11 @@ class RoutingPolicy:
             if str(item.get("agent_name") or "").strip()
         ]
 
-        # 优先使用规则表中的 preferred_agent_name
+        # 优先使用能力注册表给出的候选，规则表只用于在候选中挑选首选项。
+        # 如果没有候选，不把 preferred_agent_name 当作“隐式可执行者”，避免绕过注册表。
         preferred = str(rule.preferred_agent_name or "").strip()
-        if preferred:
-            # 用 capability_registry 校验 preferred agent 是否仍然可用
-            preferred_available = (
-                not candidate_names  # 没有候选列表时不阻断
-                or preferred in candidate_names  # preferred 在候选列表中
-            )
-            if preferred_available:
-                return RouteDecision(
-                    agent_name=preferred,
-                    route_reason=(
-                        f"matched explicit route {task_type}"
-                        + (f"@{stage}" if stage else "")
-                        + f" via preferred agent {preferred}"
-                    ),
-                    candidate_source="route_rule_preferred",
-                    candidate_names=candidate_names,
-                    required_context_keys=list(rule.required_context_keys or []),
-                    fallback_agent_names=[str(fallback_agent_name or "").strip()] if str(fallback_agent_name or "").strip() else [],
-                )
-            # preferred agent 不可用，降级到 capability_registry 候选列表
-            if candidate_names:
-                selected_agent_name = candidate_names[0]
-                return RouteDecision(
-                    agent_name=selected_agent_name,
-                    route_reason=(
-                        f"matched explicit route {task_type}"
-                        + (f"@{stage}" if stage else "")
-                        + f" via capability fallback (preferred {preferred} unavailable), selected {selected_agent_name}"
-                    ),
-                    candidate_source="capability_registry_fallback",
-                    candidate_names=candidate_names,
-                    required_context_keys=list(rule.required_context_keys or []),
-                    fallback_agent_names=[str(fallback_agent_name or "").strip()] if str(fallback_agent_name or "").strip() else [],
-                )
-
-        # 没有 preferred agent 时，使用 capability_registry 候选列表
         if candidate_names:
-            selected_agent_name = candidate_names[0]
+            selected_agent_name = preferred if preferred in candidate_names else candidate_names[0]
             return RouteDecision(
                 agent_name=selected_agent_name,
                 route_reason=(
@@ -175,9 +140,9 @@ class RoutingPolicy:
                 route_reason=(
                     f"matched explicit route {task_type}"
                     + (f"@{stage}" if stage else "")
-                    + f" via fallback agent {fixed_agent_name}"
+                    + f" via fixed route agent {fixed_agent_name}"
                 ),
-                candidate_source="fallback_agent",
+                candidate_source="fixed_route_rule",
                 candidate_names=candidate_names,
                 required_context_keys=list(rule.required_context_keys or []),
                 fallback_agent_names=[fixed_agent_name],

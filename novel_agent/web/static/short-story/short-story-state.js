@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作状态层
+ * 山海·云烟 - 短篇创作状态层
  */
 
 const SHORT_STORY_MAIN_CATEGORIES = [

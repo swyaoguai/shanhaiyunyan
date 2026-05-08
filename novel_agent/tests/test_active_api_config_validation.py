@@ -49,6 +49,276 @@ def _build_manager() -> AgentConfigManager:
     return manager
 
 
+def test_fetch_anthropic_models_uses_native_models_endpoint(monkeypatch):
+    app = create_app()
+    captured = {}
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return await super().get(url, headers=headers)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(
+                200,
+                payload={"data": [{"id": "claude-sonnet-4-20250514"}, {"id": "claude-3-5-haiku-20241022"}]},
+                text='{"data":[{"id":"claude-sonnet-4-20250514"},{"id":"claude-3-5-haiku-20241022"}]}',
+            ),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={"api_type": "anthropic", "api_key": "sk-ant-test", "api_base": "https://api.anthropic.com/v1"},
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["models"] == ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"]
+    assert captured["url"] == "https://api.anthropic.com/v1/models"
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_fetch_anthropic_models_uses_mimo_api_key_header(monkeypatch):
+    app = create_app()
+    captured = {}
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return await super().get(url, headers=headers)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(
+                200,
+                payload={"data": [{"id": "mimo-v2.5-pro"}, {"id": "mimo-v2.5"}]},
+                text='{"data":[{"id":"mimo-v2.5-pro"},{"id":"mimo-v2.5"}]}',
+            ),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={
+                "api_type": "anthropic",
+                "api_key": "mimo-key",
+                "api_base": "https://api.xiaomimimo.com/anthropic",
+            },
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["models"] == ["mimo-v2.5-pro", "mimo-v2.5"]
+    assert captured["url"] == "https://api.xiaomimimo.com/anthropic/v1/models"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert "x-api-key" not in captured["headers"]
+    assert "anthropic-version" not in captured["headers"]
+    assert captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_fetch_anthropic_mimo_models_falls_back_to_same_host_openai_models_endpoint(monkeypatch):
+    app = create_app()
+    captured = []
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def get(self, url, headers=None):
+            captured.append({"url": url, "headers": headers})
+            return await super().get(url, headers=headers)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(404, payload={"error": {"message": "not found"}}, text='{"error":{"message":"not found"}}'),
+            _FakeResponse(
+                200,
+                payload={"data": [{"id": "mimo-v2.5-pro"}, {"id": "mimo-v2-flash"}]},
+                text='{"data":[{"id":"mimo-v2.5-pro"},{"id":"mimo-v2-flash"}]}',
+            ),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={
+                "api_type": "anthropic",
+                "api_key": "mimo-key",
+                "api_base": "https://token-plan-cn.xiaomimimo.com/anthropic",
+            },
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert set(payload["models"]) == {"mimo-v2.5-pro", "mimo-v2-flash"}
+    assert captured[0]["url"] == "https://token-plan-cn.xiaomimimo.com/anthropic/v1/models"
+    assert captured[0]["headers"]["api-key"] == "mimo-key"
+    assert captured[1]["url"] == "https://token-plan-cn.xiaomimimo.com/v1/models"
+    assert captured[1]["headers"]["api-key"] == "mimo-key"
+    assert "Authorization" not in captured[1]["headers"]
+
+
+def test_fetch_openai_models_uses_mimo_api_key_header(monkeypatch):
+    app = create_app()
+    captured = {}
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return await super().get(url, headers=headers)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(
+                200,
+                payload={"data": [{"id": "mimo-v2.5-pro"}, {"id": "mimo-v2-flash"}]},
+                text='{"data":[{"id":"mimo-v2.5-pro"},{"id":"mimo-v2-flash"}]}',
+            ),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={
+                "api_type": "openai_chat",
+                "api_key": "mimo-key",
+                "api_base": "https://api.xiaomimimo.com/v1",
+            },
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert set(payload["models"]) == {"mimo-v2.5-pro", "mimo-v2-flash"}
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/models"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert "Authorization" not in captured["headers"]
+    assert captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_test_openai_connection_uses_mimo_api_key_header(monkeypatch):
+    app = create_app()
+    captured = {}
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return await super().post(url, headers=headers, json=json)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(200, payload={"choices": [{"message": {"content": "ok"}}]}, text='{"choices":[]}'),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/test-connection",
+            json={
+                "api_type": "openai_chat",
+                "api_key": "mimo-key",
+                "api_base": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.5-pro",
+            },
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert "Authorization" not in captured["headers"]
+    assert captured["json"]["model"] == "mimo-v2.5-pro"
+
+
+def test_test_anthropic_connection_uses_mimo_api_key_header(monkeypatch):
+    app = create_app()
+    captured = {}
+
+    class CapturingAsyncClient(_FakeAsyncClient):
+        async def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return await super().post(url, headers=headers, json=json)
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: CapturingAsyncClient([
+            _FakeResponse(200, payload={"content": [{"type": "text", "text": "ok"}]}, text='{"content":[]}'),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/test-connection",
+            json={
+                "api_type": "anthropic",
+                "api_key": "mimo-key",
+                "api_base": "https://api.xiaomimimo.com/anthropic",
+                "model": "mimo-v2.5-pro",
+            },
+        )
+
+    payload = response.json()
+    assert payload["success"] is True
+    assert captured["url"] == "https://api.xiaomimimo.com/anthropic/v1/messages"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert "x-api-key" not in captured["headers"]
+    assert "anthropic-version" not in captured["headers"]
+    assert captured["json"]["model"] == "mimo-v2.5-pro"
+
+
+def test_fetch_anthropic_models_rejects_empty_api_base(monkeypatch):
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={"api_type": "anthropic", "api_key": "sk-ant-test", "api_base": ""},
+        )
+
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["models"] == []
+    assert "缺少API Base URL" in payload["error"]
+
+
+def test_fetch_anthropic_models_does_not_fallback_to_builtin_models(monkeypatch):
+    app = create_app()
+
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: _FakeAsyncClient([
+            _FakeResponse(404, payload={"error": {"message": "not found"}}, text='{"error":{"message":"not found"}}'),
+        ]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models",
+            json={"api_type": "anthropic", "api_key": "sk-ant-test", "api_base": "https://proxy.example/anthropic/v1"},
+        )
+
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["models"] == []
+    assert "not found" in payload["error"]
+
+
 def test_set_active_api_config_rejects_unreachable_endpoint(monkeypatch):
     app = create_app()
     manager = _build_manager()

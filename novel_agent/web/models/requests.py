@@ -61,6 +61,7 @@ class FetchModelsRequest(BaseModel):
     api_base: str
     api_key: str
     config_id: str = ""
+    api_type: str = "openai_chat"
 
 
 class TestConnectionRequest(BaseModel):
@@ -68,6 +69,7 @@ class TestConnectionRequest(BaseModel):
     api_key: str = ""
     model: str = ""
     config_id: str = ""
+    api_type: str = "openai_chat"
 
 
 class GlobalAPIConfigRequest(BaseModel):
@@ -107,6 +109,7 @@ class AddAPIConfigRequest(BaseModel):
     models: List[str] = Field(default_factory=list)
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
+    api_type: str = "openai_chat"
 
 
 class UpdateAPIConfigRequest(BaseModel):
@@ -116,6 +119,7 @@ class UpdateAPIConfigRequest(BaseModel):
     models: Optional[List[str]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    api_type: Optional[str] = None
 
 
 class SetActiveConfigRequest(BaseModel):
@@ -140,6 +144,7 @@ class AgentConfigUpdateRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    creative_mode: str = "auto"
 
 
 class UserInputRequest(BaseModel):
@@ -150,11 +155,14 @@ class UserInputRequest(BaseModel):
 class ProjectCreateRequest(BaseModel):
     name: str
     description: str = ""
+    novel_type: str = ""
+    genre: str = ""
 
 
 class ProjectUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    novel_type: Optional[str] = None
 
 
 class ProjectStateBatchGetRequest(BaseModel):

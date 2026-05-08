@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
+from ...content_sanitizer import humanize_structured_value, strip_internal_author_markers
+from ...outline_utils import build_outline_overview_row, is_pending_text
 from ..models.requests import (
     ProjectCreateRequest,
     ProjectStateBatchGetRequest,
@@ -30,6 +32,7 @@ BACKUP_EXTRACT_MAX_COMPRESSION_RATIO = 200
 NOVEL_IMPORT_MAX_BYTES = 20 * 1024 * 1024
 BUILTIN_PROJECT_DATA_TYPES = {
     "outline",
+    "chapters",
     "worldbuilding",
     "characters",
     "items",
@@ -63,8 +66,8 @@ def _normalize_project_row(row: Any, title_key: str = "name") -> Dict[str, Any]:
         normalized["description"] = str(
             normalized.get("description") or normalized.get("content") or ""
         ).strip()
-    if "details" in normalized and isinstance(normalized.get("details"), str):
-        normalized["details"] = str(normalized.get("details") or "").strip()
+    if "details" in normalized:
+        normalized["details"] = humanize_structured_value(normalized.get("details"))
     if not str(normalized.get("description") or "").strip():
         normalized["description"] = _summarize_project_value(
             normalized.get("details")
@@ -115,7 +118,7 @@ def _summarize_project_value(value: Any) -> str:
         tail = f"等{len(value)}项" if len(value) > 3 else ""
         if parts:
             return "、".join(parts) + tail
-        return json.dumps(value, ensure_ascii=False)
+        return humanize_structured_value(value)
     if isinstance(value, dict):
         str_parts: List[str] = []
         list_parts: List[str] = []
@@ -137,8 +140,23 @@ def _summarize_project_value(value: Any) -> str:
         all_parts = str_parts + list_parts
         if all_parts:
             return "；".join(all_parts[:4])
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+        return humanize_structured_value(value)
+    return humanize_structured_value(value)
+
+
+def _looks_like_embedded_world_json(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith("{"):
+        return False
+    markers = (
+        '"world_name"',
+        '"world_type"',
+        '"core_concept"',
+        '"power_system"',
+        '"geography"',
+        '"factions"',
+    )
+    return any(marker in text for marker in markers)
 
 
 def _coerce_text_list(value: Any) -> List[str]:
@@ -151,7 +169,7 @@ def _coerce_text_list(value: Any) -> List[str]:
 
 
 def _coerce_optional_text(value: Any) -> str:
-    return str(value or "").strip()
+    return humanize_structured_value(value)
 
 
 def _maybe_parse_structured_text(value: Any) -> Any:
@@ -168,7 +186,12 @@ def _maybe_parse_structured_text(value: Any) -> Any:
     return text
 
 
-def _normalize_outline_rows(payload: Any) -> List[Dict[str, Any]]:
+def _normalize_outline_rows(payload: Any, *, collapse_overview: bool = True) -> List[Dict[str, Any]]:
+    if collapse_overview:
+        overview = build_outline_overview_row(payload)
+        if overview:
+            return [overview]
+
     source = payload.get("chapters") if isinstance(payload, dict) and isinstance(payload.get("chapters"), list) else payload
     if not isinstance(source, list):
         return []
@@ -179,12 +202,28 @@ def _normalize_outline_rows(payload: Any) -> List[Dict[str, Any]]:
         if not normalized:
             continue
         normalized["title"] = normalized.get("title") or f"第{index}章"
-        normalized["summary"] = str(
+        normalized["summary"] = strip_internal_author_markers(
             normalized.get("summary") or normalized.get("content") or ""
-        ).strip()
-        normalized["content"] = str(normalized.get("content") or "").strip()
+        )
+        normalized["content"] = strip_internal_author_markers(normalized.get("content"))
+        if "global_outline" in normalized:
+            normalized["global_outline"] = strip_internal_author_markers(normalized.get("global_outline"))
         rows.append(normalized)
+    if collapse_overview and rows and all(_is_placeholder_outline_row(row, index) for index, row in enumerate(rows, start=1)):
+        return []
     return rows
+
+
+def _is_placeholder_outline_row(row: Dict[str, Any], index: int) -> bool:
+    title = str(row.get("title") or "").strip()
+    expected_title = f"第{index}章"
+    return (
+        title in {"", expected_title}
+        and is_pending_text(row.get("summary"))
+        and not str(row.get("content") or "").strip()
+        and not str(row.get("global_outline") or "").strip()
+        and not str(row.get("volume_plan") or "").strip()
+    )
 
 
 def _normalize_worldbuilding_rows(payload: Any) -> List[Dict[str, Any]]:
@@ -196,6 +235,18 @@ def _normalize_worldbuilding_rows(payload: Any) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     world_payload = payload.get("world", payload)
     if isinstance(world_payload, dict):
+        raw_content = str(world_payload.get("raw_content") or "").strip()
+        if raw_content and not any(
+            str(world_payload.get(key) or "").strip()
+            for key in ("name", "world_name", "world_type", "theme", "requirements")
+        ):
+            rows.append({
+                "name": "世界观设定",
+                "description": raw_content[:240],
+                "details": raw_content,
+                "kind": "raw_content",
+            })
+
         world_name = str(world_payload.get("name") or world_payload.get("world_name") or "").strip()
         world_type = str(world_payload.get("world_type") or "").strip()
         if world_name or world_type:
@@ -212,6 +263,8 @@ def _normalize_worldbuilding_rows(payload: Any) -> List[Dict[str, Any]]:
             rows.append({"name": "主题基调", "description": theme, "kind": "theme"})
 
         requirements = _summarize_project_value(world_payload.get("requirements"))
+        if _looks_like_embedded_world_json(requirements):
+            requirements = ""
         if requirements:
             rows.append({"name": "创作要求", "description": requirements, "kind": "requirements"})
 
@@ -230,7 +283,7 @@ def _normalize_worldbuilding_rows(payload: Any) -> List[Dict[str, Any]]:
                 rows.append({
                     "name": label,
                     "description": summary,
-                    "details": summary if isinstance(world_payload.get(key), str) else json.dumps(world_payload.get(key), ensure_ascii=False),
+                    "details": humanize_structured_value(world_payload.get(key)),
                     "kind": key,
                 })
 
@@ -351,6 +404,8 @@ def _normalize_named_rows(payload: Any, title_key: str = "name") -> List[Dict[st
 def _normalize_builtin_project_data(data_type: str, payload: Any) -> Dict[str, Any]:
     if data_type == "outline":
         return {"data": _normalize_outline_rows(payload), "raw_data": payload}
+    if data_type == "chapters":
+        return {"data": _normalize_outline_rows(payload, collapse_overview=False), "raw_data": payload}
     if data_type == "worldbuilding":
         return {"data": _normalize_worldbuilding_rows(payload), "raw_data": payload}
     if data_type == "characters":
@@ -365,8 +420,26 @@ def _normalize_builtin_project_data(data_type: str, payload: Any) -> Dict[str, A
     return {"data": payload}
 
 
-def _denormalize_outline_rows(rows: Any, existing_payload: Any) -> Any:
-    normalized_rows = _normalize_outline_rows(rows)
+def _recover_outline_rows_from_context(pm: Any) -> List[Dict[str, Any]]:
+    try:
+        context_path = pm.get_current_project_dir() / "context.json"
+        if not context_path.exists():
+            return []
+        context_payload = json.loads(context_path.read_text(encoding="utf-8"))
+        outline_context = (
+            context_payload.get("contexts", {}).get("outline", {}).get("value")
+            if isinstance(context_payload, dict)
+            else None
+        )
+        overview = build_outline_overview_row(outline_context)
+        return [overview] if overview else []
+    except Exception as exc:
+        logger.debug(f"[Projects] Outline context recovery skipped: {exc}")
+        return []
+
+
+def _denormalize_outline_rows(rows: Any, existing_payload: Any, *, collapse_overview: bool = True) -> Any:
+    normalized_rows = _normalize_outline_rows(rows, collapse_overview=collapse_overview)
     if isinstance(existing_payload, dict) and "chapters" in existing_payload:
         updated = dict(existing_payload)
         updated["chapters"] = normalized_rows
@@ -582,6 +655,8 @@ def _denormalize_named_rows(rows: Any) -> Any:
 def _denormalize_builtin_project_data(data_type: str, rows: Any, existing_payload: Any) -> Any:
     if data_type == "outline":
         return _denormalize_outline_rows(rows, existing_payload)
+    if data_type == "chapters":
+        return _denormalize_outline_rows(rows, existing_payload, collapse_overview=False)
     if data_type == "worldbuilding":
         return _denormalize_worldbuilding_rows(rows, existing_payload)
     if data_type == "characters":
@@ -709,13 +784,15 @@ async def create_project(request: ProjectCreateRequest):
     from ...project_manager import get_project_manager
 
     pm = get_project_manager()
-    project = pm.create_project(request.name, request.description)
+    novel_type = (request.novel_type or request.genre or "").strip()
+    project = pm.create_project(request.name, request.description, novel_type=novel_type)
     return JSONResponse({
         "success": True,
         "project": {
             "id": project.id,
             "name": project.name,
             "description": project.description,
+            "novel_type": project.novel_type,
         },
     })
 
@@ -733,6 +810,7 @@ async def get_project(project_id: str):
         "id": project.id,
         "name": project.name,
         "description": project.description,
+        "novel_type": project.novel_type,
         "created_at": project.created_at,
         "word_count": project.word_count,
         "chapter_count": project.chapter_count,
@@ -797,6 +875,24 @@ async def get_project_data(data_type: str):
     if not pm.current_project_id:
         return JSONResponse({"data": [], "error": "请先选择或创建一个项目", "no_project": True})
 
+    if data_type in BUILTIN_PROJECT_DATA_TYPES:
+        try:
+            from ...project_data_recovery import has_project_payload, recover_project_data
+
+            data_path = pm.get_project_data_path(data_type)
+            if data_path.exists() and data_path.is_file():
+                try:
+                    payload = json.loads(data_path.read_text(encoding="utf-8"))
+                    return JSONResponse(_normalize_builtin_project_data(data_type, payload))
+                except Exception as exc:
+                    logger.warning(f"[Projects] Failed to read {data_type} project data file, trying recovery: {exc}")
+
+            recovered_payload = recover_project_data(data_type, pm, existing_payload=None)
+            if has_project_payload(recovered_payload):
+                return JSONResponse(_normalize_builtin_project_data(data_type, recovered_payload))
+        except ValueError as e:
+            return JSONResponse({"data": [], "error": str(e)})
+
     try:
         svc = get_library_service()
         if not svc.is_degraded:
@@ -804,7 +900,12 @@ async def get_project_data(data_type: str):
             # 修复：只在 legacy_view 非空时使用，避免库文件存在但视图为空时返回空数据
             if legacy_view:
                 if data_type in BUILTIN_PROJECT_DATA_TYPES:
-                    return JSONResponse(_normalize_builtin_project_data(data_type, legacy_view))
+                    normalized = _normalize_builtin_project_data(data_type, legacy_view)
+                    if data_type == "outline" and not normalized.get("data"):
+                        recovered_rows = _recover_outline_rows_from_context(pm)
+                        if recovered_rows:
+                            return JSONResponse({"data": recovered_rows, "raw_data": legacy_view})
+                    return JSONResponse(normalized)
                 return JSONResponse({"data": legacy_view})
     except Exception as e:
         logger.debug(f"[Projects] Library read fallback: {e}")
@@ -812,7 +913,12 @@ async def get_project_data(data_type: str):
     try:
         payload = pm.load_project_data(data_type)
         if data_type in BUILTIN_PROJECT_DATA_TYPES:
-            return JSONResponse(_normalize_builtin_project_data(data_type, payload))
+            normalized = _normalize_builtin_project_data(data_type, payload)
+            if data_type == "outline" and not normalized.get("data"):
+                recovered_rows = _recover_outline_rows_from_context(pm)
+                if recovered_rows:
+                    return JSONResponse({"data": recovered_rows, "raw_data": payload})
+            return JSONResponse(normalized)
         return JSONResponse({"data": payload})
     except ValueError as e:
         return JSONResponse({"data": [], "error": str(e)})
@@ -844,16 +950,18 @@ async def save_project_data(data_type: str, request: Request):
         except Exception as e:
             logger.debug(f"[Projects] Library sync on save: {e}")
 
-        if data_type == "outline":
+        if data_type == "chapters":
             try:
                 from ...novel_import_service import get_novel_import_service
 
                 import_service = get_novel_import_service(data_dir=pm.data_dir)
-                chapters = import_service.chapters_from_outline(_normalize_outline_rows(payload_to_save))
+                chapters = import_service.chapters_from_outline(
+                    _normalize_outline_rows(payload_to_save, collapse_overview=False)
+                )
                 import_service.refresh_collab_memory(
                     project_id=pm.current_project_id or "",
                     chapters=chapters,
-                    source_file="project_outline",
+                    source_file="project_chapters",
                 )
             except Exception as exc:
                 logger.warning(f"[Projects] Failed to refresh collaborative memory: {exc}")
@@ -1028,15 +1136,16 @@ async def import_novel_to_collab_mode(
     except ValueError as exc:
         return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
 
-    outline = [] if normalized_merge_mode == "replace" else pm.load_project_data("outline")
-    if not isinstance(outline, list):
-        outline = []
+    chapters = [] if normalized_merge_mode == "replace" else pm.load_project_data("chapters")
+    if not isinstance(chapters, list):
+        chapters = []
 
     imported_items = []
     for chapter in parsed["chapters"]:
         imported_items.append(
             {
-                "title": chapter.get("title") or f"第{chapter.get('chapter_number', len(outline) + 1)}章",
+                "title": chapter.get("title") or f"第{chapter.get('chapter_number', len(chapters) + len(imported_items) + 1)}章",
+                "chapter_number": chapter.get("chapter_number") or (len(chapters) + len(imported_items) + 1),
                 "summary": chapter.get("summary", ""),
                 "content": chapter.get("content", ""),
                 "word_count": chapter.get("word_count", 0),
@@ -1047,13 +1156,13 @@ async def import_novel_to_collab_mode(
             }
         )
 
-    outline.extend(imported_items)
-    pm.save_project_data("outline", outline)
+    chapters.extend(imported_items)
+    pm.save_project_data("chapters", chapters)
 
-    chapters = import_service.chapters_from_outline(outline)
+    memory_chapters = import_service.chapters_from_outline(chapters)
     memory = import_service.refresh_collab_memory(
         project_id=pm.current_project_id or "",
-        chapters=chapters,
+        chapters=memory_chapters,
         source_file=parsed["filename"],
     )
 
@@ -1065,7 +1174,7 @@ async def import_novel_to_collab_mode(
             "filename": parsed["filename"],
             "merge_mode": normalized_merge_mode,
             "imported_chapters": len(parsed["chapters"]),
-            "total_chapters": len(outline),
+            "total_chapters": len(chapters),
             "total_words": sum(ch.get("word_count", 0) for ch in parsed["chapters"]),
             "memory_summary": {
                 "chapter_cards": len(memory.get("chapter_cards", [])),
@@ -1169,6 +1278,7 @@ async def delete_project_state(state_key: str):
 @router.get("/chapter-summary-config")
 async def get_chapter_summary_config():
     from ...chapter_summary_service import get_auto_summary_config
+    from ...project_manager import get_project_manager
     pm = get_project_manager()
     try:
         _require_current_project(pm)

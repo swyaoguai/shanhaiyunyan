@@ -210,6 +210,7 @@ def _resolve_model_config(api_config_id: str, model: str) -> AgentModelConfig:
     max_tokens = 800
     resolved_model = (model or "").strip()
 
+    api_type = "openai_chat"
     if api_config_id:
         multi = manager.get_multi_config()
         for cfg in multi.configs:
@@ -218,6 +219,7 @@ def _resolve_model_config(api_config_id: str, model: str) -> AgentModelConfig:
                 api_key = cfg.api_key
                 temperature = cfg.temperature
                 max_tokens = cfg.max_tokens
+                api_type = getattr(cfg, 'api_type', 'openai_chat') or 'openai_chat'
                 if not resolved_model and cfg.models:
                     resolved_model = cfg.models[0]
                 break
@@ -230,15 +232,17 @@ def _resolve_model_config(api_config_id: str, model: str) -> AgentModelConfig:
             resolved_model = global_config.model
         temperature = global_config.temperature or temperature
         max_tokens = global_config.max_tokens or max_tokens
+        api_type = getattr(global_config, 'api_type', 'openai_chat') or api_type
 
     return AgentModelConfig(
         agent_name="ChapterSummary",
         api_config_id=api_config_id,
         api_base=api_base,
         api_key=api_key,
-        model_name=resolved_model,
+        model=resolved_model,
         temperature=temperature,
         max_tokens=max_tokens,
+        api_type=api_type,
     )
 
 

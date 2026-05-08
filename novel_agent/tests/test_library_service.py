@@ -410,7 +410,7 @@ class TestLibraryService:
         entries = svc.upsert_from_legacy("worldbuilding", data)
         assert len(entries) == 1
         assert isinstance(entries[0], KnowledgeNode)
-        assert entries[0].title == "世界设定"
+        assert entries[0].title == "世界观设定"
         assert entries[0].entry_type == "world"
 
     def test_chapter_summary_entries_roundtrip_as_knowledge_nodes(self, svc):

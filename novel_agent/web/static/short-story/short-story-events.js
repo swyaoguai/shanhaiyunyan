@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作事件层
+ * 山海·云烟 - 短篇创作事件层
  */
 
 let shortStoryLoadingHeartbeatTimer = null;
@@ -390,7 +390,7 @@ function bindShortStoryEvents() {
                 workflow,
                 api_config_id: getSelectedApiConfigIdForShortStory(),
                 model: document.getElementById('short-story-model')?.value || shortStoryState.selectedModel
-            }, '融合方案已生成');
+            }, '创意方案已生成');
             shortStoryState.fusionRawOutput = fusionResult?.data?.raw_output || '';
             saveShortStoryData();
             await renderShortStoryInterface();
@@ -403,7 +403,7 @@ function bindShortStoryEvents() {
                 await callShortStoryApi('/api/short-story/fusion-options/select', {
                     workflow: getCurrentShortStoryWorkflow(),
                     selection: parseInt(button.dataset.selection || '0', 10)
-                }, '已选定融合方案');
+                }, '已选定创意方案');
             });
         });
     });
@@ -431,7 +431,7 @@ function bindShortStoryEvents() {
         await withShortStoryLoading('generate-synopsis', async () => {
             let workflow = getCurrentShortStoryWorkflow();
             if (!workflow?.selected_fusion) {
-                showToast('请先生成并选择一个融合方案', 'error');
+                showToast('请先生成并选择一个创意方案', 'error');
                 return;
             }
 
@@ -453,7 +453,7 @@ function bindShortStoryEvents() {
                 await callShortStoryApi('/api/short-story/synopsis/select', {
                     workflow: getCurrentShortStoryWorkflow(),
                     selection: parseInt(button.dataset.selection || '0', 10)
-                }, '已选定导语');
+                }, '已选定导语方案');
             });
         });
     });

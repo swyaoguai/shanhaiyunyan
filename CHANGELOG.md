@@ -83,13 +83,13 @@
 
 #### 新增文档
 - `MIGRATION_GUIDE.md`：v1.0 → v1.1 迁移指南
-- `docs/MCP迁移到Skill完整方案.md`
-- `docs/Skill系统集成方案.md`
-- `docs/Agent与Skill集成方案.md`
-- `docs/备份与资料库功能说明.md`
-- `Skill系统扩展设计.md`
-- `智能Agent路由与创作流程规范.md`
-- `长篇小说创作流程与Agent调用规范.md`
+- `docs/implemented/skills/MCP迁移到Skill完整方案.md`
+- `docs/design/skills/Skill系统集成方案.md`
+- `docs/design/skills/Agent与Skill集成方案.md`
+- `docs/current/备份与资料库功能说明.md`
+- `docs/implemented/skills/Skill系统扩展设计.md`
+- `docs/archive/legacy/智能Agent路由与创作流程规范.md`
+- `docs/design/workflow/长篇小说创作流程与Agent调用规范.md`
 
 #### 更新文档
 - `README.md`：更新端口说明和项目结构

@@ -39,7 +39,9 @@ class CharacterBuilderAgent(BaseAgent):
             "4. 角色卡以“草稿”形式生成，不默认表示已保存。\n"
             "5. 优先吸收 recent_discussion、collected_info、world_summary 中已经明确给出的事实。\n"
             "6. 不要发明与现有讨论冲突的设定；不确定的内容宁可留空或写入 notes。\n"
-            "7. 输出中的 confidence 必须是 0~1 的数字。\n"
+            "7. 如果当前请求包含“那、这个、刚才、按上面”等上下文指代，必须以 discussion_context / recent_discussion 为准。\n"
+            "8. 不得擅自更换主角名、题材、核心能力、门派/世界背景；信息不足则 missing_info，不要随机补成无关设定。\n"
+            "9. 输出中的 confidence 必须是 0~1 的数字。\n"
             "\n"
             "输出格式必须为：\n"
             "{\n"
@@ -172,6 +174,7 @@ class CharacterBuilderAgent(BaseAgent):
             f"## 角色需求摘要\n{str(input_data.get('character_request') or '').strip() or '无'}\n\n"
             f"## 角色类型提示\n{str(input_data.get('character_role') or '').strip() or '未指定'}\n\n"
             f"## 已识别姓名提示\n{str(input_data.get('character_name') or '').strip() or '未识别'}\n\n"
+            f"## 完整讨论上下文基准\n{str(input_data.get('discussion_context') or '').strip() or '无'}\n\n"
             f"## 最近讨论摘要\n{str(input_data.get('recent_discussion') or '').strip() or '无'}\n\n"
             f"## 当前 collected_info\n"
             f"- novel_type: {str(input_data.get('novel_type') or '').strip() or '未指定'}\n"
@@ -184,7 +187,8 @@ class CharacterBuilderAgent(BaseAgent):
             "1. 只生成当前请求最相关的 1~2 个角色卡草稿。\n"
             "2. 若信息不足以生成可靠角色卡，返回 status='missing_info'，并明确列出缺什么。\n"
             "3. 关系字段使用对象映射，如 {\"角色A\": \"师徒\"}。\n"
-            "4. 不要输出任何 JSON 以外的内容。\n"
+            "4. 必须沿用完整讨论上下文基准中的已确认设定；缺失则 missing_info，不得随机换题。\n"
+            "5. 不要输出任何 JSON 以外的内容。\n"
         )
 
     async def _generate_once(self, input_data: Dict[str, Any], feedback: str = "") -> Tuple[Optional[Dict[str, Any]], str, List[str]]:

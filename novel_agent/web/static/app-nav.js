@@ -1,6 +1,6 @@
 
 /**
- * 文思Agent - 导航和视图渲染模块
+ * 山海·云烟 - 导航和视图渲染模块
  * 包含：导航面板渲染、仪表盘、统计页面、空状态显示
  */
 
@@ -148,7 +148,6 @@ function renderNavPanel(moduleId) {
                 { id: 'set-backup', icon: 'ri-save-line', text: '备份管理' },
                 { id: 'set-prompts', icon: 'ri-file-text-line', text: '提示词管理' },
                 { id: 'set-skills', icon: 'ri-puzzle-line', text: '技能管理' },
-                { id: 'set-writing', icon: 'ri-quill-pen-line', text: '写作配置' },
                 { id: 'set-regex', icon: 'ri-code-line', text: '正则替换规则' }
             ], (item) => {
                 if (item.id === 'set-theme') loadThemeSettings();
@@ -175,7 +174,6 @@ function renderNavPanel(moduleId) {
                     setTimeout(checkAndLoad, 50);
                 }
                 if (item.id === 'set-skills') loadSkillsSettings();
-                if (item.id === 'set-writing') loadWritingSettings();
                 if (item.id === 'set-regex') loadRegexRulesSettings();
             });
             break;
@@ -297,7 +295,9 @@ function renderDashboard() {
     updateBreadcrumbs([store.currentProjectName || '我的项目', '主页']);
 
     // 计算统计数据
-    const chapters = store.projectData.outline || [];
+    const chapters = (typeof getMultiAgentChapters === 'function')
+        ? getMultiAgentChapters()
+        : (store.projectData.chapters || []);
     const totalWords = chapters.reduce((sum, ch) => sum + (ch.content || '').replace(/\s/g, '').length, 0);
     const chapterCount = chapters.length;
     const writtenChapters = chapters.filter(ch => (ch.content || '').length > 0).length;
@@ -308,7 +308,7 @@ function renderDashboard() {
         <div style="padding: 40px; text-align: center;">
             <div style="font-size: 48px; margin-bottom: 20px;">✨</div>
             <h1 style="color: var(--text-primary); margin-bottom: 10px;">「${store.currentProjectName || '未命名项目'}」</h1>
-            <p style="color: var(--text-secondary);">文思如泉涌，创作无极限</p>
+            <p style="color: var(--text-secondary);">山海入云烟，创作无极限</p>
             
             <div style="display: flex; gap: 16px; justify-content: center; margin-top: 40px; flex-wrap: wrap;">
                 <div class="meta-card" style="width: 140px; height: 100px; align-items: center; justify-content: center;">
@@ -378,20 +378,22 @@ async function renderStatistics() {
     if (statisticsState.selectedProjectId && statisticsState.selectedProjectId !== activeProjectId) {
         try {
             // 从API获取指定项目的数据
-            const [outlineRes, charRes, worldRes, itemRes] = await Promise.all([
-                apiCall(`/api/project-data/outline?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
+            const [chaptersRes, charRes, worldRes, itemRes] = await Promise.all([
+                apiCall(`/api/project-data/chapters?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
                 apiCall(`/api/project-data/characters?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
                 apiCall(`/api/project-data/worldbuilding?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] })),
                 apiCall(`/api/project-data/items?project_id=${statisticsState.selectedProjectId}`).catch(() => ({ data: [] }))
             ]);
             projectData = {
-                outline: outlineRes.data || [],
+                chapters: chaptersRes.data || [],
+                outline: [],
                 characters: charRes.data || [],
                 worldbuilding: worldRes.data || [],
                 items: itemRes.data || [],
                 eventlines: [],
                 outline_settings: [],
-                detail_settings: []
+                detail_settings: [],
+                chapter_settings: []
             };
         } catch (e) {
             console.error('[Statistics] 加载项目数据失败:', e);
@@ -400,7 +402,7 @@ async function renderStatistics() {
     }
 
     // 获取多Agent模式的章节数据
-    const multiAgentChapters = projectData.outline || [];
+    const multiAgentChapters = projectData.chapters || [];
     const multiAgentWords = multiAgentChapters.reduce((sum, ch) => sum + (ch.content || '').replace(/\s/g, '').length, 0);
     const multiAgentWrittenChapters = multiAgentChapters.filter(ch => (ch.content || '').length > 0).length;
     
@@ -725,7 +727,7 @@ async function renderStatistics() {
                     </div>
                     <div style="background: rgba(6, 182, 212, 0.1); padding: 14px; border-radius: 8px; text-align: center;">
                         <div style="font-size: 22px; font-weight: bold; color: #06b6d4;">${worldCount}</div>
-                        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">世界设定</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">世界观设定</div>
                     </div>
                     <div style="background: rgba(249, 115, 22, 0.1); padding: 14px; border-radius: 8px; text-align: center;">
                         <div style="font-size: 22px; font-weight: bold; color: #f97316;">${itemCount}</div>
@@ -852,14 +854,14 @@ function showEmptyWorld() {
 
 // ===== 关于页面渲染 =====
 function renderAboutPage() {
-    updateBreadcrumbs(['关于', '关于作者']);
+    updateBreadcrumbs(['关于', '山海·云烟']);
     
     ui.workspace.innerHTML = `
         <div style="padding: 40px; max-width: 700px; margin: 0 auto;">
             <div style="text-align: center; margin-bottom: 40px;">
-                <img src="/static/logo.png" alt="文思Agent" style="width: 100px; height: 100px; border-radius: 20px; box-shadow: 0 8px 32px rgba(139, 92, 246, 0.3);">
-                <h1 style="color: var(--text-primary); margin-top: 20px; font-size: 28px;">文思Agent</h1>
-                <p style="color: var(--text-secondary); margin-top: 8px;">智能小说创作助手</p>
+                <img src="/static/logo.png" alt="山海·云烟" style="width: 100px; height: 100px; border-radius: 20px; box-shadow: 0 8px 32px rgba(139, 92, 246, 0.3);">
+                <h1 style="color: var(--text-primary); margin-top: 20px; font-size: 28px;">山海·云烟</h1>
+                <p style="color: var(--text-secondary); margin-top: 8px;">版本 1.0 · 智能小说创作工作台</p>
             </div>
             
             <!-- 作者信息卡片 -->
@@ -983,7 +985,7 @@ function renderFeedbackPage() {
 function renderVersionPage() {
     updateBreadcrumbs(['关于', '版本信息']);
     
-    const version = '1.0.0';
+    const version = '1.0';
     const buildDate = new Date().toLocaleDateString('zh-CN');
     
     ui.workspace.innerHTML = `

@@ -25,6 +25,7 @@ class Project:
     id: str
     name: str
     description: str = ""
+    novel_type: str = ""
     created_at: str = ""
     updated_at: str = ""
     word_count: int = 0
@@ -107,13 +108,14 @@ class ProjectManager:
             raise ValueError("Invalid project state key")
         return key
     
-    def create_project(self, name: str, description: str = "") -> Project:
+    def create_project(self, name: str, description: str = "", novel_type: str = "") -> Project:
         """Create a new project."""
         project_id = str(uuid.uuid4())[:8]
         project = Project(
             id=project_id,
             name=name,
-            description=description
+            description=description,
+            novel_type=str(novel_type or "").strip(),
         )
         self.projects[project_id] = project
         
@@ -126,6 +128,7 @@ class ProjectManager:
         # 使用原子写入初始化 JSON 文件
         for filename in [
             "outline.json",
+            "chapters.json",
             "characters.json",
             "worldbuilding.json",
             "items.json",
@@ -224,27 +227,46 @@ class ProjectManager:
             raise ValueError("No current project")
         
         proj_dir = self._get_project_dir(self.current_project_id)
+        normalized_data_type = str(data_type or "").strip()
         
-        if data_type == "outline":
+        if normalized_data_type == "outline":
             return proj_dir / "outline.json"
-        elif data_type == "characters":
+        elif normalized_data_type == "characters":
             return proj_dir / "characters.json"
-        elif data_type == "worldbuilding":
+        elif normalized_data_type == "worldbuilding":
             return proj_dir / "worldbuilding.json"
-        elif data_type == "items":
+        elif normalized_data_type == "items":
             return proj_dir / "items.json"
-        elif data_type == "eventlines":
+        elif normalized_data_type == "eventlines":
             return proj_dir / "eventlines.json"
-        elif data_type == "outline_settings":
+        elif normalized_data_type == "outline_settings":
             return proj_dir / "outline_settings.json"
-        elif data_type == "detail_settings":
+        elif normalized_data_type == "detail_settings":
             return proj_dir / "detail_settings.json"
-        elif data_type == "chapter_settings":
+        elif normalized_data_type == "chapter_settings":
             return proj_dir / "chapter_settings.json"
-        elif data_type == "chapters":
-            return proj_dir / "chapters"
+        elif normalized_data_type == "chapters":
+            return proj_dir / "chapters.json"
+        elif normalized_data_type == "chapter_summary":
+            return proj_dir / "chapter_summary.json"
+        elif re.fullmatch(r"custom_[A-Za-z0-9_-]{1,80}", normalized_data_type):
+            return proj_dir / f"{normalized_data_type}.json"
         else:
             raise ValueError(f"Unknown data type: {data_type}")
+
+    def get_chapters_dir(self) -> Path:
+        """Return current project's markdown chapter directory.
+
+        Note:
+            get_project_data_path("chapters") returns the structured chapters.json file.
+            Markdown chapter files must be stored under the sibling chapters/ directory.
+        """
+        if not self.current_project_id:
+            raise ValueError("No current project")
+        proj_dir = self._get_project_dir(self.current_project_id)
+        chapters_dir = proj_dir / "chapters"
+        chapters_dir.mkdir(parents=True, exist_ok=True)
+        return chapters_dir
 
     def get_library_path(self) -> Path:
         """返回当前项目的 library.json 路径"""
@@ -263,6 +285,8 @@ class ProjectManager:
     def load_project_data(self, data_type: str) -> List[Dict]:
         """Load current project data."""
         try:
+            if data_type == "chapters":
+                return self._load_chapters_data()
             path = self.get_project_data_path(data_type)
             if path.exists() and path.is_file():
                 return json.loads(path.read_text(encoding="utf-8"))
@@ -284,6 +308,83 @@ class ProjectManager:
         # 闁哄洤鐡ㄩ弻濠冦亜閸︻厽绐楀ǎ鍥跺枟閺佸ジ寮崼鏇燂紵
         if self.current_project_id:
             self.update_project(self.current_project_id)
+
+    def _load_chapters_data(self) -> List[Dict]:
+        """Load canonical chapter records, with legacy fallbacks."""
+        if not self.current_project_id:
+            return []
+
+        proj_dir = self._get_project_dir(self.current_project_id)
+        chapters_json = proj_dir / "chapters.json"
+        if chapters_json.exists() and chapters_json.is_file():
+            try:
+                payload = json.loads(chapters_json.read_text(encoding="utf-8"))
+                if isinstance(payload, list):
+                    return [row for row in payload if isinstance(row, dict)]
+            except Exception as exc:
+                logger.warning(f"Failed to load chapters.json: {exc}")
+
+        chapters_dir = proj_dir / "chapters"
+        chapter_rows: List[Dict] = []
+        if chapters_dir.exists() and chapters_dir.is_dir():
+            for index, file_path in enumerate(sorted(chapters_dir.glob("*.md")), start=1):
+                try:
+                    content = file_path.read_text(encoding="utf-8").strip()
+                except Exception as exc:
+                    logger.warning(f"Failed to load chapter file {file_path}: {exc}")
+                    continue
+                chapter_number = self._extract_chapter_number(file_path.stem, index)
+                title = self._clean_chapter_title(file_path.stem, chapter_number)
+                chapter_rows.append({
+                    "chapter_number": chapter_number,
+                    "title": title,
+                    "content": content,
+                    "summary": content[:200],
+                    "source_file": str(file_path),
+                })
+            if chapter_rows:
+                return sorted(chapter_rows, key=lambda row: int(row.get("chapter_number", 0) or 0))
+
+        # Legacy compatibility: old builds stored chapter text inside outline rows.
+        outline_path = proj_dir / "outline.json"
+        if outline_path.exists() and outline_path.is_file():
+            try:
+                outline_payload = json.loads(outline_path.read_text(encoding="utf-8"))
+            except Exception:
+                outline_payload = []
+            outline_rows = outline_payload.get("chapters") if isinstance(outline_payload, dict) else outline_payload
+            if isinstance(outline_rows, list):
+                for index, row in enumerate(outline_rows, start=1):
+                    if not isinstance(row, dict):
+                        continue
+                    content = str(row.get("content") or "").strip()
+                    if not content:
+                        continue
+                    chapter_rows.append({
+                        **row,
+                        "chapter_number": self._extract_chapter_number(row.get("chapter_number") or row.get("number"), index),
+                        "title": str(row.get("title") or row.get("name") or f"第{index}章").strip(),
+                        "content": content,
+                    })
+        return chapter_rows
+
+    @staticmethod
+    def _extract_chapter_number(value: Any, fallback: int) -> int:
+        text = str(value or "").strip()
+        digit_match = re.search(r"\d+", text)
+        if digit_match:
+            try:
+                number = int(digit_match.group(0))
+                return number if number > 0 else fallback
+            except ValueError:
+                return fallback
+        return fallback
+
+    @staticmethod
+    def _clean_chapter_title(stem: str, chapter_number: int) -> str:
+        title = re.sub(r"-?\d+字$", "", str(stem or "")).strip("-_ ")
+        title = re.sub(r"^\d+[-_ ]+", "", title).strip("-_ ")
+        return title or f"第{chapter_number}章"
 
 
     # ===== Project Frontend State =====

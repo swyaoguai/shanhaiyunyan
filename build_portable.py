@@ -18,9 +18,9 @@ from pathlib import Path
 from datetime import datetime
 
 # 项目配置
-APP_NAME = "文思Agent"
-DISPLAY_NAME = "文思Agent"
-APP_VERSION = "1.1.0"
+APP_NAME = "山海·云烟"
+DISPLAY_NAME = "山海·云烟"
+APP_VERSION = "1.0"
 ROOT_DIR = Path(__file__).parent
 BUILD_DIR = ROOT_DIR / "build"
 DIST_DIR = ROOT_DIR / "dist"
@@ -384,6 +384,7 @@ pause
 '''
     
     # 创建启动器
+    bat_content = "\r\n".join(bat_content.splitlines()) + "\r\n"
     launcher_cn = PORTABLE_DIR / f"启动{DISPLAY_NAME}.bat"
     launcher_cn.write_text(bat_content, encoding="utf-8")
     print(f"[OK] 创建 启动{DISPLAY_NAME}.bat")
@@ -569,7 +570,7 @@ def create_zip():
     """创建发布压缩包"""
     print("\n[打包] 创建发布压缩包...")
     
-    zip_name = f"{DISPLAY_NAME}_v{APP_VERSION}_.zip"
+    zip_name = f"{DISPLAY_NAME}_v{APP_VERSION}_Portable.zip"
     zip_path = DIST_DIR / zip_name
     
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -601,7 +602,7 @@ def print_summary():
     print("=" * 60)
     
     exe_path = PORTABLE_DIR / f"{DISPLAY_NAME}.exe"
-    zip_path = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_.zip"
+    zip_path = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable.zip"
     
     if exe_path.exists():
         print(f"\n单文件exe:")

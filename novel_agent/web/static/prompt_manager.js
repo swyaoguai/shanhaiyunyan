@@ -575,7 +575,7 @@ function getAgentDisplayName(agentType) {
         'polisher': '内容润色器',
         'evaluator': '质量评估器',
         'continuous_writer': '无限续写器',
-        'copilot': '文思创作助手'
+        'copilot': '山海·云烟创作助手'
     };
     return names[agentType] || agentType;
 }

@@ -135,7 +135,9 @@ describe('novel-to-script DOM regressions', () => {
 
     await window.renderNovelToScriptInterface();
 
-    expect(document.getElementById('novel-to-script-back-workbench')).not.toBeNull();
+    const backButton = document.getElementById('novel-to-script-back-workbench');
+    expect(backButton).not.toBeNull();
+    expect(backButton.classList.contains('app-back-button')).toBe(true);
     expect(document.querySelector('[data-scene-index="0"]')).not.toBeNull();
     expect(document.getElementById('novel-to-script-result-editor').value).toContain('【场景一：古桥 - 夜】');
     expect(document.body.textContent).toContain('批次摘要');

@@ -1,6 +1,6 @@
 """
 大纲规划Agent
-负责规划小说的整体结构和章节大纲
+负责规划小说的整体结构和分卷大纲
 实现Prompt Chaining模式
 """
 
@@ -58,6 +58,13 @@ class OutlinerAgent(BaseAgent):
         plot_idea = input_data.get("plot_idea", "")
         volume_count = input_data.get("volume_count", WRITING_CONFIG.DEFAULT_VOLUME_COUNT)
         chapters_per_volume = input_data.get("chapters_per_volume", WRITING_CONFIG.DEFAULT_CHAPTERS_PER_VOLUME)
+        discussion_context = str(
+            input_data.get("discussion_context")
+            or input_data.get("recent_discussion")
+            or ((context or {}).get("discussion_context") if isinstance(context, dict) else "")
+            or ((context or {}).get("recent_discussion") if isinstance(context, dict) else "")
+            or ""
+        ).strip()
         
         # Prompt Chaining: 先生成总纲，再细化
         
@@ -66,6 +73,51 @@ class OutlinerAgent(BaseAgent):
             await self.notify_progress("正在读取世界观与需求，规划总体目标与规模...", 20)
         except Exception:
             pass
+
+        outline_variables = {
+            "worldbuilding": world,
+            "world": world,
+            "user_input": {
+                "protagonist": protagonist,
+                "plot_idea": plot_idea,
+                "volume_count": volume_count,
+                "chapters_per_volume": chapters_per_volume,
+                "discussion_context": discussion_context,
+            },
+            "protagonist": protagonist,
+            "plot_idea": plot_idea,
+            "volume_count": volume_count,
+            "chapters_per_volume": chapters_per_volume,
+            "discussion_context": discussion_context,
+        }
+        custom_prompt = self._render_custom_task_prompt("create_outline", **outline_variables)
+        if custom_prompt:
+            response = await self.call_llm([{"role": "user", "content": custom_prompt}])
+            try:
+                import json
+                if "```json" in response:
+                    json_str = response.split("```json")[1].split("```")[0]
+                elif "```" in response:
+                    json_str = response.split("```")[1].split("```")[0]
+                else:
+                    json_str = response
+                outline_data = json.loads(json_str.strip())
+            except (json.JSONDecodeError, ValueError, IndexError):
+                outline_data = {"raw_content": response}
+
+            try:
+                await self.notify_progress("大纲规划完成", 100)
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "agent": self.name,
+                "outline": outline_data,
+                "total_outline": response,
+                "raw_response": response,
+                "prompt_source": "custom_task_prompt",
+            }
         total_prompt = f"""基于以下信息，规划小说的总体大纲：
 
 ## 世界观
@@ -77,17 +129,31 @@ class OutlinerAgent(BaseAgent):
 ## 剧情构思
 {plot_idea if plot_idea else "请自由发挥，创作一个精彩的故事"}
 
+## 聊天讨论上下文（最高优先级）
+{discussion_context if discussion_context else "无"}
+
 ## 要求
 - 分为 {volume_count} 卷
-- 每卷约 {chapters_per_volume} 章
+- 全书预计规模参考：每卷约 {chapters_per_volume} 章，仅用于判断体量，不输出章节清单
 - 设计清晰的主线冲突和角色成长线
+- “大纲”是整部小说的全局蓝图，不要把单章列表当成大纲正文
+- 默认全书大纲结构：
+  书名、作者、简介、故事梗概
+  一、【力量体系】
+  二、【世界地图】
+  三、【中心思想】
+  四、【矛盾冲突】
+  五、【前期剧情】
+  六、【叙事节奏】
+  七、【小说卖点】
+  八、【角色设定】
 
 ## 重要说明
-“剧情构思”字段中可能已经拼接了沟通助手与用户的完整讨论摘要。
+“聊天讨论上下文”和“剧情构思”字段中可能已经包含沟通助手与用户的完整讨论摘要。
 你必须优先遵守这些讨论中已经确定的剧情方向、风格要求、人物关系、爽点偏好、禁忌与特殊约束，
 不能因为世界观或默认套路而把这些既定要求覆盖掉。
 
-请先输出总纲（JSON格式），包含标题、主题、主要冲突、结局走向："""
+请先输出总纲（JSON格式），包含 title、global_outline、theme、main_conflict、ending_direction："""
 
         messages = [{"role": "user", "content": total_prompt}]
         total_response = await self.call_llm(messages)
@@ -104,7 +170,14 @@ class OutlinerAgent(BaseAgent):
 请为每卷输出：
 1. 卷标题
 2. 本卷核心事件
-3. 各章节的标题和简要内容（每章2-3句话描述）
+3. 本卷主线推进、核心冲突、角色成长、阶段高潮
+
+不要展开到单章标题或单章列表；章节目标应由“章纲设定/细纲设定”单独生成。
+
+输出完整的JSON格式大纲，必须包含：
+- title：小说标题
+- global_outline：按默认全书大纲结构写成的完整大纲正文
+- volumes：分卷规划，每卷只包含 volume_number、volume_title、volume_summary、core_conflict、protagonist_growth、volume_climax、key_events；不要包含 chapters
 
 输出完整的JSON格式大纲："""
 
@@ -128,7 +201,7 @@ class OutlinerAgent(BaseAgent):
             outline_data = {"raw_content": detail_response}
 
         try:
-            await self.notify_progress("正在补齐章节详情雏形...", 90)
+            await self.notify_progress("正在整理分卷总纲...", 90)
             await self.notify_progress("大纲规划完成", 100)
         except Exception:
             pass

@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作接口层
+ * 山海·云烟 - 短篇创作接口层
  */
 
 async function loadGlobalApiConfigForShortStory() {

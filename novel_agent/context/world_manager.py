@@ -208,6 +208,16 @@ class WorldManager:
         if not isinstance(raw, dict):
             return None
 
+        if set(raw.keys()) == {"raw_content"}:
+            raw_content = str(raw.get("raw_content") or "").strip()
+            if raw_content:
+                return WorldSetting(
+                    name="世界观设定",
+                    world_type="条目式设定",
+                    rules=[],
+                    magic_system=raw_content,
+                )
+
         if "name" not in raw and "world_name" not in raw and "world_type" not in raw:
             return None
 

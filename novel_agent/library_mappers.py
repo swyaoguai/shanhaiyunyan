@@ -13,6 +13,7 @@ from .library_types import (
     generate_entry_id,
     _now_iso,
 )
+from .outline_utils import build_global_outline_text, format_outline_volume_plan, get_outline_volumes
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def outline_to_entries(data: Any) -> List[LibraryEntry]:
+    global_outline = build_global_outline_text(data)
+    volume_plan = format_outline_volume_plan(data)
+    if global_outline or volume_plan:
+        now = _now_iso()
+        summary = _truncate(global_outline or volume_plan, 200)
+        content_structured = {
+            "global_outline": global_outline,
+            "volume_plan": volume_plan,
+        }
+        volumes = get_outline_volumes(data)
+        if volumes:
+            content_structured["volumes"] = volumes
+        return [KnowledgeNode.from_entry(LibraryEntry(
+            id=generate_entry_id("outline", 0),
+            entry_type=EntryType.OUTLINE.value,
+            title="主线大纲",
+            summary=summary or "主线大纲",
+            content_structured=content_structured,
+            source_type=SourceType.IMPORTED.value,
+            source_ref={"legacy_data_type": "outline"},
+            category_key="outline",
+            builtin=True,
+            created_at=now,
+            updated_at=now,
+        ))]
+
     chapters = _extract_chapters(data)
     if not chapters:
         return []
@@ -76,7 +103,7 @@ def worldbuilding_to_entries(data: Any) -> List[LibraryEntry]:
     return [KnowledgeNode.from_entry(LibraryEntry(
         id=generate_entry_id("world", 0),
         entry_type=EntryType.WORLD.value,
-        title="世界设定",
+        title="世界观设定",
         summary=" ".join(summary_parts).strip() or "世界观设定",
         content_structured=payload,
         source_type=SourceType.IMPORTED.value,

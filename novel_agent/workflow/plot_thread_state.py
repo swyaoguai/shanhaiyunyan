@@ -90,6 +90,7 @@ class PlotThreadStateMachine:
         outline_data: Optional[Dict[str, Any]],
         total_chapters: int = 0,
         reset: bool = False,
+        eventlines: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if reset:
             self.reset()
@@ -97,7 +98,9 @@ class PlotThreadStateMachine:
         if total_chapters and total_chapters > 0:
             self.state["total_chapters"] = int(total_chapters)
 
-        for index, raw_thread in enumerate(self._extract_outline_threads(outline_data), start=1):
+        thread_entries = self._extract_outline_threads(outline_data)
+        thread_entries.extend(self._extract_eventline_threads(eventlines))
+        for index, raw_thread in enumerate(thread_entries, start=1):
             thread = self._normalize_thread_entry(raw_thread, fallback_id=f"subplot_{index}")
             thread_id = thread.get("id")
             if not thread_id:
@@ -124,6 +127,11 @@ class PlotThreadStateMachine:
         elif directives["thread_id"]:
             target = directives["thread_id"]
             reason = "directive_thread_id"
+        elif current == self.MAIN_THREAD_ID:
+            scheduled_thread = self._scheduled_thread_for_chapter(chapter_number)
+            if scheduled_thread:
+                target = scheduled_thread
+                reason = "scheduled_thread_start"
         elif self._should_force_return_main(chapter_number, current):
             target = self.MAIN_THREAD_ID
             reason = "guard_forced_return_main"
@@ -286,6 +294,9 @@ class PlotThreadStateMachine:
         previous = self.state.get("active_thread_id", self.MAIN_THREAD_ID)
         self.state["active_thread_id"] = thread_id
         self.state["last_transition_reason"] = reason
+        active_thread = self.state["threads"].get(thread_id)
+        if isinstance(active_thread, dict) and str(active_thread.get("status") or "").lower() == "planned":
+            active_thread["status"] = "active"
 
         if previous != thread_id:
             self.state["transition_history"].append(
@@ -320,6 +331,17 @@ class PlotThreadStateMachine:
             return True
 
         return False
+
+    def _scheduled_thread_for_chapter(self, chapter_number: int) -> Optional[str]:
+        for thread_id, thread in self.state.get("threads", {}).items():
+            if thread_id == self.MAIN_THREAD_ID:
+                continue
+            if str(thread.get("status") or "active").lower() in {"completed", "done", "resolved"}:
+                continue
+            start_chapter = self._to_positive_int(thread.get("scheduled_start_chapter"))
+            if start_chapter and start_chapter == chapter_number:
+                return thread_id
+        return None
 
     def _threads_overview(self) -> List[Dict[str, Any]]:
         overview: List[Dict[str, Any]] = []
@@ -391,6 +413,42 @@ class PlotThreadStateMachine:
 
         return collected
 
+    def _extract_eventline_threads(
+        self,
+        eventlines: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(eventlines, list):
+            return []
+
+        collected: List[Dict[str, Any]] = []
+        for row in eventlines:
+            if not isinstance(row, dict):
+                continue
+            thread_id = (
+                row.get("thread_id")
+                or row.get("plot_thread_id")
+                or row.get("id")
+                or row.get("name")
+            )
+            if not thread_id:
+                continue
+            entry = {
+                "id": thread_id,
+                "thread_id": thread_id,
+                "title": row.get("thread_title") or row.get("name") or row.get("title") or thread_id,
+                "thread_type": row.get("thread_type") or row.get("type") or "subplot",
+                "status": row.get("status") or "active",
+                "objective": row.get("objective") or row.get("description") or row.get("conflict") or "",
+                "start_chapter": row.get("start_chapter"),
+                "target_return_chapter": row.get("target_return_chapter")
+                or row.get("return_by_chapter")
+                or row.get("return_by"),
+                "max_consecutive_chapters": row.get("max_consecutive_chapters")
+                or row.get("max_streak"),
+            }
+            collected.append(entry)
+        return collected
+
     def _normalize_thread_entry(self, entry: Any, fallback_id: str) -> Dict[str, Any]:
         if isinstance(entry, str):
             title = entry.strip() or fallback_id
@@ -401,6 +459,7 @@ class PlotThreadStateMachine:
                 "status": "active",
                 "objective": title,
                 "start_chapter": 1,
+                "scheduled_start_chapter": None,
                 "last_active_chapter": 0,
                 "target_return_chapter": None,
                 "max_consecutive_chapters": self.DEFAULT_MAX_SUBPLOT_STREAK,
@@ -418,6 +477,10 @@ class PlotThreadStateMachine:
         thread_type = str(data.get("thread_type") or data.get("type") or "subplot").lower()
         if thread_id == self.MAIN_THREAD_ID:
             thread_type = "main"
+        start_chapter = self._to_positive_int(data.get("start_chapter"))
+        scheduled_start = self._to_positive_int(data.get("scheduled_start_chapter"))
+        if scheduled_start is None and data.get("start_chapter") not in (None, ""):
+            scheduled_start = start_chapter
 
         return {
             "id": thread_id,
@@ -425,7 +488,8 @@ class PlotThreadStateMachine:
             "thread_type": thread_type,
             "status": str(data.get("status") or "active"),
             "objective": str(data.get("objective") or ""),
-            "start_chapter": self._to_positive_int(data.get("start_chapter")) or 1,
+            "start_chapter": start_chapter or 1,
+            "scheduled_start_chapter": scheduled_start,
             "last_active_chapter": self._to_positive_int(data.get("last_active_chapter")) or 0,
             "target_return_chapter": self._to_positive_int(data.get("return_by_chapter"))
             or self._to_positive_int(data.get("target_return_chapter")),
@@ -444,6 +508,7 @@ class PlotThreadStateMachine:
                 "status": "active",
                 "objective": "",
                 "start_chapter": 1,
+                "scheduled_start_chapter": None,
                 "last_active_chapter": 0,
                 "target_return_chapter": None,
                 "max_consecutive_chapters": self.DEFAULT_MAX_SUBPLOT_STREAK,
@@ -455,6 +520,7 @@ class PlotThreadStateMachine:
             "status": "active",
             "objective": "",
             "start_chapter": 1,
+            "scheduled_start_chapter": None,
             "last_active_chapter": 0,
             "target_return_chapter": None,
             "max_consecutive_chapters": self.DEFAULT_MAX_SUBPLOT_STREAK,
@@ -633,9 +699,10 @@ class PlotThreadStateMachine:
         outline_data: Optional[Dict[str, Any]],
         total_chapters: int,
         reset: bool,
+        eventlines: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Sync thread definitions from outline and persist (coordinator-compatible wrapper)."""
-        result = self.sync_with_outline(outline_data, total_chapters, reset)
+        result = self.sync_with_outline(outline_data, total_chapters, reset, eventlines=eventlines)
         self.save_plot_thread_state()
         return result
 
@@ -661,4 +728,3 @@ class PlotThreadStateMachine:
         )
         self.save_plot_thread_state()
         return result
-

@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
 from ..models.requests import ChatRequest, UserInputRequest
 from ..dependencies import get_coordinator, get_router_agent
+from ...agents.visible_text import strip_visible_technical_markers
+from ...workflow.user_interruptions import apply_interruption
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ INTENT_TARGET_AGENT_MAP = {
     "create_eventlines": "EventlineBuilder",
     "create_detail_outline": "DetailOutlineBuilder",
     "create_chapter_settings": "ChapterSettingBuilder",
+    "create_project_data": "ProjectDataBuilder",
     "continue_write": "ContinuousWriter",
     "polish_content": "Polisher",
     "search_web": "WebSearch",
@@ -89,15 +92,53 @@ _ROUTER_EXECUTION_INTENTS = {
     "create_eventlines",
     "create_detail_outline",
     "create_chapter_settings",
+    "create_project_data",
     "continue_write",
     "polish_content",
     "search_web",
     "search_trends",
 }
-_ROUTER_COMMAND_NAMES = {"create", "worldbuild", "outline", "chapter"}
+_ROUTER_COMMAND_NAMES = {"create", "worldbuild", "outline", "chapter", "character", "projectdata"}
 _WORKFLOW_CONTROL_COMMAND_NAMES = {"pause", "resume", "status", "cancel"}
 CHAT_AUTO_SAVE_STATE_KEY = "copilot_chat_auto_save"
+CHAT_CREATIVE_MODE_STATE_KEY = "copilot_creative_mode"
+CHAT_CREATIVE_MODES = {"auto", "discussion", "plan", "execute"}
+CHAT_PLAN_ROUTER_INTENTS = {"create_novel", "create_character"}
 KNOWLEDGE_CATEGORIES_STATE_KEY = "knowledge_categories"
+BUILTIN_KNOWLEDGE_CATEGORIES = [
+    {"id": "db-outline-main", "key": "outline", "name": "大纲", "builtin": True, "aliases": ["故事大纲", "章节大纲", "总纲"]},
+    {"id": "db-char", "key": "characters", "name": "角色档案", "builtin": True, "aliases": ["角色卡", "人设卡", "人物卡", "人物档案", "角色设定", "人物设定"]},
+    {"id": "db-world", "key": "worldbuilding", "name": "世界观设定", "builtin": True, "aliases": ["世界观", "世界设定", "世界设定集"]},
+    {"id": "db-item", "key": "items", "name": "道具物品", "builtin": True, "aliases": ["道具", "物品", "装备", "法宝", "线索物"]},
+    {"id": "db-event", "key": "eventlines", "name": "事件线", "builtin": True, "aliases": ["剧情线", "主线", "支线", "事件链"]},
+    {"id": "db-detail", "key": "detail_settings", "name": "细纲设定", "builtin": True, "aliases": ["细纲", "详细大纲", "分场细纲"]},
+    {"id": "db-chapter", "key": "chapter_settings", "name": "章纲设定", "builtin": True, "aliases": ["章纲", "章节设定", "章节规划"]},
+    {"id": "db-chsummary", "key": "chapter_summary", "name": "正文摘要", "builtin": True, "aliases": ["章节摘要", "正文总结", "剧情摘要"]},
+    {"id": "db-chapters", "key": "chapters", "name": "正文章节", "builtin": True, "aliases": ["正文", "章节正文", "章节"]},
+]
+PROJECT_DATA_ACTION_KEYWORDS = (
+    "生成", "创建", "新建", "建立", "写", "设计", "整理", "梳理", "补全", "完善",
+    "修改", "更新", "改写", "扩写", "追加", "添加", "加入", "保存", "同步", "写入",
+    "补出来", "补一下", "做出来",
+)
+AUTO_EXECUTION_CONFIDENCE_FLOOR = 0.72
+DISCUSSION_OR_PLANNING_MARKERS = (
+    "先讨论", "先聊", "聊聊", "讨论一下", "先看看", "看看", "评估", "分析",
+    "建议", "觉得", "怎么", "如何", "要不要", "是否", "能不能", "可不可以",
+    "可以吗", "行不行", "合适吗", "有必要吗", "方案", "计划", "步骤", "流程",
+    "路线", "下一步", "先别保存", "不要保存", "别落库", "不要落库", "别写入",
+)
+CONTINUE_WRITE_ACTION_MARKERS = (
+    "续写", "继续写", "接着写", "往下写", "下一章", "继续正文", "继续创作",
+    "写第", "创作第", "生成第",
+)
+POLISH_ACTION_MARKERS = (
+    "润色", "改写", "优化这段", "修改这段", "调整文风", "修一下", "重写这段",
+)
+PROJECT_DATA_OBJECT_MARKERS = (
+    "事件线", "剧情线", "故事线", "主线", "支线", "细纲", "详细大纲", "章纲",
+    "章节设定", "章节规划", "资料库", "世界观", "角色卡", "人设卡", "大纲",
+)
 _EXPLICIT_COMMAND_DEFINITIONS = {
     "create": {
         "display": "开始创作",
@@ -114,6 +155,14 @@ _EXPLICIT_COMMAND_DEFINITIONS = {
     "chapter": {
         "display": "续写章节",
         "aliases": ("chapter",),
+    },
+    "character": {
+        "display": "生成角色卡",
+        "aliases": ("character",),
+    },
+    "projectdata": {
+        "display": "生成资料库内容",
+        "aliases": ("projectdata", "data"),
     },
     "pause": {
         "display": "暂停创作",
@@ -165,6 +214,28 @@ _NATURAL_LANGUAGE_COMMAND_PATTERNS = {
         "建大纲",
         "做大纲",
         "设计大纲",
+    ),
+    "character": (
+        "生成角色卡",
+        "创建角色卡",
+        "设计角色卡",
+        "写角色卡",
+        "生成人设卡",
+        "创建人设卡",
+        "设计人设卡",
+        "写人设卡",
+        "生成角色档案",
+        "创建角色档案",
+        "设计角色档案",
+        "写角色档案",
+        "保存这个角色卡",
+        "把角色卡保存",
+        "确认保存角色卡",
+        "把这个角色卡保存到资料库",
+        "角色卡保存到资料库",
+        "创建角色",
+        "生成角色",
+        "设计角色",
     ),
     "pause": (
         "暂停创作",
@@ -221,26 +292,55 @@ async def _get_chat_session_lock(session_key: str) -> asyncio.Lock:
         return lock
 
 
+_USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
+    "Worldbuilder那边": "后续世界观设定流程这边",
+    "WorldBuilder那边": "后续世界观设定流程这边",
+    "WorldbuilderAgent": "世界观构建师",
+    "WorldBuilderAgent": "世界观构建师",
+    "Worldbuilder": "世界观构建师",
+    "WorldBuilder": "世界观构建师",
+    "OutlinerAgent": "大纲规划师",
+    "Outliner": "大纲规划师",
+    "ChapterWriter": "章节写作助手",
+    "Communicator": "沟通助手",
+    "Coordinator": "创作协调器",
+    "Router": "智能路由",
+    "CharacterBuilder": "角色构建师",
+    "EventlineBuilder": "事件线构建师",
+    "DetailOutlineBuilder": "细纲构建师",
+    "ChapterSettingBuilder": "章纲构建师",
+    "ContinuousWriter": "续写助手",
+    "Polisher": "润色助手",
+    "Evaluator": "质量评估师",
+    "SummaryOrchestrator": "摘要编排助手",
+    "ContextStrategy": "上下文策略助手",
+    "ContentReader": "内容读取助手",
+    "ContentExpansion": "内容扩展助手",
+    "FileNaming": "文件命名助手",
+    "WebSearch": "网络搜索助手",
+    "TrendsSearch": "热点搜索助手",
+}
+
+
+def _localize_user_visible_agent_names(text: Any) -> str:
+    """将用户可见文本中的内部 Agent 代号替换成自然中文显示。"""
+    value = str(text or "")
+    if not value:
+        return ""
+    for old, new in _USER_VISIBLE_AGENT_NAME_REPLACEMENTS.items():
+        value = value.replace(old, new)
+    value = value.replace("后续世界观设定流程这边能", "后续世界观设定会")
+    value = value.replace("世界观构建师那边", "后续世界观设定流程这边")
+    value = value.replace("大纲规划师那边", "后续大纲规划流程这边")
+    value = value.replace("候选 Agent", "候选创作助手")
+    value = value.replace("多Agent", "多助手")
+    value = value.replace("子Agent", "子助手")
+    return value
+
+
 def _strip_visible_technical_markers(text: Any) -> str:
     """移除技术标记，并从JSON格式中提取reply字段"""
-    if not isinstance(text, str):
-        return ""
-    text = text.replace("[INFO_COMPLETE]", "").strip()
-    
-    # 如果文本看起来像JSON，尝试提取reply字段
-    if text.startswith('{') and '"reply"' in text:
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', text)
-            if json_match:
-                data = json.loads(json_match.group())
-                if isinstance(data, dict) and "reply" in data:
-                    reply = str(data["reply"] or "").strip()
-                    if reply:
-                        return reply
-        except (ValueError, KeyError, TypeError):
-            pass
-    
-    return text
+    return strip_visible_technical_markers(text, _localize_user_visible_agent_names)
 
 
 def _sanitize_conversation_history(history):
@@ -335,6 +435,14 @@ def _merge_file_entries(existing: Any, incoming: Any, default_status: str = "cre
 def _workflow_public_snapshot(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return None
+    model_label = str(
+        payload.get("current_model")
+        or payload.get("model")
+        or payload.get("active_model")
+        or payload.get("model_used")
+        or payload.get("last_model")
+        or ""
+    ).strip()
     return {
         "run_id": str(payload.get("run_id") or "").strip(),
         "session_id": str(payload.get("session_id") or "").strip(),
@@ -349,11 +457,22 @@ def _workflow_public_snapshot(payload: Optional[Dict[str, Any]]) -> Optional[Dic
         "output_dir": str(payload.get("output_dir") or "").strip(),
         "focus_module": str(payload.get("focus_module") or "").strip(),
         "focus_chapter": _normalize_positive_int(payload.get("focus_chapter"), 0),
+        "model": model_label,
+        "current_model": model_label,
+        "active_model": model_label,
+        "model_used": model_label,
         "started_at": str(payload.get("started_at") or "").strip(),
         "updated_at": str(payload.get("updated_at") or "").strip(),
         "created_files": _merge_file_entries([], payload.get("created_files"), default_status="created"),
         "updated_files": _merge_file_entries([], payload.get("updated_files"), default_status="updated"),
         "reused_files": _merge_file_entries([], payload.get("reused_files"), default_status="reused"),
+        "creative_workflow": payload.get("creative_workflow") if isinstance(payload.get("creative_workflow"), dict) else None,
+        "workflow_plan": payload.get("workflow_plan") if isinstance(payload.get("workflow_plan"), dict) else {},
+        "task_queue": payload.get("task_queue") if isinstance(payload.get("task_queue"), list) else [],
+        "completed_tasks": payload.get("completed_tasks") if isinstance(payload.get("completed_tasks"), list) else [],
+        "reviews": payload.get("reviews") if isinstance(payload.get("reviews"), list) else [],
+        "handoff_notes": payload.get("handoff_notes") if isinstance(payload.get("handoff_notes"), list) else [],
+        "user_interruptions": payload.get("user_interruptions") if isinstance(payload.get("user_interruptions"), list) else [],
     }
 
 
@@ -415,7 +534,7 @@ def _apply_workflow_update(active_run: Optional[Dict[str, Any]], update: Any) ->
     content = str(update_payload.get("content") or update_payload.get("message") or "").strip()
     if content:
         active_run["last_progress"] = content
-    for field in ("status", "target_agent", "current_agent", "stage", "output_dir", "last_error", "command", "run_id", "focus_module"):
+    for field in ("status", "target_agent", "current_agent", "stage", "output_dir", "last_error", "command", "run_id", "focus_module", "model", "current_model", "active_model", "model_used", "last_model"):
         value = update_payload.get(field)
         if value not in (None, ""):
             active_run[field] = str(value).strip()
@@ -440,6 +559,14 @@ def _apply_workflow_update(active_run: Optional[Dict[str, Any]], update: Any) ->
             update_payload.get("reused_files"),
             default_status="reused",
         )
+    for field in ("creative_workflow", "workflow_plan"):
+        value = update_payload.get(field)
+        if isinstance(value, dict):
+            active_run[field] = value
+    for field in ("task_queue", "completed_tasks", "reviews", "handoff_notes", "user_interruptions"):
+        value = update_payload.get(field)
+        if isinstance(value, list):
+            active_run[field] = value
 
     _sync_workflow_snapshot(active_run)
     return content
@@ -453,6 +580,12 @@ def _apply_router_result_to_workflow(active_run: Optional[Dict[str, Any]], route
     if routed_to:
         active_run["target_agent"] = routed_to
         active_run["current_agent"] = routed_to
+        routed_model = _resolve_agent_effective_model(routed_to, _extract_model_label(router_result))
+        if routed_model:
+            active_run["model"] = routed_model
+            active_run["current_model"] = routed_model
+            active_run["active_model"] = routed_model
+            active_run["model_used"] = routed_model
     if delegated_result.get("run_id"):
         active_run["run_id"] = str(delegated_result.get("run_id")).strip()
     if delegated_result.get("output_dir"):
@@ -476,6 +609,20 @@ def _apply_router_result_to_workflow(active_run: Optional[Dict[str, Any]], route
         delegated_result.get("reused_files"),
         default_status="reused",
     )
+    delegated_params = delegated_result.get("params") if isinstance(delegated_result.get("params"), dict) else {}
+    creative_workflow = delegated_params.get("creative_workflow_run")
+    if isinstance(creative_workflow, dict):
+        active_run["creative_workflow"] = creative_workflow
+        workflow_plan = creative_workflow.get("workflow_plan")
+        if isinstance(workflow_plan, dict):
+            active_run["workflow_plan"] = workflow_plan
+        for field in ("task_queue", "completed_tasks", "reviews", "handoff_notes"):
+            value = creative_workflow.get(field)
+            if isinstance(value, list):
+                active_run[field] = value
+        interruptions = creative_workflow.get("user_interruptions")
+        if isinstance(interruptions, list):
+            active_run["user_interruptions"] = interruptions
 
     if isinstance(router_result, dict) and not router_result.get("success", True):
         active_run["status"] = "failed"
@@ -488,6 +635,83 @@ def _apply_router_result_to_workflow(active_run: Optional[Dict[str, Any]], route
 
     _sync_workflow_snapshot(active_run)
     return _workflow_public_snapshot(active_run)
+
+
+def _is_workflow_interruption_message(message: str) -> bool:
+    text = str(message or "").strip()
+    return bool(text) and any(token in text for token in ("不对", "不是", "改成", "修改", "调整", "重写"))
+
+
+def _copy_creative_workflow_to_active_run(active_run: Dict[str, Any], creative_workflow: Dict[str, Any]) -> None:
+    active_run["creative_workflow"] = creative_workflow
+    active_run["run_id"] = str(creative_workflow.get("run_id") or active_run.get("run_id") or "").strip()
+    active_run["status"] = str(creative_workflow.get("status") or active_run.get("status") or "paused").strip()
+    active_run["current_agent"] = str(creative_workflow.get("current_agent") or active_run.get("current_agent") or "Coordinator").strip()
+    active_run["stage"] = str(creative_workflow.get("current_stage") or active_run.get("stage") or "user_interruption").strip()
+    for field in ("task_queue", "completed_tasks", "reviews", "handoff_notes", "user_interruptions", "created_files", "updated_files", "reused_files"):
+        value = creative_workflow.get(field)
+        if isinstance(value, list):
+            active_run[field] = value
+    workflow_plan = creative_workflow.get("workflow_plan")
+    if isinstance(workflow_plan, dict):
+        active_run["workflow_plan"] = workflow_plan
+
+
+def _record_workflow_interruption(
+    *,
+    session_key: str,
+    session_id: str,
+    message: str,
+    coordinator: Any,
+) -> Optional[Dict[str, Any]]:
+    active_run = _get_workflow_record(session_key, session_id)
+    creative_workflow = active_run.get("creative_workflow") if isinstance(active_run, dict) else None
+    if not isinstance(active_run, dict) or not isinstance(creative_workflow, dict):
+        return None
+    workflow_status = str(creative_workflow.get("status") or active_run.get("status") or "").strip()
+    if workflow_status in {"failed", "cancelled"}:
+        return None
+    updated_workflow = apply_interruption(creative_workflow, message)
+    if not isinstance(updated_workflow, dict):
+        return None
+    if coordinator is not None:
+        try:
+            coordinator.pause()
+        except Exception:
+            pass
+    _copy_creative_workflow_to_active_run(active_run, updated_workflow)
+    _apply_workflow_update(active_run, {
+        "status": "paused",
+        "stage": "user_interruption",
+        "current_agent": "Coordinator",
+        "content": "已记录用户插入的修改意见，并重新规划受影响任务。",
+    })
+    workflow = _workflow_public_snapshot(active_run)
+    affected = []
+    interruptions = updated_workflow.get("user_interruptions") if isinstance(updated_workflow.get("user_interruptions"), list) else []
+    if interruptions:
+        affected = interruptions[-1].get("affected_categories", []) if isinstance(interruptions[-1], dict) else []
+    return {
+        "reply": "已记录这条修改意见，并会从受影响的创作阶段继续修订。",
+        "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+        "workflow": workflow,
+        "resume_workflow": True,
+        "affected_categories": affected,
+        "handled": True,
+    }
+
+
+def _router_result_terminal_workflow_update(router_result: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    delegated_result = (
+        router_result.get("delegated_result")
+        if isinstance(router_result, dict) and isinstance(router_result.get("delegated_result"), dict)
+        else {}
+    )
+    if delegated_result.get("error") or (isinstance(router_result, dict) and not router_result.get("success", True)):
+        return {"status": "failed", "stage": "failed"}
+    if "is_complete" in delegated_result and not bool(delegated_result.get("is_complete")):
+        return {"status": "needs_confirmation", "stage": "awaiting_confirmation"}
+    return {"status": "completed", "stage": "completed"}
 
 
 def _get_workflow_record(session_key: str, session_id: str) -> Optional[Dict[str, Any]]:
@@ -589,9 +813,88 @@ def _parse_explicit_command(message: str) -> Optional[Dict[str, Any]]:
             "display": str(definition.get("display") or command_name),
         }
         payload["message"] = raw_args
+        if command_name == "projectdata":
+            category = _extract_requested_knowledge_category(raw_args)
+            if category:
+                payload["category"] = category
         return payload
 
     return None
+
+
+def _normalize_category_match_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _category_aliases(category: Dict[str, Any]) -> List[str]:
+    aliases = []
+    for value in (
+        category.get("name"),
+        category.get("key"),
+        category.get("id"),
+        *(category.get("aliases") or [] if isinstance(category.get("aliases"), list) else []),
+    ):
+        text = str(value or "").strip()
+        if text and text not in aliases:
+            aliases.append(text)
+    return aliases
+
+
+def _get_all_project_knowledge_categories() -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {
+        str(item["key"]): dict(item) for item in BUILTIN_KNOWLEDGE_CATEGORIES
+    }
+    for item in _load_project_knowledge_categories():
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        merged[key] = {**merged.get(key, {}), **dict(item)}
+    return list(merged.values())
+
+
+def _message_has_project_data_action(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    return any(keyword in text for keyword in PROJECT_DATA_ACTION_KEYWORDS)
+
+
+def _extract_target_project_data_category(message: str) -> Optional[Dict[str, Any]]:
+    normalized_message = _normalize_category_match_text(message)
+    if not normalized_message:
+        return None
+
+    matched: Optional[Dict[str, Any]] = None
+    matched_len = -1
+    builtin_targets = _get_builtin_chat_auto_save_targets()
+    for category in _get_all_project_knowledge_categories():
+        candidates = [_normalize_category_match_text(alias) for alias in _category_aliases(category)]
+        candidates = [candidate for candidate in candidates if candidate]
+        if not candidates:
+            continue
+        if not any(candidate in normalized_message for candidate in candidates):
+            continue
+        score = max(len(candidate) for candidate in candidates if candidate in normalized_message)
+        if score <= matched_len:
+            continue
+        matched = dict(category)
+        key = str(matched.get("key") or "").strip()
+        matched["builtin"] = bool(matched.get("builtin")) or key in builtin_targets
+        matched_len = score
+    return matched
+
+
+def _project_data_target_agent_for_category(category: Optional[Dict[str, Any]]) -> str:
+    key = str((category or {}).get("key") or "").strip()
+    return {
+        "worldbuilding": "Worldbuilder",
+        "characters": "CharacterBuilder",
+        "outline": "Outliner",
+        "eventlines": "EventlineBuilder",
+        "detail_settings": "DetailOutlineBuilder",
+        "chapter_settings": "ChapterSettingBuilder",
+        "chapters": "ChapterWriter",
+    }.get(key, "ProjectDataBuilder")
 
 
 def _parse_targeted_natural_language_command(message: str) -> Optional[Dict[str, Any]]:
@@ -605,6 +908,31 @@ def _parse_targeted_natural_language_command(message: str) -> Optional[Dict[str,
         text,
     ).strip()
     candidate_text = normalized_text or text
+
+    if _is_revision_request(candidate_text):
+        if "世界观" in candidate_text or "世界设定" in candidate_text:
+            return {
+                "name": "worldbuild",
+                "raw_args": candidate_text,
+                "display": "修改世界观",
+                "message": candidate_text,
+            }
+        if any(token in candidate_text for token in ("角色", "人物", "主角", "人设")):
+            return {
+                "name": "character",
+                "raw_args": candidate_text,
+                "display": "修改角色卡",
+                "message": candidate_text,
+            }
+        category = _extract_target_project_data_category(candidate_text)
+        if category:
+            return {
+                "name": "projectdata",
+                "raw_args": candidate_text,
+                "display": f"修改{category.get('name') or '资料库内容'}",
+                "message": candidate_text,
+                "category": category,
+            }
 
     chapter_match = re.match(
         r"^(?:续写章节\s*|(?:写|生成|创作)第)([0-9一二三四五六七八九十百千万两零〇]+)(?:章)?(?:正文)?(?:\s+(.*))?$",
@@ -658,11 +986,34 @@ def _parse_targeted_natural_language_command(message: str) -> Optional[Dict[str,
         payload_message = raw_args
         if command_name == "worldbuild" and any(token in candidate_text for token in ("保存", "同步", "资料库")):
             payload_message = candidate_text
+        if command_name == "character" and _is_explicit_character_save_trigger(candidate_text):
+            payload_message = candidate_text
         return {
             "name": command_name,
             "raw_args": raw_args,
             "display": str(_EXPLICIT_COMMAND_DEFINITIONS.get(command_name, {}).get("display") or matched),
             "message": payload_message,
+        }
+
+    if _is_explicit_character_draft_trigger(candidate_text):
+        return {
+            "name": "character",
+            "raw_args": candidate_text,
+            "display": "创建角色卡",
+            "message": candidate_text,
+        }
+
+    if _is_discussion_or_planning_request(candidate_text):
+        return None
+
+    category = _extract_target_project_data_category(candidate_text)
+    if category and _message_has_project_data_action(candidate_text):
+        return {
+            "name": "projectdata",
+            "raw_args": candidate_text,
+            "display": f"生成{category.get('name') or '资料库内容'}",
+            "message": candidate_text,
+            "category": category,
         }
 
     return None
@@ -688,6 +1039,15 @@ def _routing_hint_from_explicit_command(command: Dict[str, Any], active_model: s
     elif command_name == "outline":
         intent_name = "create_novel"
         target_agent = "Outliner"
+        confidence = 1.0
+    elif command_name == "character":
+        intent_name = "create_character"
+        target_agent = "CharacterBuilder"
+        confidence = 1.0
+    elif command_name == "projectdata":
+        intent_name = "create_project_data"
+        category = command.get("category") if isinstance(command.get("category"), dict) else {}
+        target_agent = _project_data_target_agent_for_category(category)
         confidence = 1.0
     elif command_name == "create":
         intent_name = "create_novel"
@@ -716,6 +1076,15 @@ def _is_explicit_creation_trigger(message: str) -> bool:
     return any(pattern in text for pattern in _CREATE_START_PATTERNS)
 
 
+def _is_discussion_or_planning_request(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in DISCUSSION_OR_PLANNING_MARKERS):
+        return True
+    return "?" in text or "？" in text
+
+
 def _is_explicit_character_save_trigger(message: str) -> bool:
     text = str(message or "").strip().lower()
     if not text:
@@ -725,6 +1094,11 @@ def _is_explicit_character_save_trigger(message: str) -> bool:
         "保存这个角色卡", "把角色卡保存", "确认保存角色卡",
     )
     return any(pattern in text for pattern in patterns)
+
+
+def _is_revision_request(message: str) -> bool:
+    text = str(message or "").strip()
+    return bool(text) and any(token in text for token in ("修改", "改成", "调整", "修订", "重写", "不是", "不对"))
 
 
 def _is_explicit_character_draft_trigger(message: str) -> bool:
@@ -738,6 +1112,43 @@ def _is_explicit_character_draft_trigger(message: str) -> bool:
     if any(keyword in text for keyword in ("创建角色", "生成角色", "设计角色", "创建主角", "生成主角", "设计主角")):
         return True
     return any(token in text for token in profile_keywords) and any(token in text for token in action_keywords)
+
+
+def _is_project_data_generation_trigger(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    return (
+        any(action in text for action in PROJECT_DATA_ACTION_KEYWORDS)
+        and any(marker in text for marker in PROJECT_DATA_OBJECT_MARKERS)
+    )
+
+
+def _is_continue_write_trigger(message: str) -> bool:
+    text = str(message or "").strip()
+    return bool(text) and any(marker in text for marker in CONTINUE_WRITE_ACTION_MARKERS)
+
+
+def _is_polish_trigger(message: str) -> bool:
+    text = str(message or "").strip()
+    return bool(text) and any(marker in text for marker in POLISH_ACTION_MARKERS)
+
+
+def _auto_execution_trigger_for_intent(intent_name: str, message: str) -> bool:
+    intent = str(intent_name or "").strip()
+    if intent == "create_novel":
+        return _is_explicit_creation_trigger(message)
+    if intent == "create_character":
+        return _is_explicit_character_save_trigger(message) or _is_explicit_character_draft_trigger(message)
+    if intent in {"create_eventlines", "create_detail_outline", "create_chapter_settings", "create_project_data"}:
+        return _is_project_data_generation_trigger(message)
+    if intent == "continue_write":
+        return _is_continue_write_trigger(message)
+    if intent == "polish_content":
+        return _is_polish_trigger(message)
+    if intent in {"search_web", "search_trends"}:
+        return True
+    return False
 
 
 def _normalize_positive_int(value: Any, default: int) -> int:
@@ -758,6 +1169,14 @@ def _normalize_creation_requirements(
     if not novel_type and router_agent and hasattr(router_agent, "_extract_novel_type"):
         try:
             novel_type = str(router_agent._extract_novel_type(message) or "").strip()
+        except Exception:
+            novel_type = ""
+    if not novel_type:
+        try:
+            from ...project_manager import get_project_manager
+
+            current_project = get_project_manager().get_current_project()
+            novel_type = str(getattr(current_project, "novel_type", "") or "").strip()
         except Exception:
             novel_type = ""
 
@@ -794,6 +1213,16 @@ def _load_chat_auto_save_enabled() -> bool:
         return False
 
 
+def _normalize_chat_creative_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in CHAT_CREATIVE_MODES else "auto"
+
+
+def _load_chat_creative_mode(requested_mode: Any = None) -> str:
+    mode = _normalize_chat_creative_mode(requested_mode)
+    return mode if mode != "auto" else "auto"
+
+
 def _load_project_knowledge_categories() -> List[Dict[str, Any]]:
     from ...project_manager import get_project_manager
 
@@ -810,6 +1239,42 @@ def _load_project_knowledge_categories() -> List[Dict[str, Any]]:
         return []
 
 
+def _clear_default_empty_project_files_for_plan_mode(pm: Any) -> None:
+    """Plan mode may persist a contract draft, but it must not leave content files behind."""
+    project_id = str(getattr(pm, "current_project_id", "") or "").strip()
+    if not project_id:
+        return
+    try:
+        project_dir = pm._get_project_dir(project_id)
+    except Exception as exc:
+        logger.debug(f"[Chat] resolve project dir for plan cleanup failed: {exc}")
+        return
+
+    for filename in (
+        "outline.json",
+        "chapters.json",
+        "characters.json",
+        "worldbuilding.json",
+        "items.json",
+        "eventlines.json",
+        "outline_settings.json",
+        "detail_settings.json",
+        "chapter_settings.json",
+    ):
+        path = project_dir / filename
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if payload == []:
+            try:
+                path.unlink()
+            except Exception as exc:
+                logger.debug(f"[Chat] remove empty plan-mode placeholder failed for {path}: {exc}")
+
+
 def _extract_requested_knowledge_category(message: str) -> Optional[Dict[str, Any]]:
     text = str(message or "").strip().lower()
     if not text:
@@ -818,15 +1283,16 @@ def _extract_requested_knowledge_category(message: str) -> Optional[Dict[str, An
     matched: Optional[Dict[str, Any]] = None
     matched_len = -1
     builtin_targets = _get_builtin_chat_auto_save_targets()
-    for category in _load_project_knowledge_categories():
-        name = str(category.get("name") or "").strip()
+    for category in _get_all_project_knowledge_categories():
         key = str(category.get("key") or "").strip()
-        candidates = [candidate.lower() for candidate in (name, key) if candidate]
+        candidates = [_normalize_category_match_text(alias) for alias in _category_aliases(category)]
+        candidates = [candidate for candidate in candidates if candidate]
         if not candidates:
             continue
-        if not any(candidate in text for candidate in candidates):
+        normalized_text = _normalize_category_match_text(text)
+        if not any(candidate in normalized_text for candidate in candidates):
             continue
-        score = max(len(candidate) for candidate in candidates)
+        score = max(len(candidate) for candidate in candidates if candidate in normalized_text)
         if score <= matched_len:
             continue
         matched = dict(category)
@@ -840,15 +1306,18 @@ def _should_execute_via_router(
     message: str,
     agent: Any,
     explicit_command: Optional[Dict[str, Any]] = None,
+    confidence: float = 1.0,
 ) -> bool:
     intent = str(intent_name or "").strip()
     if intent not in _ROUTER_EXECUTION_INTENTS:
         return False
-    if intent == "create_character":
+    if explicit_command and explicit_command.get("name") in _ROUTER_COMMAND_NAMES:
         return True
-    if intent != "create_novel":
-        return True
-    return _is_explicit_creation_trigger(message)
+    if float(confidence or 0.0) < AUTO_EXECUTION_CONFIDENCE_FLOOR:
+        return False
+    if _is_discussion_or_planning_request(message):
+        return False
+    return _auto_execution_trigger_for_intent(intent, message)
 
 
 def _infer_communicator_response_mode(
@@ -865,6 +1334,7 @@ def _infer_communicator_response_mode(
         "create_eventlines",
         "create_detail_outline",
         "create_chapter_settings",
+        "create_project_data",
     }:
         return "confirmation"
 
@@ -885,13 +1355,16 @@ def _build_router_context(
     intent_name: str,
     router_agent: Any = None,
     explicit_command: Optional[Dict[str, Any]] = None,
+    creative_mode: str = "auto",
 ) -> Dict[str, Any]:
     collected_info = getattr(agent, "collected_info", {}) or {}
+    effective_mode = _normalize_chat_creative_mode(creative_mode)
     context: Dict[str, Any] = {
         "session_id": session_id,
         "collected_info": dict(collected_info),
         "chat_auto_save_enabled": _load_chat_auto_save_enabled(),
         "chat_auto_save_builtin_targets": sorted(_get_builtin_chat_auto_save_targets()),
+        "creative_mode": effective_mode,
     }
     history = getattr(agent, "conversation_history", None) or []
     if history:
@@ -902,10 +1375,12 @@ def _build_router_context(
 
     if intent_name == "create_novel":
         should_auto_execute = bool(
-            (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
+            effective_mode == "execute"
+            or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
             or _is_explicit_creation_trigger(message)
-            or context.get("chat_auto_save_enabled")
         )
+        if effective_mode == "plan":
+            should_auto_execute = False
         context["auto_execute"] = should_auto_execute
         context["requires_confirmation"] = not should_auto_execute
         context["creation_requirements"] = _normalize_creation_requirements(
@@ -918,10 +1393,14 @@ def _build_router_context(
         requested_category = _extract_requested_knowledge_category(message)
         requires_manual_category_selection = bool(requested_category and not requested_category.get("builtin"))
         should_auto_execute = bool(
-            (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
+            effective_mode == "execute"
+            or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
             or is_save_request
+            or _is_explicit_character_draft_trigger(message)
             or (context.get("chat_auto_save_enabled") and not requires_manual_category_selection)
         )
+        if effective_mode == "plan":
+            should_auto_execute = False
         context["auto_execute"] = should_auto_execute
         context["requires_confirmation"] = False
         context["requested_knowledge_category"] = requested_category
@@ -929,14 +1408,51 @@ def _build_router_context(
         if requires_manual_category_selection:
             context["character_request_mode"] = "manual_category"
         else:
-            context["character_request_mode"] = "save" if (is_save_request or context.get("chat_auto_save_enabled")) else "draft"
+            context["character_request_mode"] = "save" if (effective_mode == "execute" or is_save_request or context.get("chat_auto_save_enabled")) else "draft"
     elif intent_name in {"create_eventlines", "create_detail_outline", "create_chapter_settings"}:
-        context["auto_execute"] = True
+        context["auto_execute"] = effective_mode == "execute" or (
+            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
+        )
         context["requires_confirmation"] = False
+    elif intent_name == "create_project_data":
+        explicit_category = (
+            explicit_command.get("category")
+            if isinstance(explicit_command, dict) and isinstance(explicit_command.get("category"), dict)
+            else None
+        )
+        requested_category = explicit_category or _extract_target_project_data_category(message)
+        context["auto_execute"] = effective_mode == "execute" or (
+            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
+        )
+        context["requires_confirmation"] = False
+        context["requested_knowledge_category"] = requested_category
     elif intent_name == "continue_write":
-        context["auto_execute"] = True
+        context["auto_execute"] = effective_mode == "execute" or (
+            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
+        )
 
     return context
+
+
+async def _call_agent_chat(agent: Any, message: str, runtime_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call Communicator chat while preserving compatibility with older agent shims."""
+    try:
+        return await agent.chat(message, runtime_context=runtime_context)
+    except TypeError as exc:
+        if "runtime_context" not in str(exc):
+            raise
+        return await agent.chat(message)
+
+
+async def _iterate_agent_chat_stream(agent: Any, message: str, runtime_context: Optional[Dict[str, Any]] = None):
+    try:
+        stream = agent.chat_stream(message, runtime_context=runtime_context)
+    except TypeError as exc:
+        if "runtime_context" not in str(exc):
+            raise
+        stream = agent.chat_stream(message)
+    async for item in stream:
+        yield item
 
 
 def _extract_model_label(router_result: Optional[Dict[str, Any]]) -> str:
@@ -945,7 +1461,7 @@ def _extract_model_label(router_result: Optional[Dict[str, Any]]) -> str:
     delegated = router_result.get("delegated_result") if isinstance(router_result.get("delegated_result"), dict) else {}
     routing_info = router_result.get("routing_info") if isinstance(router_result.get("routing_info"), dict) else {}
     for bucket in (router_result, delegated, routing_info):
-        for key in ("model", "model_used", "active_model"):
+        for key in ("model", "current_model", "model_used", "active_model", "last_model"):
             value = str(bucket.get(key) or "").strip()
             if value:
                 return value
@@ -970,9 +1486,12 @@ def _apply_router_result_to_routing_hint(
     if routed_to:
         routing_hint["target_agent"] = routed_to
 
-    model_label = _extract_model_label(router_result)
+    model_label = _extract_model_label(router_result) or _resolve_agent_effective_model(routed_to, "")
     if model_label:
         routing_hint["model"] = model_label
+        routing_hint["current_model"] = model_label
+        routing_hint["active_model"] = model_label
+        routing_hint["model_used"] = model_label
     elif routed_to != "Communicator":
         routing_hint.pop("model", None)
 
@@ -1059,25 +1578,39 @@ def _format_workflow_status(coordinator: Any, active_run: Optional[Dict[str, Any
     updated_files = (workflow or {}).get("updated_files") or []
     reused_files = (workflow or {}).get("reused_files") or []
     last_error = str((workflow or {}).get("last_error") or "").strip()
+    status_labels = {
+        "idle": "空闲",
+        "running": "执行中",
+        "starting": "准备中",
+        "completed": "已完成",
+        "needs_confirmation": "待确认",
+        "failed": "执行失败",
+        "paused": "已暂停",
+        "cancelled": "已取消",
+        "writing": "写作中",
+        "worldbuilding": "世界观构建中",
+        "outlining": "大纲生成中",
+    }
+    status_label = status_labels.get(status, status or "空闲")
     lines = [
-        f"当前创作状态：`{status}`",
+        f"当前创作状态：{status_label}",
         f"已完成章节：{completed_chapters}/{total_chapters}" if total_chapters else f"当前章节进度：{current_chapter}",
     ]
     if run_id:
-        lines.append(f"运行ID：`{run_id}`")
+        lines.append(f"运行编号：{run_id}")
     if current_agent:
-        lines.append(f"当前执行Agent：`{current_agent}`")
+        lines.append(f"当前执行助手：{_localize_user_visible_agent_names(current_agent)}")
     if stage:
-        lines.append(f"当前阶段：`{stage}`")
+        lines.append(f"当前阶段：{_localize_user_visible_agent_names(stage)}")
     if last_progress:
-        lines.extend(["", "最近进度：", last_progress.strip()])
+        lines.extend(["", "最近进度：", _localize_user_visible_agent_names(last_progress.strip())])
     if created_files or updated_files or reused_files:
         lines.extend([
             "",
             f"内容同步情况：新增 {len(created_files)} 项，更新 {len(updated_files)} 项，复用 {len(reused_files)} 项",
         ])
     if last_error:
-        lines.extend(["", "最近错误：", last_error])
+        lines.extend(["", "最近错误：", _localize_user_visible_agent_names(last_error)])
     return "\n".join(lines)
 
 
@@ -1144,6 +1677,22 @@ def _handle_workflow_control(
                 "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
                 "handled": True,
             }
+        if isinstance(active_run, dict) and isinstance(active_run.get("creative_workflow"), dict):
+            workflow_status = str(active_run["creative_workflow"].get("status") or active_run.get("status") or "").strip()
+            if workflow_status == "paused":
+                coordinator.resume()
+                _apply_workflow_update(active_run, {
+                    "status": "running",
+                    "stage": "resuming",
+                    "content": "已恢复串行创作工作流。",
+                })
+                return {
+                    "reply": "已恢复串行创作工作流。",
+                    "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+                    "workflow": _workflow_public_snapshot(active_run),
+                    "resume_workflow": True,
+                    "handled": True,
+                }
         coordinator.resume()
         resumed_state = _get_coordinator_workflow_state(coordinator, "writing")
         if isinstance(active_run, dict):
@@ -1261,6 +1810,7 @@ async def _build_chat_routing_hint(
     targeted_command: Optional[Dict[str, Any]],
     router_agent: Any,
     active_model: str,
+    creative_mode: str = "auto",
 ) -> Optional[Dict[str, Any]]:
     routing_hint = None
     if targeted_command and targeted_command.get("name") in _ROUTER_COMMAND_NAMES:
@@ -1279,6 +1829,8 @@ async def _build_chat_routing_hint(
                 routing_hint["model"] = active_model
         except Exception as analyze_error:
             logger.debug(f"[Chat] intent analysis failed: {analyze_error}")
+    if routing_hint:
+        routing_hint["creative_mode"] = _normalize_chat_creative_mode(creative_mode)
     return routing_hint
 
 
@@ -1299,6 +1851,22 @@ def _prepare_chat_request(
             "targeted_command": None,
             "handled_control": None,
         }
+
+    if _is_workflow_interruption_message(processed_message):
+        interrupted = _record_workflow_interruption(
+            session_key=session_key,
+            session_id=session_id,
+            message=processed_message,
+            coordinator=coordinator,
+        )
+        if interrupted:
+            return {
+                "ok": True,
+                "security_reply": "",
+                "processed_message": processed_message,
+                "targeted_command": None,
+                "handled_control": interrupted,
+            }
 
     explicit_command = _parse_explicit_command(processed_message)
     targeted_command = explicit_command or _parse_targeted_natural_language_command(processed_message)
@@ -1331,6 +1899,11 @@ def _ensure_default_routing_hint(
         }
     if active_model and hint.get("target_agent") == "Communicator":
         hint.setdefault("model", active_model)
+    model_label = str(hint.get("model") or "").strip()
+    if model_label:
+        hint.setdefault("current_model", model_label)
+        hint.setdefault("active_model", model_label)
+        hint.setdefault("model_used", model_label)
     return hint
 
 
@@ -1340,7 +1913,15 @@ def _should_execute_router_request(
     targeted_command: Optional[Dict[str, Any]],
     processed_message: str,
     agent: Any,
+    creative_mode: str = "auto",
 ) -> bool:
+    mode = _normalize_chat_creative_mode(creative_mode)
+    if mode == "discussion":
+        return False
+    if mode == "plan":
+        return bool(router_agent and routing_hint and str(routing_hint.get("intent") or "").strip() in CHAT_PLAN_ROUTER_INTENTS)
+    if mode == "execute":
+        return bool(router_agent and routing_hint and str(routing_hint.get("intent") or "").strip() in _ROUTER_EXECUTION_INTENTS)
     return bool(
         router_agent
         and routing_hint
@@ -1351,6 +1932,7 @@ def _should_execute_router_request(
                 processed_message,
                 agent,
                 explicit_command=targeted_command,
+                confidence=float(routing_hint.get("confidence", 0.0) or 0.0),
             )
         )
     )
@@ -1364,6 +1946,9 @@ def _register_router_workflow_run(
     targeted_command: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     target_agent = str(routing_hint.get("target_agent") or "Coordinator").strip() or "Coordinator"
+    model_label = str(routing_hint.get("current_model") or routing_hint.get("model") or "").strip()
+    if not model_label:
+        model_label = _resolve_agent_effective_model(target_agent)
     return _register_active_workflow(session_key, {
         "status": "running",
         "session_id": session_id,
@@ -1373,6 +1958,10 @@ def _register_router_workflow_run(
         "target_agent": target_agent,
         "current_agent": target_agent,
         "stage": "starting",
+        "model": model_label,
+        "current_model": model_label,
+        "active_model": model_label,
+        "model_used": model_label,
     })
 
 
@@ -1385,6 +1974,7 @@ def _build_router_message_and_context(
     targeted_command: Optional[Dict[str, Any]],
     progress_callback: Any,
     run_id: str,
+    creative_mode: str = "auto",
 ) -> tuple[str, Dict[str, Any]]:
     router_message = str((targeted_command or {}).get("message") or processed_message).strip() or processed_message
     router_context = _build_router_context(
@@ -1394,6 +1984,7 @@ def _build_router_message_and_context(
         intent_name=routing_hint.get("intent", ""),
         router_agent=router_agent,
         explicit_command=targeted_command,
+        creative_mode=creative_mode,
     )
     router_context["progress_callback"] = progress_callback
     router_context["run_id"] = run_id
@@ -1408,6 +1999,95 @@ def _merge_router_delegated_info(agent: Any, router_result: Optional[Dict[str, A
         current_info.update(delegated_info)
         agent.collected_info = current_info
     return delegated_result
+
+
+def _process_chat_creative_decision(pm: Any, message: str, creative_mode: str) -> Optional[Dict[str, Any]]:
+    """Persist/apply chat-driven creative decisions without breaking chat flow."""
+    try:
+        if not pm or not getattr(pm, "current_project_id", ""):
+            return None
+        from ...chat_creative_decisions import process_chat_creative_decision
+
+        return process_chat_creative_decision(pm, message, mode=creative_mode)
+    except Exception as exc:
+        logger.warning(f"[Chat] 处理聊天创作决策失败: {exc}")
+        return None
+
+
+def _process_assistant_auto_save(
+    pm: Any,
+    assistant_text: str,
+    creative_mode: str,
+    session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Persist assistant-generated project artifacts from direct execution chat replies."""
+    try:
+        if not pm or not getattr(pm, "current_project_id", ""):
+            return None
+        from ...chat_auto_save import process_assistant_auto_save
+
+        return process_assistant_auto_save(
+            pm,
+            assistant_text,
+            mode=creative_mode,
+            auto_save_enabled=_load_chat_auto_save_enabled(),
+            categories=_get_all_project_knowledge_categories(),
+            session_id=session_id,
+        )
+    except Exception as exc:
+        logger.warning(f"[Chat] 自动同步助手回复失败: {exc}")
+        return None
+
+
+def _merge_creative_decision_result(result: Dict[str, Any], decision_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach creative decision data to a chat response payload."""
+    if not isinstance(decision_result, dict):
+        return result
+    updated_files = decision_result.get("updated_files") if isinstance(decision_result.get("updated_files"), list) else []
+    if updated_files:
+        result["updated_files"] = _merge_file_entries(
+            result.get("updated_files"),
+            updated_files,
+            default_status="updated",
+        )
+    result["creative_decision"] = decision_result.get("decision")
+    if decision_result.get("applied") and result.get("reply"):
+        result["reply"] = (
+            f"{str(result.get('reply') or '').rstrip()}\n\n"
+            "已根据这轮讨论更新创作决策，并同步到相关项目内容。"
+        )
+    return result
+
+
+def _merge_assistant_auto_save_result(
+    result: Dict[str, Any],
+    auto_save_result: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Attach assistant reply auto-save data to a chat response payload."""
+    if not isinstance(auto_save_result, dict):
+        return result
+
+    result["assistant_auto_save"] = auto_save_result
+    created_files = auto_save_result.get("created_files") if isinstance(auto_save_result.get("created_files"), list) else []
+    updated_files = auto_save_result.get("updated_files") if isinstance(auto_save_result.get("updated_files"), list) else []
+    if created_files:
+        result["created_files"] = _merge_file_entries(
+            result.get("created_files"),
+            created_files,
+            default_status="created",
+        )
+    if updated_files:
+        result["updated_files"] = _merge_file_entries(
+            result.get("updated_files"),
+            updated_files,
+            default_status="updated",
+        )
+    if auto_save_result.get("applied") and result.get("reply") and auto_save_result.get("summary"):
+        summary = str(auto_save_result.get("summary") or "").strip()
+        reply_text = str(result.get("reply") or "").rstrip()
+        if summary and summary not in reply_text:
+            result["reply"] = f"{reply_text}\n\n{summary}"
+    return result
 
 
 def _persist_chat_session(store: Any, session_id: str, project_id: str, agent: Any) -> None:
@@ -1440,6 +2120,82 @@ async def _persist_chat_session_if_active(
             agent = current_agent
         _persist_chat_session(store, session_id, project_id, agent)
         return True
+
+
+async def _resume_creative_workflow_response(
+    *,
+    session_key: str,
+    session_id: str,
+    project_id: str,
+    store: Any,
+    router_agent: Any,
+    coordinator: Any,
+    active_run: Optional[Dict[str, Any]],
+) -> JSONResponse:
+    if not router_agent or not hasattr(router_agent, "resume_creative_workflow_run"):
+        return JSONResponse({
+            "reply": "当前路由器不支持恢复串行创作工作流。",
+            "is_complete": False,
+            "workflow": _workflow_public_snapshot(active_run),
+        })
+    if not isinstance(active_run, dict) or not isinstance(active_run.get("creative_workflow"), dict):
+        return JSONResponse({
+            "reply": "没有找到可恢复的串行创作工作流快照。",
+            "is_complete": False,
+            "workflow": _workflow_public_snapshot(active_run),
+        })
+    if coordinator is not None:
+        try:
+            if _get_coordinator_workflow_state(coordinator, "idle") == "paused":
+                coordinator.resume()
+        except Exception:
+            pass
+
+    lock = await _get_chat_session_lock(session_key)
+    async with lock:
+        agent = await _ensure_chat_agent(session_key, session_id, project_id, store, router_agent)
+
+    async def capture_progress(update: Any):
+        _apply_workflow_update(active_run, update)
+
+    router_context = {
+        "progress_callback": capture_progress,
+        "run_id": str(active_run.get("run_id") or "").strip(),
+    }
+    delegated_result = await router_agent.resume_creative_workflow_run(
+        active_run["creative_workflow"],
+        context=router_context,
+    )
+    router_result = {
+        "success": not bool(delegated_result.get("error")),
+        "response": delegated_result.get("response") or "",
+        "routed_to": delegated_result.get("agent_name") or "Coordinator",
+        "delegated_result": delegated_result,
+    }
+    workflow_snapshot = _apply_router_result_to_workflow(active_run, router_result)
+    if isinstance(active_run, dict) and active_run.get("status") not in {"failed", "cancelled"}:
+        _apply_workflow_update(active_run, _router_result_terminal_workflow_update(router_result))
+        workflow_snapshot = _workflow_public_snapshot(active_run)
+
+    delegated_result = _merge_router_delegated_info(agent, router_result)
+    reply_text = _strip_visible_technical_markers(str(router_result.get("response") or "已恢复串行创作工作流。").strip())
+    _append_agent_history(agent, "user", "继续创作")
+    _append_agent_history(agent, "assistant", reply_text)
+    _persist_chat_session(store, session_id, project_id, agent)
+    return JSONResponse({
+        "reply": reply_text,
+        "is_complete": bool(delegated_result.get("is_complete", False)),
+        "collected_info": getattr(agent, "collected_info", {}) or {},
+        "routed": True,
+        "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+        "delegated_result": delegated_result,
+        "routed_to": router_result.get("routed_to"),
+        "workflow": workflow_snapshot,
+        "created_files": (workflow_snapshot or {}).get("created_files", []),
+        "updated_files": (workflow_snapshot or {}).get("updated_files", []),
+        "reused_files": (workflow_snapshot or {}).get("reused_files", []),
+        "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
+    })
 
 
 @router.post("/chat/start")
@@ -1697,6 +2453,10 @@ async def get_chat_workflow_status(session_id: str = "copilot"):
         "output_dir": "",
         "focus_module": "",
         "focus_chapter": 0,
+        "model": "",
+        "current_model": "",
+        "active_model": "",
+        "model_used": "",
         "started_at": "",
         "updated_at": "",
         "created_files": [],
@@ -1777,7 +2537,18 @@ async def chat(request: ChatRequest):
     processed_message = prepared["processed_message"]
     targeted_command = prepared["targeted_command"]
     handled_control = prepared["handled_control"]
+    creative_mode = _load_chat_creative_mode(getattr(request, "creative_mode", "auto"))
     if handled_control:
+        if handled_control.get("resume_workflow"):
+            return await _resume_creative_workflow_response(
+                session_key=session_key,
+                session_id=session_id,
+                project_id=project_id,
+                store=store,
+                router_agent=router_agent,
+                coordinator=coordinator,
+                active_run=_get_workflow_record(session_key, session_id),
+            )
         return JSONResponse({
             "reply": handled_control["reply"],
             "is_complete": False,
@@ -1790,11 +2561,13 @@ async def chat(request: ChatRequest):
         async with lock:
             agent = await _ensure_chat_agent(session_key, session_id, project_id, store, router_agent)
             active_model = _refresh_runtime_model_configs(agent, router_agent)
+            creative_mode = _load_chat_creative_mode(getattr(request, "creative_mode", "auto"))
             routing_hint = await _build_chat_routing_hint(
                 processed_message=processed_message,
                 targeted_command=targeted_command,
                 router_agent=router_agent,
                 active_model=active_model,
+                creative_mode=creative_mode,
             )
             communicator_response_mode = _infer_communicator_response_mode(
                 processed_message=processed_message,
@@ -1807,6 +2580,7 @@ async def chat(request: ChatRequest):
                 targeted_command=targeted_command,
                 processed_message=processed_message,
                 agent=agent,
+                creative_mode=creative_mode,
             )
 
             active_run = None
@@ -1833,9 +2607,11 @@ async def chat(request: ChatRequest):
                     targeted_command=targeted_command,
                     progress_callback=capture_progress,
                     run_id=active_run["run_id"],
+                    creative_mode=creative_mode,
                 )
             else:
-                result = await agent.chat(
+                result = await _call_agent_chat(
+                    agent,
                     processed_message,
                     runtime_context={"response_mode": communicator_response_mode},
                 )
@@ -1861,6 +2637,16 @@ async def chat(request: ChatRequest):
                 if routing_hint:
                     result["routing"] = routing_hint
 
+                decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
+                _merge_creative_decision_result(result, decision_result)
+                auto_save_result = _process_assistant_auto_save(
+                    pm,
+                    str(result.get("reply") or ""),
+                    creative_mode,
+                    session_id,
+                )
+                _merge_assistant_auto_save_result(result, auto_save_result)
+
                 _persist_chat_session(store, session_id, project_id, agent)
                 return JSONResponse(result)
 
@@ -1869,6 +2655,8 @@ async def chat(request: ChatRequest):
             router_result = await router_agent.route_and_respond(router_message, context=router_context)
         finally:
             _clear_active_workflow(session_key)
+        if creative_mode == "plan":
+            _clear_default_empty_project_files_for_plan_mode(pm)
 
         async with lock:
             active_agent = chat_sessions.get(session_key) or agent
@@ -1881,7 +2669,7 @@ async def chat(request: ChatRequest):
             delegated_result = _merge_router_delegated_info(active_agent, router_result or {})
             workflow_snapshot = _apply_router_result_to_workflow(active_run, router_result or {})
             if isinstance(active_run, dict) and active_run.get("status") not in {"failed", "cancelled"}:
-                _apply_workflow_update(active_run, {"status": "completed", "stage": "completed"})
+                _apply_workflow_update(active_run, _router_result_terminal_workflow_update(router_result or {}))
                 workflow_snapshot = _workflow_public_snapshot(active_run)
 
             routing_hint = _apply_router_result_to_routing_hint(routing_hint, router_result or {})
@@ -1901,6 +2689,17 @@ async def chat(request: ChatRequest):
             }
             if routing_hint:
                 result["routing"] = routing_hint
+            decision_result = None
+            if str(delegated_result.get("action") or "") != "manual_category_selection_required":
+                decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
+                _merge_creative_decision_result(result, decision_result)
+            auto_save_result = _process_assistant_auto_save(
+                pm,
+                str(result.get("reply") or ""),
+                creative_mode,
+                session_id,
+            )
+            _merge_assistant_auto_save_result(result, auto_save_result)
             if session_key in chat_sessions:
                 _persist_chat_session(store, session_id, project_id, active_agent)
             return JSONResponse(result)
@@ -1951,6 +2750,21 @@ async def chat_stream(request: ChatRequest):
     handled_control = prepared["handled_control"]
     if handled_control:
         async def control_gen():
+            if handled_control.get("resume_workflow"):
+                response = await _resume_creative_workflow_response(
+                    session_key=session_key,
+                    session_id=session_id,
+                    project_id=project_id,
+                    store=store,
+                    router_agent=router_agent,
+                    coordinator=coordinator,
+                    active_run=_get_workflow_record(session_key, session_id),
+                )
+                payload = json.loads(response.body.decode("utf-8"))
+                if payload.get("workflow"):
+                    yield f"data: {json.dumps({'type': 'workflow', 'workflow': payload['workflow']}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done', **payload}, ensure_ascii=False)}\n\n"
+                return
             reply = handled_control["reply"]
             yield f"data: {json.dumps({'type': 'chunk', 'content': reply}, ensure_ascii=False)}\n\n"
             if handled_control.get("workflow"):
@@ -1962,11 +2776,13 @@ async def chat_stream(request: ChatRequest):
     async with lock:
         agent = await _ensure_chat_agent(session_key, session_id, project_id, store, router_agent)
         active_model = _refresh_runtime_model_configs(agent, router_agent)
+        creative_mode = _load_chat_creative_mode(getattr(request, "creative_mode", "auto"))
         routing_hint = await _build_chat_routing_hint(
             processed_message=processed_message,
             targeted_command=targeted_command,
             router_agent=router_agent,
             active_model=active_model,
+            creative_mode=creative_mode,
         )
         communicator_response_mode = _infer_communicator_response_mode(
             processed_message=processed_message,
@@ -1982,6 +2798,7 @@ async def chat_stream(request: ChatRequest):
         targeted_command=targeted_command,
         processed_message=processed_message,
         agent=agent,
+        creative_mode=creative_mode,
     )
 
     if execute_via_router:
@@ -1997,10 +2814,8 @@ async def chat_stream(request: ChatRequest):
             )
 
             async def push_progress_chunk(update: Any):
-                chunk_text = _apply_workflow_update(active_run, update)
+                _apply_workflow_update(active_run, update)
                 workflow_snapshot = _workflow_public_snapshot(active_run)
-                if chunk_text:
-                    await queue.put({"type": "chunk", "content": chunk_text})
                 if workflow_snapshot:
                     await queue.put({"type": "workflow", "workflow": workflow_snapshot})
 
@@ -2015,6 +2830,7 @@ async def chat_stream(request: ChatRequest):
                         targeted_command=targeted_command,
                         progress_callback=push_progress_chunk,
                         run_id=active_run["run_id"],
+                        creative_mode=creative_mode,
                     )
                     router_result = await router_agent.route_and_respond(router_message, context=router_context)
                     await queue.put({"type": "router_done", "router_result": router_result})
@@ -2029,7 +2845,7 @@ async def chat_stream(request: ChatRequest):
                     event_type = event.get("type")
 
                     if event_type == "chunk":
-                        chunk_text = str(event.get("content") or "")
+                        chunk_text = _localize_user_visible_agent_names(event.get("content") or "")
                         if chunk_text:
                             full_text += chunk_text
                             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk_text}, ensure_ascii=False)}\n\n"
@@ -2043,9 +2859,11 @@ async def chat_stream(request: ChatRequest):
 
                     if event_type == "router_done":
                         router_result = event.get("router_result") or {}
+                        if creative_mode == "plan":
+                            _clear_default_empty_project_files_for_plan_mode(pm)
                         workflow_snapshot = _apply_router_result_to_workflow(active_run, router_result)
                         if isinstance(active_run, dict) and active_run.get("status") not in {"failed", "cancelled"}:
-                            _apply_workflow_update(active_run, {"status": "completed", "stage": "completed"})
+                            _apply_workflow_update(active_run, _router_result_terminal_workflow_update(router_result))
                             workflow_snapshot = _workflow_public_snapshot(active_run)
                         routing = _apply_router_result_to_routing_hint(dict(routing_hint), router_result) or routing_hint
                         raw_reply_text = str(router_result.get("response") or "抱歉，我暂时无法理解您的需求。").strip()
@@ -2081,6 +2899,15 @@ async def chat_stream(request: ChatRequest):
                             "reused_files": (workflow_snapshot or {}).get("reused_files", []),
                             "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
                         }
+                        decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
+                        _merge_creative_decision_result(done_payload, decision_result)
+                        auto_save_result = _process_assistant_auto_save(
+                            pm,
+                            str(done_payload.get("reply") or full_text or reply_text or ""),
+                            creative_mode,
+                            session_id,
+                        )
+                        _merge_assistant_auto_save_result(done_payload, auto_save_result)
                         yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
                         await _persist_chat_session_if_active(
@@ -2129,7 +2956,8 @@ async def chat_stream(request: ChatRequest):
     # 流式生成器（锁已释放）
     async def generate():
         try:
-            async for sse_event in agent.chat_stream(
+            async for sse_event in _iterate_agent_chat_stream(
+                agent,
                 processed_message,
                 runtime_context={"response_mode": communicator_response_mode},
             ):
@@ -2142,6 +2970,15 @@ async def chat_stream(request: ChatRequest):
                         workflow = _workflow_public_snapshot(_get_workflow_record(session_key, session_id))
                         if workflow:
                             data["workflow"] = workflow
+                        decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
+                        _merge_creative_decision_result(data, decision_result)
+                        auto_save_result = _process_assistant_auto_save(
+                            pm,
+                            str(data.get("reply") or data.get("content") or ""),
+                            creative_mode,
+                            session_id,
+                        )
+                        _merge_assistant_auto_save_result(data, auto_save_result)
                         sse_event = f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
                     except Exception:
                         pass

@@ -19,6 +19,14 @@ def test_prompt_manager_lists_only_user_visible_agents():
     assert "SummaryOrchestrator" not in names
 
 
+def test_default_user_visible_system_prompts_do_not_include_product_name():
+    manager = get_prompt_manager()
+
+    for agent_name in ("communicator", "worldbuilder", "outliner", "chapter_writer", "polisher", "evaluator", "continuous_writer"):
+        prompt = manager.get_system_prompt_raw(agent_name)
+        assert "山海·云烟" not in prompt
+
+
 def test_prompt_manager_lists_advanced_agents_when_enabled():
     agents = get_prompt_manager().list_agents(include_advanced=True)
     names = {item["name"] for item in agents}

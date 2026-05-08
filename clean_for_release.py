@@ -213,7 +213,7 @@ def create_default_directories():
 
 def main():
     print("=" * 50)
-    print("NovelAgent - Clean Script")
+    print("山海·云烟 - Clean Script")
     print("=" * 50)
     print()
     

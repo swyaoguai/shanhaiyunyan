@@ -74,6 +74,27 @@ def test_project_state_crud(client_with_project: TestClient):
     assert get_after_delete.json()["data"] is None
 
 
+def test_create_project_api_accepts_custom_novel_type(client_with_project: TestClient):
+    response = client_with_project.post(
+        "/api/projects",
+        json={
+            "name": "自定义分类项目",
+            "description": "分类名称会进入项目元数据",
+            "novel_type": "修仙副本爽文",
+        },
+    )
+
+    assert response.status_code == 200
+    project = response.json()["project"]
+    assert project["name"] == "自定义分类项目"
+    assert project["novel_type"] == "修仙副本爽文"
+
+    list_response = client_with_project.get("/api/projects")
+    assert list_response.status_code == 200
+    projects = list_response.json()["projects"]
+    assert any(item["novel_type"] == "修仙副本爽文" for item in projects)
+
+
 def test_project_state_chat_auto_save_toggle_crud(client_with_project: TestClient):
     payload = {"enabled": True}
 
@@ -87,6 +108,24 @@ def test_project_state_chat_auto_save_toggle_crud(client_with_project: TestClien
     get_resp = client_with_project.get("/api/project-state/copilot_chat_auto_save")
     assert get_resp.status_code == 200
     assert get_resp.json()["data"] == payload
+
+
+def test_chapter_summary_config_roundtrip(client_with_project: TestClient):
+    initial_resp = client_with_project.get("/api/chapter-summary-config")
+    assert initial_resp.status_code == 200
+    assert initial_resp.json()["auto_summary_enabled"] is False
+
+    save_resp = client_with_project.post(
+        "/api/chapter-summary-config",
+        json={"auto_summary_enabled": True},
+    )
+    assert save_resp.status_code == 200
+    assert save_resp.json()["success"] is True
+    assert save_resp.json()["auto_summary_enabled"] is True
+
+    get_resp = client_with_project.get("/api/chapter-summary-config")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["auto_summary_enabled"] is True
 
 
 def test_project_state_batch_set_and_get(client_with_project: TestClient):

@@ -117,6 +117,9 @@ class BaseAgent(ABC):
         # 初始化OpenAI客户端
         self.client = self._create_client()
         
+        # LLMClient代理（用于非openai_chat类型的API路由）
+        self._llm_client = None
+        
         # 指标收集器
         self.metrics = get_metrics_collector()
         
@@ -137,7 +140,7 @@ class BaseAgent(ABC):
         return manager.get_effective_config(self.name)
     
     def _create_client(self) -> AsyncOpenAI:
-        """创建OpenAI客户端"""
+        """创建OpenAI客户端（仅用于openai_chat类型）"""
         # 优先使用Agent独立配置，否则使用全局配置
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
@@ -167,6 +170,22 @@ class BaseAgent(ABC):
             max_retries=0  # 禁用SDK内部重试，使用我们自己的重试逻辑
         )
     
+    def _get_or_create_llm_client(self):
+        """获取或创建LLMClient实例（用于非openai_chat类型的API路由）"""
+        if self._llm_client is None:
+            from .llm_client import LLMClient
+            self._llm_client = LLMClient(
+                model_config=self.model_config,
+                retry_config=None,  # BaseAgent自己处理重试
+                metrics_namespace=self.name
+            )
+        return self._llm_client
+    
+    @property
+    def _api_type(self) -> str:
+        """获取当前配置的API类型"""
+        return getattr(self.model_config, 'api_type', '') or 'openai_chat'
+    
     def _get_model_name(self) -> str:
         """获取当前使用的模型名称"""
         return self.model_config.model or config.llm.model
@@ -195,7 +214,8 @@ class BaseAgent(ABC):
         manager = get_config_manager()
         self.model_config = manager.update_config(self.name, **kwargs)
         self.client = self._create_client()
-        logger.info(f"[{self.name}] Config updated, model: {self._get_model_name()}")
+        self._llm_client = None  # 重置LLMClient以使用新配置
+        logger.info(f"[{self.name}] Config updated, model: {self._get_model_name()}, api_type: {self._api_type}")
 
     def refresh_model_config(self) -> bool:
         """
@@ -214,6 +234,8 @@ class BaseAgent(ABC):
             current.temperature != latest.temperature,
             current.max_tokens != latest.max_tokens,
             current.use_global != latest.use_global,
+            getattr(current, 'api_type', 'openai_chat') != getattr(latest, 'api_type', 'openai_chat'),
+            getattr(current, 'api_config_id', '') != getattr(latest, 'api_config_id', ''),
         ])
 
         if not changed:
@@ -221,9 +243,10 @@ class BaseAgent(ABC):
 
         self.model_config = latest
         self.client = self._create_client()
+        self._llm_client = None  # 重置LLMClient以使用新配置
         logger.info(
             f"[{self.name}] Effective config refreshed: model={self._get_model_name()}, "
-            f"use_global={self.model_config.use_global}"
+            f"use_global={self.model_config.use_global}, api_type={self._api_type}"
         )
         return True
     
@@ -438,6 +461,24 @@ class BaseAgent(ABC):
         else:
             logger.warning(f"Prompt file not found: {prompt_path}, using default")
             return self._get_default_prompt()
+
+    def _render_custom_task_prompt(self, task_name: str, **variables: Any) -> str:
+        """Render a PromptManager task prompt only when the user customized it."""
+        if not self.prompt_manager_key:
+            return ""
+        try:
+            from ..prompts.prompt_manager import get_prompt_manager
+
+            pm = get_prompt_manager()
+            if not pm.has_custom_prompt(self.prompt_manager_key, task_name):
+                return ""
+            return pm.render_prompt(self.prompt_manager_key, task_name, **variables).strip()
+        except Exception as e:
+            logger.warning(
+                f"[{self.name}] 加载自定义任务提示词失败: "
+                f"{self.prompt_manager_key}.{task_name}: {e}"
+            )
+            return ""
     
     @abstractmethod
     def _get_default_prompt(self) -> str:
@@ -594,6 +635,18 @@ class BaseAgent(ABC):
         stream: bool
     ) -> Union[str, AsyncGenerator[str, None]]:
         """内部LLM调用实现"""
+        # 对于非 openai_chat 类型，委托给 LLMClient 处理
+        if self._api_type != 'openai_chat':
+            llm_client = self._get_or_create_llm_client()
+            return await llm_client.call(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=self.system_prompt,
+                stream=stream,
+                enable_retry=False  # BaseAgent 自己处理重试
+            )
+        
         start_time = time.time()
         
         # 注入系统提示词
@@ -896,6 +949,35 @@ class BaseAgent(ABC):
             用户友好的错误消息，如果无法解析则返回None
         """
         error_lower = error_msg.lower()
+
+        # 检查是否是服务商拒绝/权限阻断。
+        # OpenAI SDK 的 PermissionDeniedError 在部分兼容接口中只暴露
+        # "Your request was blocked."，没有保留 HTTP 403 文本，因此需要显式识别。
+        if (
+            "403" in error_msg
+            or "forbidden" in error_lower
+            or "permissiondenied" in error_lower
+            or "permission denied" in error_lower
+            or "request was blocked" in error_lower
+            or "your request was blocked" in error_lower
+            or "model_not_allowed" in error_lower
+        ):
+            return (
+                f"🚫 模型服务拒绝了本次请求\n\n"
+                f"当前Agent：{self.name}\n"
+                f"模型：{model_name}\n"
+                f"API地址：{api_base}\n\n"
+                f"❌ 可能原因：\n"
+                f"  • 当前Agent绑定的API Key没有该模型的调用权限\n"
+                f"  • 当前Agent绑定的模型在该中转服务中不可用\n"
+                f"  • 请求内容触发了服务商的风控或内容过滤\n"
+                f"  • 中转服务临时拦截了该来源或该请求\n\n"
+                f"💡 解决方案：\n"
+                f"  1. 在模型设置中检查“{self.name}”的独立模型配置\n"
+                f"  2. 用该配置执行一次连接测试，确认模型可用\n"
+                f"  3. 只在需要时切换这个Agent的模型或API配置，不必强制所有Agent统一\n"
+                f"  4. 如果连接测试通过但聊天仍被拦截，尝试调整输入表述后重试"
+            )
         
         # 检查是否是模型不存在错误（Google API 404）
         if "404" in error_msg or "not found" in error_lower or "not_found" in error_lower:
@@ -1018,17 +1100,42 @@ class BaseAgent(ABC):
             chunk_count = 0
             async for chunk in response:
                 chunk_count += 1
-                if hasattr(chunk, 'choices') and chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-                elif isinstance(chunk, str):
+                if isinstance(chunk, str):
                     # 如果chunk是字符串，直接yield
                     yield chunk
+                    continue
+
+                if not hasattr(chunk, 'choices') or not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+                delta = getattr(choice, 'delta', None)
+                content = getattr(delta, 'content', None) if delta is not None else None
+                if content:
+                    yield content
+                    continue
+
+                # 部分 OpenAI 兼容中转会发送 delta=None 或仅含 finish_reason 的收尾 chunk。
+                # 这类 chunk 不应中断整个流式回复。
+                finish_reason = getattr(choice, 'finish_reason', None)
+                if finish_reason:
+                    logger.debug(f"[{self.name}] Stream choice finished: {finish_reason}")
+                    continue
             
             if chunk_count == 0:
                 logger.warning(f"[{self.name}] 流式响应没有产生任何chunk")
                 
         except Exception as e:
             logger.error(f"[{self.name}] 流式响应处理失败: {e}")
+            api_base = self.model_config.api_base or config.llm.api_base
+            model_name = str(params.get("model") or "unknown")
+            user_friendly_msg = self._parse_api_error(
+                f"{type(e).__name__}: {e}",
+                model_name,
+                api_base,
+            )
+            if user_friendly_msg:
+                raise Exception(user_friendly_msg) from e
             raise
     
     def inject_context(self, base_prompt: str, context: Dict[str, Any]) -> str:

@@ -28,28 +28,32 @@ CHAPTER_SPLIT_WORDS = 18_000
 INLINE_SPLIT_WORDS = 12_000
 
 SCRIPT_STYLE_OPTIONS = [
-    {"value": "scene_block_webnovel_script", "label": "网文场景台本"},
-    {"value": "dialogue_enhanced_script", "label": "对话强化版"},
-    {"value": "web_short_drama_script", "label": "网文短剧版"},
+    {"value": "scene_block_webnovel_script", "label": "网文分场景剧本"},
+    {"value": "dialogue_enhanced_script", "label": "对话增强版"},
+    {"value": "web_short_drama_script", "label": "短剧改编版"},
 ]
 
 CONVERT_MODE_OPTIONS = [
     {"value": "auto", "label": "自动识别（推荐）"},
-    {"value": "full_text", "label": "单次转换"},
-    {"value": "chapterwise", "label": "按章节转换"},
-    {"value": "batchwise", "label": "批量转换"},
+    {"value": "full_text", "label": "一次性转换"},
+    {"value": "chapterwise", "label": "逐章转换"},
+    {"value": "batchwise", "label": "分批转换"},
 ]
 
 DENSITY_OPTIONS = [
-    {"value": "low", "label": "低"},
-    {"value": "medium", "label": "中"},
-    {"value": "high", "label": "高"},
+    {"value": "low", "label": "简洁（少场景切换）"},
+    {"value": "medium", "label": "适中（推荐）"},
+    {"value": "high", "label": "详细（多场景切换）"},
 ]
 
-DIALOGUE_RATIO_OPTIONS = deepcopy(DENSITY_OPTIONS)
+DIALOGUE_RATIO_OPTIONS = [
+    {"value": "low", "label": "少对话（偏叙述）"},
+    {"value": "medium", "label": "适中（推荐）"},
+    {"value": "high", "label": "多对话（偏台词）"},
+]
 HUMAN_NAME_OPTIONS = [
     {"value": "keep_original", "label": "保留原名"},
-    {"value": "soft_correct", "label": "模糊修正"},
+    {"value": "soft_correct", "label": "智能修正"},
 ]
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", re.IGNORECASE)
@@ -283,12 +287,12 @@ class NovelToScriptService:
         source_block = "\n\n".join(chapter_blocks).strip() or source_text
 
         system_prompt = (
-            "你是专业的中文小说改编编辑，负责把小说正文重写为“场景块台本”。"
+            "你是专业的中文小说改编编辑，负责把小说正文重写为\u201c分场景剧本\u201d。"
             "请严格遵守指定格式，输出必须是 JSON 对象，不要附加解释。"
         )
 
         user_prompt = f"""
-请把下面的小说内容转换为“可读、可演、可继续修改”的网文场景台本。
+请把下面的小说内容转换为\u201c可读、可演、可继续修改\u201d的网文分场景剧本。
 
 转换要求：
 1. 目标风格：{self._label_for_option(SCRIPT_STYLE_OPTIONS, normalized_config['script_style'])}（{normalized_config['script_style']}）
@@ -296,7 +300,7 @@ class NovelToScriptService:
 3. 场景密度：{self._label_for_option(DENSITY_OPTIONS, normalized_config['scene_density'])}
 4. 对白占比：{self._label_for_option(DIALOGUE_RATIO_OPTIONS, normalized_config['dialogue_ratio'])}
 5. 人名策略：{self._label_for_option(HUMAN_NAME_OPTIONS, normalized_config['human_name_strategy'])}
-6. {"尽量保留原文人物语气和网文化表达。" if normalized_config['keep_voice_style'] else "可以在保留剧情的前提下适度调整表达。"}
+6. {"保留原文语气和网络小说风格。" if normalized_config['keep_voice_style'] else "可以在保留剧情的前提下适度调整表达。"}
 7. 如果这是长篇分批转换，请只处理当前这一批的内容，不要杜撰未提供章节的剧情。
 
 输出规范：

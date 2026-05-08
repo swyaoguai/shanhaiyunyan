@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 小说转剧本事件层
+ * 山海·云烟 - 小说转剧本事件层
  */
 
 async function withNovelToScriptLoading(actionName, task) {
@@ -121,7 +121,7 @@ function bindNovelToScriptEvents() {
         try {
             await withNovelToScriptLoading('converting', async () => {
                 await convertNovelToScript();
-                showToast('小说内容已转换为场景台本');
+                showToast('小说内容已转换为分场景剧本');
             });
         } catch (e) {
             showToast(e.message || '转换失败', 'error');

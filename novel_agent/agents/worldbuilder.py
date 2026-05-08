@@ -54,6 +54,13 @@ class WorldbuilderAgent(BaseAgent):
         novel_type = input_data.get("novel_type") or ""
         theme = input_data.get("theme", "")
         requirements = input_data.get("requirements", "")
+        discussion_context = str(
+            input_data.get("discussion_context")
+            or input_data.get("recent_discussion")
+            or ((context or {}).get("discussion_context") if isinstance(context, dict) else "")
+            or ((context or {}).get("recent_discussion") if isinstance(context, dict) else "")
+            or ""
+        ).strip()
 
         # 进度：读取需求/确认风格
         try:
@@ -63,7 +70,21 @@ class WorldbuilderAgent(BaseAgent):
 
         novel_type_section = f"## 小说类型\n{novel_type}" if novel_type else "## 小说类型\n请告诉我小说类型（玄幻、都市、科幻、言情、武侠等）"
 
-        prompt = f"""请为以下小说构建世界观：
+        prompt = self._render_custom_task_prompt(
+            "build_world",
+            user_input={
+                "novel_type": novel_type,
+                "theme": theme,
+                "requirements": requirements,
+                "discussion_context": discussion_context,
+            },
+            novel_type=novel_type,
+            theme=theme,
+            requirements=requirements,
+            discussion_context=discussion_context,
+        )
+        if not prompt:
+            prompt = f"""请为以下小说构建世界观：
 
 {novel_type_section}
 
@@ -72,6 +93,12 @@ class WorldbuilderAgent(BaseAgent):
 
 ## 特殊要求
 {requirements if requirements else "无特殊要求"}
+
+## 聊天讨论上下文（最高优先级）
+{discussion_context if discussion_context else "无"}
+
+请严格继承聊天讨论中用户已经确认或明显倾向的设定；不要用默认套路覆盖主角、题材、能力体系、世界背景、禁忌或风格要求。
+如果关键创作信息不足以可靠构建世界观，请输出 {{"status":"missing_info","missing_info":[...]}}，不要擅自补成无关设定。
 
 请输出完整的世界观设定（JSON格式）："""
 

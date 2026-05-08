@@ -25,8 +25,8 @@ class EvaluatorAgent(BaseAgent):
     def get_capabilities(self) -> AgentCapability:
         return AgentCapability(
             agent_name=self.name,
-            capabilities=["evaluate_chapter", "quality_review"],
-            accept_task_types=["evaluate_chapter"],
+            capabilities=["evaluate_chapter", "quality_review", "review_artifact"],
+            accept_task_types=["evaluate_chapter", "review_artifact"],
             required_inputs=["content", "chapter_outline"],
             produced_outputs=["evaluation"],
             priority=90,
@@ -34,6 +34,28 @@ class EvaluatorAgent(BaseAgent):
             metadata={
                 "stage": "evaluation",
             },
+        )
+
+    async def review_artifact(
+        self,
+        *,
+        task_id: str,
+        artifact_id: str,
+        artifact_type: str,
+        artifact: Any,
+        revision_target: str,
+        workflow_context: Any,
+    ):
+        """Review generic workflow artifacts without requiring an LLM call."""
+        from ..workflow.artifact_review import review_artifact_contextual
+
+        return review_artifact_contextual(
+            task_id=task_id,
+            artifact_id=artifact_id,
+            artifact_type=artifact_type,
+            artifact=artifact,
+            revision_target=revision_target,
+            workflow_context=workflow_context,
         )
     
     async def execute(
@@ -58,7 +80,16 @@ class EvaluatorAgent(BaseAgent):
         world = context.get("world", {}) if context else {}
         previous_summary = context.get("previous_summary", "") if context else ""
         
-        prompt = f"""请评估以下章节的质量：
+        prompt = self._render_custom_task_prompt(
+            "evaluate_chapter",
+            content=content,
+            chapter_outline=chapter_outline,
+            world=world,
+            characters=characters,
+            previous_summary=previous_summary,
+        )
+        if not prompt:
+            prompt = f"""请评估以下章节的质量：
 
 ## 章节内容
 {content}

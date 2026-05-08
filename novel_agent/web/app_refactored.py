@@ -177,9 +177,9 @@ def create_app() -> FastAPI:
     """创建FastAPI应用"""
     
     app = FastAPI(
-        title="小说创作智能体",
+        title="山海·云烟",
         description="基于多智能体协作的智能小说创作系统",
-        version="1.2.0",  # 版本升级，表示重构后的版本
+        version="1.0",
         lifespan=lifespan
     )
     

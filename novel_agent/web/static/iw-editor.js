@@ -51,8 +51,9 @@ function showInfiniteWriteChapterEditor(chapter) {
 
     workspace.innerHTML = `
         <div class="editor-container" style="display: flex; flex-direction: column; height: 100%; padding: 24px; position: relative;">
-            <button id="iw-open-panel-fab" class="icon-btn" style="position: absolute; right: 24px; bottom: 24px; width: 52px; height: 52px; border-radius: 999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 16px 32px rgba(0,0,0,0.35); background: rgba(139, 92, 246, 0.18) !important; border: 1px solid rgba(139, 92, 246, 0.35) !important; color: #c4b5fd;" title="返回创作面板">
-                <i class="ri-layout-right-2-line" style="font-size: 20px;"></i>
+            <button id="iw-open-panel-fab" class="app-back-button app-back-button--floating" title="返回创作面板">
+                <i class="ri-layout-right-2-line"></i>
+                <span>返回创作面板</span>
             </button>
             <div class="editor-header" style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap;">
                 <span style="color: var(--text-secondary); font-size: 14px;">第${chapter.chapter_number}章</span>
@@ -61,8 +62,9 @@ function showInfiniteWriteChapterEditor(chapter) {
                     <span id="iw-edit-word-count">${(chapter.word_count || 0).toLocaleString()} 字</span>
                     <span id="iw-edit-save-status" style="color: #10b981; display: none;">已保存</span>
                 </div>
-                <button id="close-iw-editor" style="padding: 8px 14px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #c4b5fd; border-radius: 8px; cursor: pointer;">
-                    <i class="ri-layout-right-2-line"></i> 创作面板
+                <button id="close-iw-editor" class="app-back-button">
+                    <i class="ri-layout-right-2-line"></i>
+                    <span>返回创作面板</span>
                 </button>
             </div>
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">

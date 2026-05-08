@@ -1,9 +1,50 @@
-﻿/**
- * 文思Agent - 项目管理模块
+/**
+ * 山海·云烟 - 项目管理模块
  * 包含：项目加载、切换、创建、导出
  */
 
 // ===== 项目管理功能 =====
+
+const PROJECT_GENRE_PRESETS = [
+    '玄幻奇幻',
+    '武侠仙侠',
+    '科幻未来',
+    '都市现代',
+    '历史军事',
+    '言情青春',
+    '悬疑推理',
+    '惊悚恐怖',
+    '游戏竞技',
+    '其他类型'
+];
+
+function getProjectGenreValue() {
+    const customInput = document.getElementById('new-project-genre');
+    const presetSelect = document.getElementById('new-project-genre-preset');
+    const customValue = customInput?.value.trim() || '';
+    const presetValue = presetSelect?.value || '';
+
+    return customValue || (presetValue && presetValue !== '__custom__' ? presetValue : '');
+}
+
+function bindProjectGenreControls() {
+    const customInput = document.getElementById('new-project-genre');
+    const presetSelect = document.getElementById('new-project-genre-preset');
+    if (!customInput || !presetSelect) return;
+
+    presetSelect.addEventListener('change', () => {
+        if (presetSelect.value === '__custom__') {
+            customInput.focus();
+            return;
+        }
+        customInput.value = '';
+    });
+
+    customInput.addEventListener('input', () => {
+        const value = customInput.value.trim();
+        presetSelect.value = value ? '__custom__' : '';
+    });
+}
 
 function getActiveProjectId() {
     return store.currentProjectId || null;
@@ -14,6 +55,29 @@ function setActiveProjectId(projectId) {
     store.currentProjectId = normalizedProjectId;
     // 兼容旧代码读取，但主状态字段统一为 currentProjectId
     store.currentProject = normalizedProjectId;
+}
+
+function isCustomProjectDataKey(key) {
+    if (typeof isServerBackedCustomKnowledgeKey === 'function') {
+        return isServerBackedCustomKnowledgeKey(key);
+    }
+    return /^custom_[A-Za-z0-9_-]{1,80}$/.test(String(key || '').trim());
+}
+
+async function loadCustomProjectDataFromServer() {
+    const categories = Array.isArray(store.knowledgeCategories) ? store.knowledgeCategories : [];
+    const customCategories = categories.filter(cat => cat && !cat.builtin && isCustomProjectDataKey(cat.key));
+    for (const cat of customCategories) {
+        try {
+            const response = await apiCall(`/api/project-data/${cat.key}`);
+            store.projectData[cat.key] = Array.isArray(response.data) ? response.data : [];
+        } catch (e) {
+            if (!Array.isArray(store.projectData[cat.key])) {
+                store.projectData[cat.key] = [];
+            }
+            console.warn(`Failed to load custom project data ${cat.key}:`, e);
+        }
+    }
 }
 
 async function loadProjects() {
@@ -217,6 +281,7 @@ async function loadCurrentProjectData() {
         if (!activeProjectId) {
             store.projectData = {
                 outline: [],
+                chapters: [],
                 worldbuilding: [],
                 characters: [],
                 items: [],
@@ -235,6 +300,10 @@ async function loadCurrentProjectData() {
         // 加载大纲
         const outlineData = await apiCall('/api/project-data/outline');
         store.projectData.outline = outlineData.data || [];
+
+        // 加载独立章节正文。大纲删除不应影响这里。
+        const chaptersData = await apiCall('/api/project-data/chapters');
+        store.projectData.chapters = Array.isArray(chaptersData.data) ? chaptersData.data : [];
         
         // 加载世界观
         const worldData = await apiCall('/api/project-data/worldbuilding');
@@ -279,7 +348,9 @@ async function loadCurrentProjectData() {
             store.projectData.outline_settings = [];
         }
 
-        // 加载扩展资料库（localStorage，仅自定义分类）
+        await loadCustomProjectDataFromServer();
+
+        // 加载扩展资料库（localStorage 备份，仅在项目文件没有数据时使用）
         if (typeof loadExtendedKnowledgeData === 'function') {
             loadExtendedKnowledgeData();
         }
@@ -289,12 +360,15 @@ async function loadCurrentProjectData() {
         if (typeof loadCopilotAutoSavePreference === 'function') {
             await loadCopilotAutoSavePreference();
         }
-        
+        if (typeof loadCopilotCreativeModePreference === 'function') {
+            await loadCopilotCreativeModePreference();
+        }
+
         // 更新提及数据
         if (typeof updateMentionData === 'function') {
             updateMentionData();
         }
-        
+
     } catch (e) {
         console.error('Failed to load project data:', e);
     }
@@ -325,19 +399,17 @@ function showCreateProjectDialog() {
                 </div>
                 
                 <div style="margin-bottom: 24px;">
-                    <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">小说类型</label>
-                    <select id="new-project-genre" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
-                        <option value="fantasy">玄幻奇幻</option>
-                        <option value="wuxia">武侠仙侠</option>
-                        <option value="scifi">科幻未来</option>
-                        <option value="urban">都市现代</option>
-                        <option value="history">历史军事</option>
-                        <option value="romance">言情青春</option>
-                        <option value="mystery">悬疑推理</option>
-                        <option value="horror">惊悚恐怖</option>
-                        <option value="game">游戏竞技</option>
-                        <option value="other">其他类型</option>
-                    </select>
+                    <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">小说分类 <span style="color: #ef4444;">*</span></label>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
+                        <select id="new-project-genre-preset" aria-label="选择小说分类预设"
+                            style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px; cursor: pointer;">
+                            <option value="">请选择小说分类</option>
+                            ${PROJECT_GENRE_PRESETS.map(genre => `<option value="${escapeHtml(genre)}">${escapeHtml(genre)}</option>`).join('')}
+                            <option value="__custom__">自定义分类</option>
+                        </select>
+                        <input type="text" id="new-project-genre" placeholder="自定义分类，例如：修仙副本爽文"
+                            style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
+                    </div>
                 </div>
                 
                 <div style="display: flex; gap: 12px;">
@@ -352,6 +424,8 @@ function showCreateProjectDialog() {
     setTimeout(() => {
         document.getElementById('new-project-name').focus();
     }, 100);
+
+    bindProjectGenreControls();
     
     // 取消
     document.getElementById('cancel-create-project').addEventListener('click', () => {
@@ -363,17 +437,23 @@ function showCreateProjectDialog() {
     document.getElementById('confirm-create-project').addEventListener('click', async () => {
         const name = document.getElementById('new-project-name').value.trim();
         const desc = document.getElementById('new-project-desc').value.trim();
-        const genre = document.getElementById('new-project-genre').value;
-        
+        const genre = getProjectGenreValue();
+
         if (!name) {
             showToast('请输入项目名称', 'error');
             return;
         }
-        
+        if (!genre) {
+            showToast('请选择小说分类或输入自定义分类', 'error');
+            document.getElementById('new-project-genre-preset')?.focus();
+            return;
+        }
+
         try {
             const result = await apiCall('/api/projects', 'POST', {
                 name: name,
                 description: desc,
+                novel_type: genre,
                 genre: genre
             });
             
@@ -554,6 +634,7 @@ async function deleteProject(projectId) {
             setActiveProjectId(null);
             store.projectData = {
                 outline: [],
+                chapters: [],
                 worldbuilding: [],
                 characters: [],
                 items: [],

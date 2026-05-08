@@ -91,6 +91,7 @@ function resetSharedGlobals() {
 
 beforeAll(() => {
   loadBrowserScript('novel_agent/web/static/app-utils.js');
+  loadBrowserScript('novel_agent/web/static/app-copilot.js');
   loadBrowserScript('novel_agent/web/static/settings/app-settings-helpers.js');
   loadBrowserScript('novel_agent/web/static/settings/app-settings-renderers.js');
   loadBrowserScript('novel_agent/web/static/settings/app-settings-api.js');
@@ -108,6 +109,54 @@ beforeEach(() => {
 });
 
 describe('settings DOM regressions', () => {
+  it('places chapter summary automation under knowledge base settings', async () => {
+    document.body.innerHTML = '<div id="settings-content"></div>';
+    window.store.currentProjectId = 'project-1';
+    window.apiCall.mockImplementation(async (url, method, body) => {
+      if (url === '/api/knowledge-base/config') {
+        return {
+          siliconflow_api_key: '',
+          siliconflow_base_url: 'https://api.siliconflow.cn/v1',
+          siliconflow_model: 'BAAI/bge-m3',
+          siliconflow_embedding_dim: 1024,
+          default_top_k: 5,
+          vector_weight: 0.7,
+          fulltext_weight: 0.3,
+          chunk_size: 500,
+          chunk_overlap: 50
+        };
+      }
+      if (url === '/api/knowledge-base/stats') {
+        return { chapter_count: 0, chunk_count: 0, vector_count: 0, storage_size_mb: 0, chapters: [] };
+      }
+      if (url === '/api/chapter-summary-config') {
+        if (method === 'POST') {
+          return { success: true, auto_summary_enabled: body.auto_summary_enabled };
+        }
+        return { auto_summary_enabled: true };
+      }
+      throw new Error(`Unexpected API call: ${url}`);
+    });
+
+    await window.loadWritingSettings();
+
+    expect(document.body.textContent).toContain('知识库配置');
+    expect(document.body.textContent).toContain('章节摘要自动化');
+    expect(document.body.textContent).not.toContain('Copilot 自动保存文件');
+    const toggle = document.getElementById('cs-auto-summary-toggle');
+    expect(toggle?.checked).toBe(true);
+
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(window.apiCall).toHaveBeenLastCalledWith('/api/chapter-summary-config', 'POST', {
+      auto_summary_enabled: false
+    });
+    expect(document.getElementById('cs-status-badge')?.textContent).toBe('未启用');
+  });
+
   it('uses semantic buttons for primary shell controls in the main template', () => {
     const html = readFileSync(path.join(ROOT, 'novel_agent/web/templates/index.html'), 'utf8');
 
@@ -229,7 +278,8 @@ describe('settings DOM regressions', () => {
     expect(window.apiCall).toHaveBeenCalledWith('/api/test-connection', 'POST', {
       api_base: 'https://api.example.com/v1',
       config_id: 'cfg-1',
-      model: 'gpt-5.4'
+      model: 'gpt-5.4',
+      api_type: 'openai_chat'
     });
     await vi.waitFor(() => {
       expect(document.querySelector('.settings-test-card--success')).not.toBeNull();
@@ -237,6 +287,90 @@ describe('settings DOM regressions', () => {
     expect(document.querySelector('.settings-test-label')?.textContent).toContain('结果判断');
     expect(document.getElementById('active-config-test-result')?.textContent).toContain('这次测试通过了，这套配置现在能正常用');
     expect(window.showToast).toHaveBeenCalledWith('连通了，gpt-5.4 可以用，响应 123ms。', 'success');
+  });
+
+  it('tests an agent-specific api config from the Agent settings card', async () => {
+    const configs = [
+      {
+        id: 'agent-cfg',
+        name: '沟通配置',
+        api_base: 'https://agent.example.com/v1',
+        models: ['gpt-agent'],
+        api_key_set: true,
+        api_type: 'openai_chat'
+      }
+    ];
+    window.agentPageApiConfigs = configs;
+    window.agentPageActiveConfigId = '';
+    window.eval(`agentPageApiConfigs = ${JSON.stringify(configs)}; agentPageActiveConfigId = '';`);
+
+    document.body.innerHTML = `
+      <div id="settings-content">
+        ${window.renderAgentSettingsView([
+          { id: 'Communicator', name: '沟通助手', icon: 'ri-chat-3-line', desc: '需求分析' }
+        ], {
+          Communicator: {
+            name: 'Communicator',
+            display_name: '沟通助手',
+            description: '需求分析',
+            use_global: false,
+            override: true,
+            api_config_id: 'agent-cfg',
+            model: 'gpt-agent',
+            temperature: 0.8,
+            max_tokens: 4086
+          }
+        })}
+      </div>
+    `;
+
+    window.apiCall = vi.fn().mockResolvedValue({
+      success: true,
+      model_tested: 'gpt-agent',
+      response_time: 88,
+      error_code: '',
+      title: '可以正常用',
+      solution: '这套配置已经通过测试，可以直接拿来创作。',
+      detail: ''
+    });
+    window.showToast = vi.fn();
+
+    window.bindAgentSettingsEvents();
+    document.querySelector('.agent-test-config')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/test-connection', 'POST', {
+      api_base: 'https://agent.example.com/v1',
+      config_id: 'agent-cfg',
+      model: 'gpt-agent',
+      api_type: 'openai_chat'
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector('.agent-test-result .settings-test-card--success')).not.toBeNull();
+    });
+    expect(document.querySelector('.agent-test-status')?.textContent).toContain('已通过');
+    expect(window.showToast).toHaveBeenCalledWith('Communicator 连通了，gpt-agent 可以用。', 'success');
+  });
+
+  it('announces active model changes so the Copilot header can update immediately', async () => {
+    const receivedEvents = [];
+    window.addEventListener('global-api-config-updated', (event) => {
+      receivedEvents.push(event.detail);
+    });
+    window.apiCall.mockResolvedValue({
+      success: true,
+      active_config_id: 'cfg-1',
+      active_model: 'gpt-5.5'
+    });
+
+    await window.saveActiveApiConfig('cfg-1', 'gpt-5.4');
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/api-configs/active', 'POST', {
+      config_id: 'cfg-1',
+      model: 'gpt-5.4'
+    });
+    expect(receivedEvents).toStrictEqual([
+      { activeConfigId: 'cfg-1', activeModel: 'gpt-5.5' }
+    ]);
   });
 
   it('escapes malicious skill text instead of injecting DOM nodes', () => {

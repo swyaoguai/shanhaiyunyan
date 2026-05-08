@@ -238,9 +238,9 @@ def print_startup_info():
 
     try:
         print("\n" + "="*60)
-        print("🚀 小说创作智能体系统")
+        print("🚀 山海·云烟")
         print("="*60)
-        print(f"版本: v1.1.0")
+        print(f"版本: v1.0")
         print(f"Python: {sys.version.split()[0]}")
         print(f"端口: {config.server.port}")
         print(f"输出目录: {config.paths.output_dir}")
@@ -248,7 +248,7 @@ def print_startup_info():
     except UnicodeEncodeError:
         # Windows 控制台编码问题的回退方案
         print("\n" + "="*60)
-        print("Novel Agent System v1.1.0")
+        print("山海·云烟 v1.0")
         print("="*60)
         print(f"Python: {sys.version.split()[0]}")
         print(f"Port: {config.server.port}")

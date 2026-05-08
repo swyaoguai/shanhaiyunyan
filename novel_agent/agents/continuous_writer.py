@@ -224,10 +224,7 @@ class ContinuousWriter(BaseAgent):
 
 - 支线推进时必须保留回到主线的连接点。
 - 支线不可无限延长，到达目标后应尽快回收。
-- 必要时可使用隐藏注释标记线程：
-  - `<!-- PLOT_THREAD:return_main -->`
-  - `<!-- PLOT_THREAD:switch:subplot_a -->`
-  - `<!-- PLOT_THREAD:complete -->`
+- 线程变化只能通过自然剧情、对话、场景转场和章末钩子体现，不要输出 HTML 注释、PLOT_THREAD 标记或其他机器标记。
 """
         return self._ensure_text_integrity(prompt, "默认提示词")
 

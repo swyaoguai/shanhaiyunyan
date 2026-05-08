@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 小说转剧本入口
+ * 山海·云烟 - 小说转剧本入口
  */
 
 window.renderNovelToScriptInterface = renderNovelToScriptInterface;

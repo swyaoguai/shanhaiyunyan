@@ -24,6 +24,7 @@ class TokenUsageRecord:
     """Token使用记录"""
     id: Optional[int] = None
     timestamp: datetime = field(default_factory=datetime.now)
+    project_id: str = ""
     agent_name: str = ""
     model: str = ""
     tokens_in: int = 0
@@ -37,6 +38,7 @@ class TokenUsageRecord:
         return {
             "id": self.id,
             "timestamp": self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else self.timestamp,
+            "project_id": self.project_id,
             "agent_name": self.agent_name,
             "model": self.model,
             "tokens_in": self.tokens_in,
@@ -107,6 +109,7 @@ class TokenStatsStore:
                 CREATE TABLE IF NOT EXISTS token_usage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    project_id TEXT NOT NULL DEFAULT '',
                     agent_name TEXT NOT NULL,
                     model TEXT NOT NULL DEFAULT '',
                     tokens_in INTEGER DEFAULT 0,
@@ -117,6 +120,24 @@ class TokenStatsStore:
                     duration REAL DEFAULT 0.0
                 )
             ''')
+
+            cursor.execute('PRAGMA table_info(token_usage)')
+            columns = {row["name"] for row in cursor.fetchall()}
+            if "project_id" not in columns:
+                cursor.execute(
+                    "ALTER TABLE token_usage "
+                    "ADD COLUMN project_id TEXT NOT NULL DEFAULT ''"
+                )
+                current_project_id = _get_current_project_id()
+                if current_project_id:
+                    cursor.execute(
+                        "UPDATE token_usage SET project_id = ? WHERE project_id = ''",
+                        (current_project_id,),
+                    )
+                    logger.info(
+                        "Backfilled legacy token usage records to project_id=%s",
+                        current_project_id,
+                    )
             
             # 创建索引以加速查询
             cursor.execute('''
@@ -131,6 +152,10 @@ class TokenStatsStore:
                 CREATE INDEX IF NOT EXISTS idx_token_usage_agent 
                 ON token_usage(agent_name)
             ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_token_usage_project
+                ON token_usage(project_id)
+            ''')
             
             logger.info("Database tables initialized")
     
@@ -142,7 +167,8 @@ class TokenStatsStore:
         tokens_out: int = 0,
         success: bool = True,
         method: str = "",
-        duration: float = 0.0
+        duration: float = 0.0,
+        project_id: str = ""
     ) -> int:
         """
         记录一次token使用
@@ -155,6 +181,7 @@ class TokenStatsStore:
             success: 是否成功
             method: 调用方法
             duration: 耗时(秒)
+            project_id: 项目ID
             
         Returns:
             记录ID
@@ -164,10 +191,11 @@ class TokenStatsStore:
         with self._get_cursor() as cursor:
             cursor.execute('''
                 INSERT INTO token_usage 
-                (timestamp, agent_name, model, tokens_in, tokens_out, total_tokens, success, method, duration)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (timestamp, project_id, agent_name, model, tokens_in, tokens_out, total_tokens, success, method, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 datetime.now(),
+                project_id or "",
                 agent_name,
                 model,
                 tokens_in,
@@ -186,7 +214,8 @@ class TokenStatsStore:
         self,
         days: int = 7,
         model: Optional[str] = None,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取每日统计数据
@@ -195,6 +224,7 @@ class TokenStatsStore:
             days: 统计天数
             model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             每日统计列表
@@ -222,6 +252,10 @@ class TokenStatsStore:
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += ' GROUP BY DATE(timestamp) ORDER BY date DESC'
         
@@ -244,7 +278,8 @@ class TokenStatsStore:
         self,
         weeks: int = 4,
         model: Optional[str] = None,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取每周统计数据
@@ -253,6 +288,7 @@ class TokenStatsStore:
             weeks: 统计周数
             model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             每周统计列表
@@ -282,6 +318,10 @@ class TokenStatsStore:
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += " GROUP BY strftime('%Y-W%W', timestamp) ORDER BY week DESC"
         
@@ -306,7 +346,8 @@ class TokenStatsStore:
         self,
         hours: int = 24,
         model: Optional[str] = None,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取小时统计数据（用于24小时曲线图）
@@ -315,6 +356,7 @@ class TokenStatsStore:
             hours: 统计小时数
             model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             每小时统计列表
@@ -341,6 +383,10 @@ class TokenStatsStore:
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += " GROUP BY strftime('%Y-%m-%d %H', timestamp) ORDER BY hour ASC"
         
@@ -383,14 +429,18 @@ class TokenStatsStore:
     def get_model_stats(
         self,
         days: int = 30,
-        agent_name: Optional[str] = None
+        model: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取按模型分组的统计数据
         
         Args:
             days: 统计天数
+            model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             模型统计列表
@@ -412,10 +462,18 @@ class TokenStatsStore:
             WHERE timestamp >= ?
         '''
         params = [start_date]
+
+        if model:
+            query += ' AND model = ?'
+            params.append(model)
         
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += ' GROUP BY model ORDER BY total_tokens DESC'
         
@@ -439,7 +497,8 @@ class TokenStatsStore:
     def get_agent_stats(
         self,
         days: int = 30,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取按Agent分组的统计数据
@@ -447,6 +506,7 @@ class TokenStatsStore:
         Args:
             days: 统计天数
             model: 筛选模型（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             Agent统计列表
@@ -470,6 +530,10 @@ class TokenStatsStore:
         if model:
             query += ' AND model = ?'
             params.append(model)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += ' GROUP BY agent_name ORDER BY total_tokens DESC'
         
@@ -492,7 +556,8 @@ class TokenStatsStore:
         self,
         days: int = 30,
         model: Optional[str] = None,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         获取统计摘要
@@ -501,6 +566,7 @@ class TokenStatsStore:
             days: 统计天数
             model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             统计摘要
@@ -531,6 +597,10 @@ class TokenStatsStore:
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
@@ -553,7 +623,8 @@ class TokenStatsStore:
                     "first_record": row["first_record"],
                     "last_record": row["last_record"],
                     "filter_model": model,
-                    "filter_agent": agent_name
+                    "filter_agent": agent_name,
+                    "filter_project_id": project_id
                 }
             
             return {
@@ -571,33 +642,48 @@ class TokenStatsStore:
                 "first_record": None,
                 "last_record": None,
                 "filter_model": model,
-                "filter_agent": agent_name
+                "filter_agent": agent_name,
+                "filter_project_id": project_id
             }
     
-    def get_available_models(self) -> List[str]:
+    def get_available_models(self, project_id: Optional[str] = None) -> List[str]:
         """获取所有使用过的模型列表"""
+        query = '''
+            SELECT DISTINCT model FROM token_usage
+            WHERE model != ''
+        '''
+        params = []
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
+        query += ' ORDER BY model'
+
         with self._get_cursor() as cursor:
-            cursor.execute('''
-                SELECT DISTINCT model FROM token_usage 
-                WHERE model != '' 
-                ORDER BY model
-            ''')
+            cursor.execute(query, params)
             return [row["model"] for row in cursor.fetchall()]
     
-    def get_available_agents(self) -> List[str]:
+    def get_available_agents(self, project_id: Optional[str] = None) -> List[str]:
         """获取所有Agent列表"""
+        query = '''
+            SELECT DISTINCT agent_name FROM token_usage
+            WHERE 1=1
+        '''
+        params = []
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
+        query += ' ORDER BY agent_name'
+
         with self._get_cursor() as cursor:
-            cursor.execute('''
-                SELECT DISTINCT agent_name FROM token_usage 
-                ORDER BY agent_name
-            ''')
+            cursor.execute(query, params)
             return [row["agent_name"] for row in cursor.fetchall()]
     
     def get_recent_records(
         self,
         limit: int = 100,
         model: Optional[str] = None,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         获取最近的记录
@@ -606,6 +692,7 @@ class TokenStatsStore:
             limit: 返回数量限制
             model: 筛选模型（可选）
             agent_name: 筛选Agent（可选）
+            project_id: 筛选项目（可选）
             
         Returns:
             记录列表
@@ -620,6 +707,10 @@ class TokenStatsStore:
         if agent_name:
             query += ' AND agent_name = ?'
             params.append(agent_name)
+
+        if project_id is not None:
+            query += ' AND project_id = ?'
+            params.append(project_id)
         
         query += ' ORDER BY timestamp DESC LIMIT ?'
         params.append(limit)
@@ -631,6 +722,7 @@ class TokenStatsStore:
             return [{
                 "id": row["id"],
                 "timestamp": row["timestamp"],
+                "project_id": row["project_id"],
                 "agent_name": row["agent_name"],
                 "model": row["model"],
                 "tokens_in": row["tokens_in"],
@@ -641,12 +733,13 @@ class TokenStatsStore:
                 "duration": row["duration"]
             } for row in rows]
     
-    def cleanup_old_records(self, days: int = 90) -> int:
+    def cleanup_old_records(self, days: int = 90, project_id: Optional[str] = None) -> int:
         """
         清理旧记录
         
         Args:
             days: 保留天数
+            project_id: 筛选项目（可选）
             
         Returns:
             删除的记录数
@@ -654,7 +747,12 @@ class TokenStatsStore:
         cutoff_date = datetime.now() - timedelta(days=days)
         
         with self._get_cursor() as cursor:
-            cursor.execute('DELETE FROM token_usage WHERE timestamp < ?', (cutoff_date,))
+            query = 'DELETE FROM token_usage WHERE timestamp < ?'
+            params = [cutoff_date]
+            if project_id is not None:
+                query += ' AND project_id = ?'
+                params.append(project_id)
+            cursor.execute(query, params)
             deleted_count = cursor.rowcount
             
             if deleted_count > 0:
@@ -662,22 +760,38 @@ class TokenStatsStore:
             
             return deleted_count
     
-    def reset_all(self) -> int:
+    def reset_all(self, project_id: Optional[str] = None) -> int:
         """
-        重置所有统计数据（清空整个表）
+        重置统计数据。
+
+        project_id 为 None 时清空整个表；传入项目ID时只清空该项目。
         
         Returns:
             删除的记录数
         """
         with self._get_cursor() as cursor:
             # 先获取记录总数
-            cursor.execute('SELECT COUNT(*) FROM token_usage')
+            count_query = 'SELECT COUNT(*) FROM token_usage'
+            count_params = []
+            if project_id is not None:
+                count_query += ' WHERE project_id = ?'
+                count_params.append(project_id)
+            cursor.execute(count_query, count_params)
             total_count = cursor.fetchone()[0]
             
-            # 删除所有记录
-            cursor.execute('DELETE FROM token_usage')
+            # 删除记录
+            delete_query = 'DELETE FROM token_usage'
+            delete_params = []
+            if project_id is not None:
+                delete_query += ' WHERE project_id = ?'
+                delete_params.append(project_id)
+            cursor.execute(delete_query, delete_params)
             
-            logger.info(f"Reset all token usage records: {total_count} records deleted")
+            logger.info(
+                "Reset token usage records: project_id=%s, %s records deleted",
+                project_id,
+                total_count,
+            )
             return total_count
     
     def close(self):
@@ -699,6 +813,18 @@ def get_token_stats_store() -> TokenStatsStore:
     return _token_stats_store
 
 
+def _get_current_project_id() -> str:
+    """Best-effort current project id for token records."""
+    try:
+        from ..project_manager import get_project_manager
+
+        pm = get_project_manager()
+        return str(getattr(pm, "current_project_id", "") or "")
+    except Exception as exc:
+        logger.debug("Unable to resolve current project for token stats: %s", exc)
+        return ""
+
+
 def record_token_usage(
     agent_name: str,
     model: str = "",
@@ -706,7 +832,8 @@ def record_token_usage(
     tokens_out: int = 0,
     success: bool = True,
     method: str = "",
-    duration: float = 0.0
+    duration: float = 0.0,
+    project_id: Optional[str] = None
 ) -> int:
     """
     便捷函数：记录token使用
@@ -714,6 +841,7 @@ def record_token_usage(
     Args:
         agent_name: Agent名称
         model: 模型名称
+        project_id: 项目ID，默认自动使用当前项目
         tokens_in: 输入token数
         tokens_out: 输出token数
         success: 是否成功
@@ -727,6 +855,7 @@ def record_token_usage(
     return store.record(
         agent_name=agent_name,
         model=model,
+        project_id=_get_current_project_id() if project_id is None else project_id,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         success=success,

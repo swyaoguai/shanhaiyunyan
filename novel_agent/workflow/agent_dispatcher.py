@@ -210,6 +210,41 @@ class AgentDispatcher:
                 return fallback_agent
         return None
 
+    def _resolve_agent_model(self, agent_name: str, agent_instance: Any = None) -> str:
+        target_name = str(agent_name or getattr(agent_instance, "name", "") or "").strip()
+        candidates: List[str] = []
+        for attr_name in ("_get_model_name", "get_model_name"):
+            getter = getattr(agent_instance, attr_name, None) if agent_instance is not None else None
+            if callable(getter):
+                try:
+                    candidates.append(str(getter() or "").strip())
+                except Exception:
+                    pass
+        for attr_name in ("model", "model_name", "current_model", "active_model"):
+            value = getattr(agent_instance, attr_name, "") if agent_instance is not None else ""
+            candidates.append(str(value or "").strip())
+        config_obj = getattr(agent_instance, "config", None) if agent_instance is not None else None
+        if config_obj is not None:
+            candidates.append(str(getattr(config_obj, "model", "") or "").strip())
+        llm_config = getattr(agent_instance, "llm_config", None) if agent_instance is not None else None
+        if isinstance(llm_config, dict):
+            candidates.append(str(llm_config.get("model") or "").strip())
+
+        for value in candidates:
+            if value:
+                return value
+
+        if target_name:
+            try:
+                from ..agent_config import get_config_manager
+                cfg = get_config_manager().get_effective_config(target_name)
+                model_name = str(getattr(cfg, "model", "") or "").strip()
+                if model_name:
+                    return model_name
+            except Exception as exc:
+                logger.debug(f"[AgentDispatcher] resolve model failed for {target_name}: {exc}")
+        return ""
+
     def _update_task_metadata(
         self,
         *,
@@ -222,7 +257,9 @@ class AgentDispatcher:
         execution_mode: str,
         selected_agent_name: str,
         fallback_provenance: Optional[Dict[str, Any]] = None,
+        selected_model: str = "",
     ) -> None:
+        model_label = str(selected_model or self._resolve_agent_model(selected_agent_name) or "").strip()
         metadata_patch = {
             "route_reason": route_reason,
             "candidate_source": candidate_source,
@@ -231,6 +268,13 @@ class AgentDispatcher:
             "selected_agent": selected_agent_name,
             "fallback_provenance": dict(fallback_provenance or {}),
         }
+        if model_label:
+            metadata_patch.update({
+                "model": model_label,
+                "current_model": model_label,
+                "active_model": model_label,
+                "model_used": model_label,
+            })
         task.candidate_agents = list(candidate_names or [])
         task.metadata.update(metadata_patch)
         task.touch()
@@ -380,6 +424,7 @@ class AgentDispatcher:
         )
 
         claimed_by = selected_agent_name or str(getattr(selected_agent, "name", "") or "").strip()
+        selected_model = self._resolve_agent_model(claimed_by, selected_agent)
         fallback_provenance: Dict[str, Any] = {}
         execution_mode = "autonomous"
         fallback_used = candidate_source == "fallback_direct"
@@ -394,6 +439,7 @@ class AgentDispatcher:
             context_snapshot_id=context_snapshot_id,
             execution_mode=execution_mode,
             selected_agent_name=claimed_by,
+            selected_model=selected_model,
         )
         task_pool.claim_task(task.task_id, claimed_by)
         task_pool.start_task(task.task_id, claimed_by)
@@ -410,6 +456,10 @@ class AgentDispatcher:
             "route_reason": route_reason,
             "candidate_source": candidate_source,
             "context_snapshot_id": context_snapshot_id,
+            "model": selected_model,
+            "current_model": selected_model,
+            "active_model": selected_model,
+            "model_used": selected_model,
         }
         if defer_persist:
             self._deferred_events.append({
@@ -428,6 +478,10 @@ class AgentDispatcher:
                 "task_type": envelope.task_type,
                 "title": str(envelope.title or envelope.task_type).strip(),
                 "message": f"{claimed_by} 正在执行: {envelope.title or envelope.task_type}",
+                "model": selected_model,
+                "current_model": selected_model,
+                "active_model": selected_model,
+                "model_used": selected_model,
             }
         )
 
@@ -456,6 +510,7 @@ class AgentDispatcher:
                 execution_mode=execution_mode,
                 selected_agent_name=claimed_by,
                 fallback_provenance=fallback_provenance,
+                selected_model=selected_model,
             )
             # 问题17修复：runtime_pool 状态必须立即持久化，不能延迟
             self.save_runtime_task_pool(runtime_pool)
@@ -469,6 +524,10 @@ class AgentDispatcher:
                 "candidate_source": candidate_source,
                 "context_snapshot_id": context_snapshot_id,
                 "fallback_used": fallback_used,
+                "model": selected_model,
+                "current_model": selected_model,
+                "active_model": selected_model,
+                "model_used": selected_model,
             }
             if defer_persist:
                 self._deferred_events.append({
@@ -486,6 +545,10 @@ class AgentDispatcher:
                     "task_type": envelope.task_type,
                     "title": str(envelope.title or envelope.task_type).strip(),
                     "message": f"{claimed_by} 完成: {envelope.title or envelope.task_type}",
+                    "model": selected_model,
+                    "current_model": selected_model,
+                    "active_model": selected_model,
+                    "model_used": selected_model,
                 }
             )
         except Exception as exc:
@@ -505,6 +568,7 @@ class AgentDispatcher:
                 execution_mode=execution_mode,
                 selected_agent_name=claimed_by,
                 fallback_provenance=fallback_provenance,
+                selected_model=selected_model,
             )
             self.save_runtime_task_pool(runtime_pool)
             self._append_execution_event(
@@ -517,6 +581,10 @@ class AgentDispatcher:
                     "route_reason": route_reason,
                     "candidate_source": candidate_source,
                     "context_snapshot_id": context_snapshot_id,
+                    "model": selected_model,
+                    "current_model": selected_model,
+                    "active_model": selected_model,
+                    "model_used": selected_model,
                 },
             )
             await self.notify_progress(
@@ -528,6 +596,10 @@ class AgentDispatcher:
                     "title": str(envelope.title or envelope.task_type).strip(),
                     "error": autonomous_error,
                     "message": f"{claimed_by} 执行失败: {autonomous_error[:100]}",
+                    "model": selected_model,
+                    "current_model": selected_model,
+                    "active_model": selected_model,
+                    "model_used": selected_model,
                 }
             )
 
@@ -540,6 +612,7 @@ class AgentDispatcher:
                 raise
 
             retry_claimed_by = fallback_agent_name or str(getattr(fallback_agent, "name", "") or "").strip()
+            retry_model = self._resolve_agent_model(retry_claimed_by, fallback_agent)
             retry_task = task_pool.create_task(
                 task_type=envelope.task_type,
                 title=f"{envelope.title or envelope.task_type}-fallback",
@@ -556,6 +629,10 @@ class AgentDispatcher:
                         "from_agent": claimed_by,
                         "reason": autonomous_error,
                     },
+                    "model": retry_model,
+                    "current_model": retry_model,
+                    "active_model": retry_model,
+                    "model_used": retry_model,
                 },
             )
             task_pool.claim_task(retry_task.task_id, retry_claimed_by)
@@ -579,6 +656,7 @@ class AgentDispatcher:
                 execution_mode=execution_mode,
                 selected_agent_name=retry_claimed_by,
                 fallback_provenance=fallback_provenance,
+                selected_model=retry_model,
             )
             self.save_runtime_task_pool(runtime_pool)
             self._append_execution_event(
@@ -589,6 +667,10 @@ class AgentDispatcher:
                     "assigned_agent": retry_claimed_by,
                     "fallback_from": claimed_by,
                     "context_snapshot_id": context_snapshot_id,
+                    "model": retry_model,
+                    "current_model": retry_model,
+                    "active_model": retry_model,
+                    "model_used": retry_model,
                 },
             )
             await self.notify_progress(
@@ -600,6 +682,10 @@ class AgentDispatcher:
                     "title": str(envelope.title or envelope.task_type).strip(),
                     "fallback_from": claimed_by,
                     "message": f"{retry_claimed_by} 回退执行: {envelope.title or envelope.task_type}",
+                    "model": retry_model,
+                    "current_model": retry_model,
+                    "active_model": retry_model,
+                    "model_used": retry_model,
                 }
             )
 
@@ -618,6 +704,7 @@ class AgentDispatcher:
                     execution_mode=execution_mode,
                     selected_agent_name=retry_claimed_by,
                     fallback_provenance=fallback_provenance,
+                    selected_model=retry_model,
                 )
                 self.save_runtime_task_pool(runtime_pool)
                 self._append_execution_event(
@@ -629,6 +716,10 @@ class AgentDispatcher:
                         "fallback_used": True,
                         "error": fallback_error,
                         "context_snapshot_id": context_snapshot_id,
+                        "model": retry_model,
+                        "current_model": retry_model,
+                        "active_model": retry_model,
+                        "model_used": retry_model,
                     },
                 )
                 raise RuntimeError(fallback_error)
@@ -652,6 +743,7 @@ class AgentDispatcher:
                 execution_mode=execution_mode,
                 selected_agent_name=retry_claimed_by,
                 fallback_provenance=fallback_provenance,
+                selected_model=retry_model,
             )
             self.save_runtime_task_pool(runtime_pool)
             self._append_execution_event(
@@ -663,6 +755,10 @@ class AgentDispatcher:
                     "fallback_used": True,
                     "review_required": bool(task.review_required),
                     "context_snapshot_id": context_snapshot_id,
+                    "model": retry_model,
+                    "current_model": retry_model,
+                    "active_model": retry_model,
+                    "model_used": retry_model,
                 },
             )
             claimed_by = retry_claimed_by

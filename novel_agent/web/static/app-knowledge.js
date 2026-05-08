@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 资料库管理模块
+ * 山海·云烟 - 资料库管理模块
  * 包含：资料库分类、知识条目CRUD、设定管理
  */
 
@@ -28,7 +28,7 @@ function renderKnowledgeNavPanel(options = {}) {
     const builtinCategories = store.knowledgeCategories.filter(c => c.builtin);
     
     builtinCategories.forEach(cat => {
-        const count = (store.projectData[cat.key] || []).length;
+        const count = getKnowledgeCategoryCount(cat);
         const div = document.createElement('div');
         div.className = 'list-item';
         div.innerHTML = `
@@ -278,6 +278,27 @@ async function syncKnowledgeCategoriesToProjectState() {
     }
 }
 
+function isServerBackedCustomKnowledgeKey(key) {
+    return /^custom_[A-Za-z0-9_-]{1,80}$/.test(String(key || '').trim());
+}
+
+function isServerBackedKnowledgeKey(key) {
+    const serverKeys = [
+        'characters',
+        'outline',
+        'chapters',
+        'worldbuilding',
+        'items',
+        'eventlines',
+        'outline_settings',
+        'detail_settings',
+        'chapter_settings',
+        'chapter_summary'
+    ];
+    const dataKey = String(key || '').trim();
+    return serverKeys.includes(dataKey) || isServerBackedCustomKnowledgeKey(dataKey);
+}
+
 // ===== 设定管理功能 =====
 
 let currentSettingType = null;
@@ -296,13 +317,14 @@ let knowledgeWorkbenchState = {
 
 const BUILTIN_KNOWLEDGE_SCHEMAS = {
     outline: {
-        summaryKeys: ['summary', 'arc', 'key_turn'],
+        summaryKeys: ['summary', 'story_synopsis', 'conflicts', 'selling_points'],
         fields: [
-            { key: 'title', label: '章节标题', type: 'text', required: true },
-            { key: 'summary', label: '章节概要', type: 'textarea', rows: 3 },
-            { key: 'arc', label: '故事弧', type: 'text' },
-            { key: 'key_turn', label: '关键转折', type: 'textarea', rows: 2 },
-            { key: 'hook', label: '结尾钩子', type: 'textarea', rows: 2 },
+            { key: 'title', label: '大纲标题', type: 'text', required: true },
+            { key: 'summary', label: '全书大纲内容', type: 'textarea', rows: 16 },
+            { key: 'volume_plan', label: '分卷规划', type: 'textarea', rows: 8 },
+            { key: 'story_synopsis', label: '故事梗概', type: 'textarea', rows: 5 },
+            { key: 'conflicts', label: '矛盾冲突', type: 'textarea', rows: 4 },
+            { key: 'selling_points', label: '小说卖点', type: 'textarea', rows: 4 },
         ],
     },
     characters: {
@@ -396,18 +418,126 @@ function getKnowledgeSchema(categoryOrKey) {
     return BUILTIN_KNOWLEDGE_SCHEMAS[key] || null;
 }
 
+function isMeaningfulOutlineText(value) {
+    const text = String(value || '').trim();
+    return text && text !== '待生成' && text !== '待生成。';
+}
+
+function getFirstOutlineText(items, keys) {
+    for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        for (const key of keys) {
+            const text = String(item[key] || '').trim();
+            if (isMeaningfulOutlineText(text)) return text;
+        }
+    }
+    return '';
+}
+
+function formatOutlineVolumePlanFromVolumes(volumes) {
+    if (!Array.isArray(volumes) || !volumes.length) return '';
+    const lines = ['【分卷规划】'];
+    volumes.forEach((volume, index) => {
+        if (!volume || typeof volume !== 'object') return;
+        const number = volume.volume_number || volume.number || index + 1;
+        const rawTitle = String(volume.volume_title || volume.title || volume.name || `第${number}卷`).trim();
+        lines.push(rawTitle.startsWith('第') ? rawTitle : `第${number}卷：${rawTitle}`);
+        [
+            ['本卷概述', volume.volume_summary || volume.summary || volume.description],
+            ['核心冲突', volume.core_conflict || volume.conflict],
+            ['主角成长', volume.protagonist_growth || volume.character_growth],
+            ['本卷高潮', volume.volume_climax || volume.climax],
+            ['关键事件', volume.key_events || volume.story_beats || volume.major_events],
+        ].forEach(([label, value]) => {
+            const text = Array.isArray(value)
+                ? value
+                    .filter(Boolean)
+                    .map(entry => typeof entry === 'object' ? JSON.stringify(entry) : String(entry))
+                    .join('；')
+                : String(value || '').trim();
+            if (isMeaningfulOutlineText(text)) {
+                lines.push(`- ${label}：${text}`);
+            }
+        });
+        lines.push('');
+    });
+    return lines.join('\n').trim();
+}
+
+function getOutlineVolumePlan(items) {
+    const existing = getFirstOutlineText(items, ['volume_plan']);
+    if (existing) return existing;
+    for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const volumePlan = formatOutlineVolumePlanFromVolumes(item.volumes);
+        if (volumePlan) return volumePlan;
+    }
+    const volumeRows = items.filter(item => item && typeof item === 'object' && (
+        item.volume_number || item.volume_title || item.volume_summary
+    ));
+    return formatOutlineVolumePlanFromVolumes(volumeRows);
+}
+
+function buildOutlineOverviewItem(rows) {
+    const items = Array.isArray(rows)
+        ? rows.filter(item => item && typeof item === 'object')
+        : [];
+    if (!items.length) return null;
+
+    const globalOutline = getFirstOutlineText(items, ['global_outline', 'standard_outline', 'full_outline']);
+    const summary = globalOutline || getFirstOutlineText(items, ['summary', 'description', 'content']);
+    const volumePlan = getOutlineVolumePlan(items);
+
+    return {
+        id: 'outline-overview',
+        title: '主线大纲',
+        name: '主线大纲',
+        summary: summary || '暂无大纲内容。',
+        volume_plan: volumePlan,
+        story_synopsis: getFirstOutlineText(items, ['story_synopsis', 'synopsis']) || '主线蓝图，章节目标另存为章纲或细纲。',
+        conflicts: getFirstOutlineText(items, ['conflicts', 'main_conflict']),
+        selling_points: getFirstOutlineText(items, ['selling_points']),
+        readonly: true,
+    };
+}
+
+function getKnowledgeCategoryData(category) {
+    if (!category) return [];
+    const data = store.projectData[category.key] || [];
+    if (category.key === 'outline') {
+        const overview = buildOutlineOverviewItem(data);
+        return overview ? [overview] : [];
+    }
+    return data;
+}
+
+function getKnowledgeCategoryCount(category) {
+    return getKnowledgeCategoryData(category).length;
+}
+
+function localizeGeneratedSchemaLabels(value) {
+    return String(value ?? '')
+        .replace(/(^|[；;，,\n]\s*)levels\s*[:：]\s*/gi, '$1境界层级：')
+        .replace(/(^|[；;，,\n]\s*)cultivation\s+method\s*[:：]\s*/gi, '$1修炼方式：')
+        .replace(/(^|[；;，,\n]\s*)special\s+abilities\s*[:：]\s*/gi, '$1特殊能力：')
+        .replace(/(^|[；;，,\n]\s*)limitations\s*[:：]\s*/gi, '$1限制与代价：')
+        .replace(/(^|[；;，,\n]\s*)power\s+system\s*[:：]\s*/gi, '$1力量体系：');
+}
+
 function formatSchemaFieldValue(field, value) {
     if (value === null || value === undefined) return '';
     if (field.type === 'list') {
-        return Array.isArray(value) ? value.join('\n') : String(value);
+        return localizeGeneratedSchemaLabels(Array.isArray(value) ? value.join('\n') : value);
     }
     if (field.type === 'relation_map') {
-        if (typeof value === 'string') return value;
+        if (typeof value === 'string') return localizeGeneratedSchemaLabels(value);
         if (value && typeof value === 'object') {
-            return Object.entries(value).map(([target, relation]) => `${target}：${relation}`).join('\n');
+            return localizeGeneratedSchemaLabels(
+                Object.entries(value).map(([target, relation]) => `${target}：${relation}`).join('\n')
+            );
         }
     }
-    return String(value);
+    return localizeGeneratedSchemaLabels(value);
 }
 
 function escapeAttributeValue(value) {
@@ -416,6 +546,13 @@ function escapeAttributeValue(value) {
         .replace(/"/g, '&quot;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
+}
+
+function getKnowledgeItemName(item, fallback = '未命名条目') {
+    if (!item || typeof item !== 'object') return fallback;
+    const candidates = [item.name, item.title, item.world_name, item.chapter_title, item.id];
+    const name = candidates.map(value => String(value ?? '').trim()).find(Boolean);
+    return name || fallback;
 }
 
 function parseSchemaFieldValue(field, rawValue) {
@@ -501,11 +638,13 @@ function buildKnowledgeItemSummary(item, category) {
             const opt = (field.options || []).find(o => typeof o === 'object' ? o.value === value : false);
             if (opt) value = opt.label;
         }
-        const text = Array.isArray(value) ? value.join('、') : (typeof value === 'object' ? JSON.stringify(value) : String(value));
+        const text = localizeGeneratedSchemaLabels(
+            Array.isArray(value) ? value.join('、') : (typeof value === 'object' ? JSON.stringify(value) : String(value))
+        );
         if (text.trim()) lines.push(text.trim());
         if (lines.length >= 3) break;
     }
-    return lines.join('｜') || item.description || item.details || '暂无摘要，点击编辑补充结构化信息';
+    return localizeGeneratedSchemaLabels(lines.join('｜') || item.description || item.details || '暂无摘要，点击编辑补充结构化信息');
 }
 
 function renderKnowledgeWorkbench() {
@@ -875,7 +1014,8 @@ async function loadDatabase(typeId) {
 
     updateBreadcrumbs(['资料库', category.name]);
 
-    const data = store.projectData[category.key] || [];
+    const data = getKnowledgeCategoryData(category);
+    const isReadOnlyOutline = category.key === 'outline';
 
     if (data.length === 0) {
         ui.workspace.innerHTML = `
@@ -896,7 +1036,7 @@ async function loadDatabase(typeId) {
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                 <div style="display: flex; align-items: center; gap: 12px;">
                     <h2 style="color: var(--text-primary); font-size: 18px;">${category.name} (${data.length})</h2>
-                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: var(--text-secondary);">
+                    <label style="display: ${isReadOnlyOutline ? 'none' : 'flex'}; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: var(--text-secondary);">
                         <input type="checkbox" id="select-all-items" style="cursor: pointer; accent-color: var(--accent-color);">
                         全选
                     </label>
@@ -905,7 +1045,7 @@ async function loadDatabase(typeId) {
                     <button id="batch-delete-btn" style="padding: 8px 16px; background: #ef4444; border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 13px; display: none;">
                         <i class="ri-delete-bin-line"></i> 批量删除 (<span id="batch-delete-count">0</span>)
                     </button>
-                    <button id="add-new-item-btn" style="padding: 8px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 13px;">
+                    <button id="add-new-item-btn" style="display: ${isReadOnlyOutline ? 'none' : 'inline-flex'}; padding: 8px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 13px;">
                         <i class="ri-add-line"></i> 添加条目
                     </button>
                 </div>
@@ -915,7 +1055,7 @@ async function loadDatabase(typeId) {
         </div>
     `;
 
-    document.getElementById('add-new-item-btn').addEventListener('click', addNewSetting);
+    document.getElementById('add-new-item-btn')?.addEventListener('click', addNewSetting);
 
     const grid = document.getElementById('setting-grid');
     const selectedIndices = new Set();
@@ -930,7 +1070,7 @@ async function loadDatabase(typeId) {
         if (selectAllCb) selectAllCb.checked = count === data.length && data.length > 0;
     }
 
-    document.getElementById('select-all-items').addEventListener('change', (e) => {
+    document.getElementById('select-all-items')?.addEventListener('change', (e) => {
         const checked = e.target.checked;
         selectedIndices.clear();
         if (checked) data.forEach((_, i) => selectedIndices.add(i));
@@ -941,10 +1081,10 @@ async function loadDatabase(typeId) {
         updateBatchUI();
     });
 
-    document.getElementById('batch-delete-btn').addEventListener('click', async () => {
+    document.getElementById('batch-delete-btn')?.addEventListener('click', async () => {
         const count = selectedIndices.size;
         if (count === 0) return;
-        const names = [...selectedIndices].map(i => store.projectData[category.key][i]?.name).filter(Boolean);
+        const names = [...selectedIndices].map(i => getKnowledgeItemName(store.projectData[category.key][i], '')).filter(Boolean);
         const preview = names.length <= 5 ? names.map(n => `「${n}」`).join('、') : names.slice(0, 5).map(n => `「${n}」`).join('、') + ` 等${names.length}条`;
         if (!confirm(`确定要删除 ${preview} 吗？共 ${count} 条`)) return;
         const sorted = [...selectedIndices].sort((a, b) => b - a);
@@ -965,14 +1105,14 @@ async function loadDatabase(typeId) {
         card.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
                 <div style="display: flex; align-items: start; gap: 10px; flex: 1; min-width: 0;">
-                    <input type="checkbox" class="item-checkbox" data-index="${index}" style="cursor: pointer; margin-top: 3px; accent-color: var(--accent-color); flex-shrink: 0;">
-                    <div style="font-weight: 600; font-size: 15px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis;">${item.name}</div>
+                    <input type="checkbox" class="item-checkbox" data-index="${index}" style="display: ${isReadOnlyOutline ? 'none' : 'inline-block'}; cursor: pointer; margin-top: 3px; accent-color: var(--accent-color); flex-shrink: 0;">
+                    <div style="font-weight: 600; font-size: 15px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis;">${getKnowledgeItemName(item)}</div>
                 </div>
                 <div class="card-actions" style="display: flex; gap: 4px; flex-shrink: 0;">
                     <button class="edit-card-btn" title="编辑" style="background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px;">
                         <i class="ri-edit-line"></i>
                     </button>
-                    <button class="delete-card-btn" title="删除" style="background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px;">
+                    <button class="delete-card-btn" title="删除" style="display: ${isReadOnlyOutline ? 'none' : 'inline-block'}; background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px;">
                         <i class="ri-delete-bin-line"></i>
                     </button>
                 </div>
@@ -982,7 +1122,7 @@ async function loadDatabase(typeId) {
             </div>
         `;
 
-        card.querySelector('.item-checkbox').addEventListener('change', (e) => {
+        card.querySelector('.item-checkbox')?.addEventListener('change', (e) => {
             e.stopPropagation();
             if (e.target.checked) {
                 selectedIndices.add(index);
@@ -1005,7 +1145,7 @@ async function loadDatabase(typeId) {
             openSettingEditor(typeId, index);
         });
 
-        card.querySelector('.delete-card-btn').addEventListener('click', (e) => {
+        card.querySelector('.delete-card-btn')?.addEventListener('click', (e) => {
             e.stopPropagation();
             deleteSetting(typeId, index);
         });
@@ -1025,19 +1165,22 @@ function openSettingEditor(typeId, index) {
         { key: 'details', label: '详细信息', type: 'textarea', rows: 8 },
     ];
 
-    const item = store.projectData[category.key][index];
+    const data = getKnowledgeCategoryData(category);
+    const item = data[index];
     if (!item) return;
+    const isReadOnlyOutline = category.key === 'outline' && item.readonly;
 
-    updateBreadcrumbs(['资料库', category.name, item.name]);
+    updateBreadcrumbs(['资料库', category.name, getKnowledgeItemName(item)]);
 
     ui.workspace.innerHTML = `
         <div style="max-width: 800px; margin: 0 auto; padding: 24px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
-                <button id="back-to-list" style="background: none; border: none; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                    <i class="ri-arrow-left-line"></i> 返回列表
+            <div class="app-back-row" style="justify-content: space-between; margin-bottom: 24px;">
+                <button id="back-to-list" type="button" class="app-back-button">
+                    <i class="ri-arrow-left-line"></i>
+                    <span>返回列表</span>
                 </button>
                 <button id="save-setting-btn" style="padding: 8px 20px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer;">
-                    <i class="ri-save-line"></i> 保存
+                    <i class="${isReadOnlyOutline ? 'ri-arrow-left-line' : 'ri-save-line'}"></i> ${isReadOnlyOutline ? '返回' : '保存'}
                 </button>
             </div>
             
@@ -1050,8 +1193,12 @@ function openSettingEditor(typeId, index) {
     document.getElementById('back-to-list').addEventListener('click', () => loadDatabase(typeId));
 
     document.getElementById('save-setting-btn').addEventListener('click', async () => {
+        if (isReadOnlyOutline) {
+            loadDatabase(typeId);
+            return;
+        }
         const nextValues = collectSchemaFormValues(fields, 'setting');
-        const name = String(nextValues.name || '').trim();
+        const name = String(nextValues.name || nextValues.title || '').trim();
         if (!name) {
             showToast('名称不能为空', 'error');
             return;
@@ -1078,11 +1225,15 @@ async function deleteSetting(typeId, index) {
     // 从资料库分类中查找配置
     const category = store.knowledgeCategories.find(c => c.id === typeId);
     if (!category) return;
+    if (category.key === 'outline') {
+        showToast('全书大纲总览不能在这里删除；单章目标请在章纲设定中管理。', 'info');
+        return;
+    }
 
     const item = store.projectData[category.key][index];
     if (!item) return;
 
-    if (confirm(`确定要删除「${item.name}」吗？`)) {
+    if (confirm(`确定要删除「${getKnowledgeItemName(item)}」吗？`)) {
         store.projectData[category.key].splice(index, 1);
         await saveSettingData(category.key);
         loadDatabase(typeId);
@@ -1095,17 +1246,20 @@ async function deleteSetting(typeId, index) {
 }
 
 async function saveSettingData(dataKey) {
-    // 判断是否是扩展资料库（本地存储）
-    const builtinServerKeys = ['characters', 'outline', 'worldbuilding', 'items', 'eventlines', 'detail_settings', 'chapter_settings', 'chapter_summary'];
-
-    if (builtinServerKeys.includes(dataKey)) {
+    if (isServerBackedKnowledgeKey(dataKey)) {
         // 服务器存储
         try {
             await apiCall(`/api/project-data/${dataKey}`, 'POST', {
                 data: store.projectData[dataKey]
             });
+            if (isServerBackedCustomKnowledgeKey(dataKey)) {
+                saveExtendedKnowledgeData(dataKey);
+            }
         } catch (e) {
             console.error(`Failed to save ${dataKey}:`, e);
+            if (isServerBackedCustomKnowledgeKey(dataKey)) {
+                saveExtendedKnowledgeData(dataKey);
+            }
         }
     } else {
         // 本地存储（扩展资料库）
@@ -1139,6 +1293,9 @@ function loadExtendedKnowledgeData() {
 
     // 仅加载自定义分类数据。内置资料库统一走项目后端接口。
     store.knowledgeCategories.filter(c => !c.builtin).forEach(cat => {
+        if (Array.isArray(store.projectData[cat.key]) && store.projectData[cat.key].length > 0) {
+            return;
+        }
         try {
             const saved = localStorage.getItem(`knowledge_${projectId}_${cat.key}`);
             if (saved) {
@@ -1478,6 +1635,8 @@ window.deleteKnowledgeCategory = deleteKnowledgeCategory;
 window.saveKnowledgeCategories = saveKnowledgeCategories;
 window.syncKnowledgeCategoriesToProjectState = syncKnowledgeCategoriesToProjectState;
 window.loadKnowledgeCategories = loadKnowledgeCategories;
+window.isServerBackedCustomKnowledgeKey = isServerBackedCustomKnowledgeKey;
+window.isServerBackedKnowledgeKey = isServerBackedKnowledgeKey;
 window.addNewSetting = addNewSetting;
 window.showAddSettingDialog = showAddSettingDialog;
 window.loadDatabase = loadDatabase;

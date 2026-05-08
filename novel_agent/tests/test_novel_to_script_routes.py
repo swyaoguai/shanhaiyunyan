@@ -89,7 +89,7 @@ def test_novel_to_script_state_roundtrip(client_with_project: TestClient):
 
 def test_novel_to_script_convert_returns_formatted_text(monkeypatch, client_with_project: TestClient):
     async def fake_run_prompt(prompt, *, api_config_id="", model=""):
-        assert "场景台本" in prompt["user_prompt"]
+        assert "分场景剧本" in prompt["user_prompt"]
         return json.dumps(
             {
                 "scenes": [

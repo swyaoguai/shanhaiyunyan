@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 设置页渲染层
+ * 山海·云烟 - 设置页渲染层
  */
 
 function loadThemeSettings() {
@@ -427,9 +427,25 @@ function renderModelOptions(config, selectedModel = currentActiveModel) {
     `).join('');
 }
 
+function _apiTypeLabel(apiType) {
+    const labels = {
+        'openai_chat': 'OpenAI Chat',
+        'openai_responses': 'OpenAI Responses',
+        'anthropic': 'Anthropic'
+    };
+    return labels[apiType] || 'OpenAI Chat';
+}
+
+function _apiTypeBadgeClass(apiType) {
+    if (apiType === 'anthropic') return 'settings-chip--warning';
+    if (apiType === 'openai_responses') return 'settings-chip--success';
+    return 'settings-chip--info';
+}
+
 function renderConfigCard(cfg) {
     const isActive = cfg.id === currentActiveConfigId;
     const modelCount = cfg.models ? cfg.models.length : 0;
+    const apiType = cfg.api_type || 'openai_chat';
 
     return `
         <div class="config-card ${isActive ? 'is-active' : ''}" data-config-id="${safeAttr(cfg.id)}">
@@ -438,6 +454,7 @@ function renderConfigCard(cfg) {
                     <div class="settings-card-title-row">
                         <span class="settings-card-title">${safeText(cfg.name)}</span>
                         ${isActive ? '<span class="settings-badge settings-badge--success">当前使用</span>' : ''}
+                        <span class="settings-chip ${_apiTypeBadgeClass(apiType)}"><i class="ri-plug-line"></i> ${_apiTypeLabel(apiType)}</span>
                         ${cfg.api_key_set ? '<span class="settings-chip settings-chip--success"><i class="ri-key-line"></i> 已配置Key</span>' : '<span class="settings-chip settings-chip--warning"><i class="ri-key-line"></i> 未配置Key</span>'}
                     </div>
                     <div class="settings-card-copy">
@@ -461,8 +478,8 @@ function renderConfigCard(cfg) {
             </div>
             <div class="settings-card-meta">
                 <span><i class="ri-cpu-line"></i> ${modelCount} 个模型</span>
-                <span><i class="ri-settings-3-line"></i> Temperature: ${cfg.temperature ?? 0.7}</span>
-                <span><i class="ri-file-text-line"></i> Max Tokens: ${cfg.max_tokens || 4096}</span>
+                <span><i class="ri-settings-3-line"></i> 温度参数：${cfg.temperature ?? 0.7}</span>
+                <span><i class="ri-file-text-line"></i> 最大输出长度：${cfg.max_tokens || 4096}</span>
             </div>
         </div>
     `;
@@ -553,7 +570,7 @@ function renderAgentSettingsView(agentTypes, agents) {
                 </h2>
 
                 <p class="settings-subtitle settings-subtitle--md">
-                    默认只显示会直接影响创作结果的核心AI Agent。开启高级模式后，可查看内部辅助 Agent 的配置入口。
+                    默认只显示会直接影响创作结果的核心 AI Agent。开启高级模式后，可查看内部辅助 Agent 的配置入口。
                 </p>
             </div>
 
@@ -564,7 +581,7 @@ function renderAgentSettingsView(agentTypes, agents) {
                 </div>
                 <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); cursor: pointer; user-select: none;">
                     <input id="agent-advanced-toggle" type="checkbox" ${agentSettingsShowAdvanced ? 'checked' : ''} style="accent-color: var(--accent-color);">
-                    <span style="font-size: 13px;">显示高级 Agent</span>
+                    <span style="font-size: 13px;">显示高级Agent</span>
                 </label>
             </div>
 
@@ -584,7 +601,7 @@ function renderAgentSettingsView(agentTypes, agents) {
                                 <div>
                                     <h3 class="settings-card-title" style="margin-bottom: 4px;">${safeText(agent.name)}</h3>
                                     <p class="settings-card-copy">${safeText(agent.desc)}</p>
-                                    ${config.visibility === 'advanced' ? '<div style="font-size: 11px; color: #a78bfa; margin-top: 4px;">🛠 高级 Agent</div>' : ''}
+                                    ${config.visibility === 'advanced' ? '<div style="font-size: 11px; color: #a78bfa; margin-top: 4px;">🛠 高级Agent</div>' : ''}
                                 </div>
                                 <label class="settings-checkbox-label" style="margin-left: auto;">
                                     <input type="checkbox" class="agent-override-toggle settings-checkbox" data-agent="${safeAttr(agent.id)}" ${isOverride ? 'checked' : ''}>
@@ -611,13 +628,22 @@ function renderAgentSettingsView(agentTypes, agents) {
                                     </select>
                                 </div>
                                 <div>
-                                    <label class="settings-label settings-label--sm">Temperature</label>
+                                    <label class="settings-label settings-label--sm">温度参数</label>
                                     <input type="number" class="agent-temperature settings-field settings-field--sm" data-agent="${safeAttr(agent.id)}" value="${config.temperature !== undefined && config.temperature !== null ? config.temperature : ''}" placeholder="0.7" min="0" max="2" step="0.1">
                                 </div>
                                 <div>
-                                    <label class="settings-label settings-label--sm">Max Tokens</label>
+                                    <label class="settings-label settings-label--sm">最大输出长度</label>
                                     <input type="number" class="agent-max-tokens settings-field settings-field--sm" data-agent="${safeAttr(agent.id)}" value="${config.max_tokens !== undefined && config.max_tokens !== null ? config.max_tokens : ''}" placeholder="4096" min="100" max="128000">
                                 </div>
+                                <div class="settings-row settings-row--center settings-row--wrap" style="grid-column: 1 / -1; margin-top: 2px;">
+                                    <button type="button" class="agent-test-config settings-button settings-button--sm" data-agent="${safeAttr(agent.id)}">
+                                        <i class="ri-wifi-line"></i> 测试连接
+                                    </button>
+                                    <span class="agent-test-status settings-status-text" data-agent="${safeAttr(agent.id)}">
+                                        测试当前Agent选中的API配置和模型
+                                    </span>
+                                </div>
+                                <div class="agent-test-result settings-inline-panel" data-agent="${safeAttr(agent.id)}" style="grid-column: 1 / -1; display: none;"></div>
                             </div>
                         </div>
                     `;
@@ -661,11 +687,17 @@ async function loadKnowledgeBaseSettings() {
     content.innerHTML = renderSettingsLoadingState();
 
     try {
-        const { config, stats } = await fetchKnowledgeBaseSettingsData();
+        const { config, stats, chapterSummaryConfig } = await fetchKnowledgeBaseSettingsData();
         const hasApiKey = config.siliconflow_api_key && config.siliconflow_api_key.length > 10;
         const kbStatusClass = hasApiKey ? 'settings-section-panel--accent' : 'settings-section-panel--danger';
         const kbBadgeClass = hasApiKey ? 'settings-badge--success' : 'settings-badge--danger';
         const kbIconColor = hasApiKey ? '#10b981' : '#ef4444';
+        const autoSummaryEnabled = Boolean(chapterSummaryConfig?.auto_summary_enabled);
+        const hasActiveProject = Boolean(
+            typeof getActiveProjectId === 'function'
+                ? getActiveProjectId()
+                : (window.store && window.store.currentProjectId)
+        );
 
         content.innerHTML = `
             <div class="settings-page">
@@ -693,8 +725,8 @@ async function loadKnowledgeBaseSettings() {
                         </button>
                     </div>
                     <p class="settings-note">
-                        使用 <a href="https://cloud.siliconflow.cn/" target="_blank">硅基流动</a> 提供的向量化API（免费额度充足）。
-                        如无账号请先注册获取API Key。
+                        使用 <a href="https://cloud.siliconflow.cn/" target="_blank">硅基流动</a> 提供的向量化接口（免费额度充足）。
+                        如无账号请先注册获取接口密钥。
                     </p>
                     <div class="settings-stack" style="margin-top: 16px;">
                         <div class="settings-grid settings-grid-wide-narrow">
@@ -717,7 +749,7 @@ async function loadKnowledgeBaseSettings() {
                                 ${hasApiKey ? '<span class="settings-chip settings-chip--success" style="margin-left: 8px;">✓ 已保存</span>' : ''}
                             </label>
                             <div class="settings-input-action">
-                                <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入硅基流动API Key (sk-...)'}" class="settings-field settings-field--with-action">
+                                <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入硅基流动API Key（sk-...）'}" class="settings-field settings-field--with-action">
                                 <button id="toggle-kb-key" class="settings-button settings-button--ghost" type="button">
                                     <i class="ri-eye-line"></i>
                                 </button>
@@ -733,6 +765,25 @@ async function loadKnowledgeBaseSettings() {
                         </div>
                     </div>
                     <div id="embedding-test-result" style="margin-top: 16px; display: none;"></div>
+                </div>
+
+                <div class="setting-section settings-section-panel settings-section-panel--spacious">
+                    <div class="settings-section-header">
+                        <h3 class="settings-section-title">
+                            <i class="ri-article-line" style="color: #8b5cf6;"></i>
+                            章节摘要自动化
+                            <span class="settings-badge ${autoSummaryEnabled ? 'settings-badge--success' : 'settings-badge--muted'}" id="cs-status-badge" style="margin-left: 8px;">${autoSummaryEnabled ? '已启用' : '未启用'}</span>
+                        </h3>
+                    </div>
+                    <p class="settings-note">
+                        自动生成的章节摘要会进入资料库的「正文摘要」，后续写作和检索都可以复用。
+                    </p>
+                    <div class="settings-toggle-row" style="margin-top: 12px;">
+                        <label class="settings-checkbox-label" style="${hasActiveProject ? '' : 'opacity: 0.6;'}">
+                            <input type="checkbox" id="cs-auto-summary-toggle" class="settings-checkbox" ${autoSummaryEnabled ? 'checked' : ''} ${hasActiveProject ? '' : 'disabled'}>
+                            <span class="settings-status-text">${hasActiveProject ? (autoSummaryEnabled ? '已启用' : '未启用') : '请先选择项目后再配置'}</span>
+                        </label>
+                    </div>
                 </div>
 
                 <div class="setting-section settings-section-panel settings-section-panel--spacious">
@@ -958,67 +1009,7 @@ function renderSkillsSettingsView(skills) {
 }
 
 async function loadWritingSettings() {
-    const root = ensureSettingsContentRoot();
-    root.innerHTML = '<div class="settings-loading">加载中...</div>';
-
-    let autoSummaryEnabled = false;
-    try {
-        const resp = await apiCall('/api/chapter-summary-config');
-        autoSummaryEnabled = resp.auto_summary_enabled || false;
-    } catch (_) {
-        // 默认关闭
-    }
-
-    root.innerHTML = `
-        <div class="settings-section">
-            <h2 class="settings-title"><i class="ri-quill-pen-line"></i> 写作配置</h2>
-            <p class="settings-subtitle">控制章节创作时的自动行为</p>
-
-            <div class="settings-card">
-                <div class="settings-card-header">
-                    <div class="settings-card-title-group">
-                        <span class="settings-card-title">自动生成章节摘要</span>
-                        <span class="settings-badge ${autoSummaryEnabled ? 'settings-badge--success' : 'settings-badge--muted'}" id="cs-status-badge">${autoSummaryEnabled ? '已启用' : '未启用'}</span>
-                    </div>
-                </div>
-                <div class="settings-card-body">
-                    <p class="settings-desc">章节写完后自动调用 LLM 生成结构化摘要（关键事件、出场角色、结尾钩子等），保存到资料库的「正文摘要」分类中。</p>
-                    <div class="settings-toggle-row">
-                        <label class="settings-checkbox-label">
-                            <input type="checkbox" id="cs-auto-summary-toggle" class="settings-checkbox" ${autoSummaryEnabled ? 'checked' : ''}>
-                            <span class="settings-status-text">${autoSummaryEnabled ? '已启用' : '未启用'}</span>
-                        </label>
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
-
-    // 绑定 toggle 切换事件
-    const toggle = document.getElementById('cs-auto-summary-toggle');
-    const badge = document.getElementById('cs-status-badge');
-    if (toggle) {
-        toggle.addEventListener('change', async () => {
-            const enabled = toggle.checked;
-            try {
-                await apiCall('/api/chapter-summary-config', 'POST', {
-                    auto_summary_enabled: enabled
-                });
-                if (badge) {
-                    badge.textContent = enabled ? '已启用' : '未启用';
-                    badge.className = 'settings-badge ' + (enabled ? 'settings-badge--success' : 'settings-badge--muted');
-                }
-                const label = toggle.closest('.settings-checkbox-label');
-                if (label) {
-                    const statusText = label.querySelector('.settings-status-text');
-                    if (statusText) statusText.textContent = enabled ? '已启用' : '未启用';
-                }
-            } catch (e) {
-                console.error('Failed to save auto summary setting:', e);
-                toggle.checked = !enabled;
-            }
-        });
-    }
+    return loadKnowledgeBaseSettings();
 }
 
 window.loadWritingSettings = loadWritingSettings;

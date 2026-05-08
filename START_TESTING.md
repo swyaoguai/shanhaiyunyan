@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-✅ **打包完成** - v1.1.0
+✅ **打包完成** - v1.0
 ✅ **文档完成** - 迁移指南、API 文档、测试清单
 ✅ **代码已推送** - GitHub 仓库已更新
 
@@ -10,8 +10,8 @@
 
 ```
 C:\Users\wen\Desktop\AGENT\dist\
-├── NovelAgent_v1.1.0_Portable.zip  ← 这是您要测试的文件
-└── NovelAgent_v1.1.0_Portable/     ← 或直接测试这个目录
+├── 山海·云烟_v1.0_Portable.zip  ← 这是您要测试的文件
+└── 山海·云烟_v1.0_Portable/     ← 或直接测试这个目录
 ```
 
 ## 🚀 3 步快速开始
@@ -19,7 +19,7 @@ C:\Users\wen\Desktop\AGENT\dist\
 ### 步骤 1: 解压到桌面 (30 秒)
 
 ```
-1. 找到文件: C:\Users\wen\Desktop\AGENT\dist\NovelAgent_v1.1.0_Portable.zip
+1. 找到文件: C:\Users\wen\Desktop\AGENT\dist\山海·云烟_v1.0_Portable.zip
 2. 右键 → 解压到 → 桌面
 3. 进入解压后的文件夹
 ```
@@ -40,7 +40,7 @@ C:\Users\wen\Desktop\AGENT\dist\
 ### 步骤 3: 启动测试 (10 秒)
 
 ```
-1. 双击 "启动文思Agent.bat"
+1. 双击 "启动山海·云烟.bat"
 2. 观察控制台窗口
 3. 等待浏览器自动打开
 ```
@@ -51,7 +51,7 @@ C:\Users\wen\Desktop\AGENT\dist\
 
 ```
 ============================================================
-Novel Agent System v1.1.0
+山海·云烟 v1.0
 ============================================================
 Python: 3.11.9
 Port: 5656
@@ -141,8 +141,8 @@ http://localhost:5656
 - [ ] 设置页面正常
 - [ ] 数据持久化正常
 
-### 新功能测试 (v1.1.0)
-- [ ] 启动时显示版本号 v1.1.0
+### 新功能测试 (v1.0)
+- [ ] 启动时显示版本号 v1.0
 - [ ] 配置验证器显示信息
 - [ ] 端口默认为 5656
 - [ ] 所有页面正常加载
@@ -158,10 +158,9 @@ http://localhost:5656
 
 如需更详细的测试，请查看:
 
-- **快速测试指南**: `docs/v1.1.0-quick-test-guide.md`
-- **完整测试清单**: `docs/v1.1.0-testing-checklist.md` (30 个测试用例)
+- **完整使用说明**: `docs/current/使用说明.md`
+- **API 文档**: `docs/current/API.md`
 - **迁移指南**: `MIGRATION_GUIDE.md`
-- **API 文档**: `docs/API.md`
 
 ## 🎉 测试完成后
 

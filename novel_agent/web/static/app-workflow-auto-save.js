@@ -65,7 +65,7 @@ function mapWorkflowFileKindToProjectDataKey(fileKind) {
     const mapping = {
         worldbuilding: 'worldbuilding',
         outline: 'outline',
-        chapter: 'outline',
+        chapter: 'chapters',
         characters: 'characters',
         items: 'items',
         eventlines: 'eventlines',
@@ -345,13 +345,13 @@ async function autoSaveChapter(file, sessionId) {
     console.log('[AutoSave] 处理章节文件', file);
 
     try {
-        const serverData = await apiCall('/api/project-data/outline', 'GET');
+        const serverData = await apiCall('/api/project-data/chapters', 'GET');
         if (Array.isArray(serverData?.data) && serverData.data.length > 0) {
-            const existingOutline = serverData.data;
+            const existingChapters = serverData.data;
             const previewContent = await fetchWorkflowFileContent(file.path, sessionId);
             const chapterInfo = previewContent ? extractChapterInfo(file, previewContent) : null;
-            if (!chapterInfo || (existingOutline[chapterInfo.index || 0] && String(existingOutline[chapterInfo.index || 0].content || '').trim())) {
-                store.projectData.outline = existingOutline;
+            if (!chapterInfo || (existingChapters[chapterInfo.index || 0] && String(existingChapters[chapterInfo.index || 0].content || '').trim())) {
+                store.projectData.chapters = existingChapters;
                 return true;
             }
         }
@@ -370,20 +370,21 @@ async function autoSaveChapter(file, sessionId) {
     }
 
     // 查找或创建章节
-    if (!store.projectData.outline) {
-        store.projectData.outline = [];
+    if (!store.projectData.chapters) {
+        store.projectData.chapters = [];
     }
 
-    const chapterIndex = chapterInfo.index || store.projectData.outline.length;
+    const chapterIndex = chapterInfo.index || store.projectData.chapters.length;
     
-    if (chapterIndex < store.projectData.outline.length) {
+    if (chapterIndex < store.projectData.chapters.length) {
         // 更新现有章节
-        store.projectData.outline[chapterIndex].content = content;
-        store.projectData.outline[chapterIndex].updated_at = new Date().toISOString();
+        store.projectData.chapters[chapterIndex].content = content;
+        store.projectData.chapters[chapterIndex].updated_at = new Date().toISOString();
     } else {
         // 创建新章节
-        store.projectData.outline.push({
+        store.projectData.chapters.push({
             title: chapterInfo.title || `第${chapterIndex + 1}章`,
+            chapter_number: chapterIndex + 1,
             content: content,
             summary: chapterInfo.summary || '',
             created_at: new Date().toISOString()
@@ -391,8 +392,8 @@ async function autoSaveChapter(file, sessionId) {
     }
 
     // 保存到服务器
-    await apiCall('/api/project-data/outline', 'POST', {
-        data: store.projectData.outline
+    await apiCall('/api/project-data/chapters', 'POST', {
+        data: store.projectData.chapters
     });
 
     console.log('[AutoSave] 章节保存成功', chapterInfo.title);

@@ -5,6 +5,7 @@ Token统计模块测试
 import pytest
 import tempfile
 import os
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -176,6 +177,75 @@ class TestTokenStatsStore:
         
         assert summary["total_tokens"] == 300
         assert summary["call_count"] == 1
+
+    def test_filter_by_project(self, store):
+        """测试按项目筛选"""
+        store.record("Agent1", "gpt-4", project_id="project-a", tokens_in=100, tokens_out=200, success=True, method="test", duration=1.0)
+        store.record("Agent2", "gpt-4", project_id="project-b", tokens_in=50, tokens_out=100, success=True, method="test", duration=0.5)
+        store.record("Agent3", "gpt-3.5", project_id="project-a", tokens_in=10, tokens_out=20, success=True, method="test", duration=0.2)
+
+        summary = store.get_summary(days=7, project_id="project-a")
+        models = store.get_available_models(project_id="project-a")
+        model_stats = store.get_model_stats(days=7, project_id="project-a")
+
+        assert summary["total_tokens"] == 330
+        assert summary["call_count"] == 2
+        assert summary["filter_project_id"] == "project-a"
+        assert models == ["gpt-3.5", "gpt-4"]
+        assert {row["model"] for row in model_stats} == {"gpt-3.5", "gpt-4"}
+
+    def test_reset_project_only(self, store):
+        """测试只重置指定项目统计"""
+        store.record("Agent1", "gpt-4", project_id="project-a", tokens_in=100, tokens_out=200, success=True, method="test", duration=1.0)
+        store.record("Agent2", "gpt-4", project_id="project-b", tokens_in=50, tokens_out=100, success=True, method="test", duration=0.5)
+
+        deleted_count = store.reset_all(project_id="project-a")
+        project_a_summary = store.get_summary(days=7, project_id="project-a")
+        project_b_summary = store.get_summary(days=7, project_id="project-b")
+
+        assert deleted_count == 1
+        assert project_a_summary["call_count"] == 0
+        assert project_b_summary["total_tokens"] == 150
+
+    def test_legacy_schema_backfills_current_project(self, temp_db, monkeypatch):
+        """测试旧数据库增加项目字段时回填当前项目"""
+        conn = sqlite3.connect(temp_db)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    agent_name TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    tokens_in INTEGER DEFAULT 0,
+                    tokens_out INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
+                    success INTEGER DEFAULT 1,
+                    method TEXT DEFAULT '',
+                    duration REAL DEFAULT 0.0
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO token_usage
+                (timestamp, agent_name, model, tokens_in, tokens_out, total_tokens, success, method, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (datetime.now(), "Agent1", "gpt-4", 100, 200, 300, 1, "test", 1.0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        monkeypatch.setattr("novel_agent.utils.token_stats._get_current_project_id", lambda: "project-a")
+        migrated_store = TokenStatsStore(db_path=temp_db)
+        try:
+            assert migrated_store.get_summary(days=7, project_id="project-a")["total_tokens"] == 300
+            assert migrated_store.get_summary(days=7, project_id="project-b")["call_count"] == 0
+        finally:
+            migrated_store.close()
     
     def test_cleanup_old_records(self, store):
         """测试清理旧记录"""
@@ -222,6 +292,7 @@ class TestTokenUsageRecord:
         
         data = record.to_dict()
         
+        assert data["project_id"] == ""
         assert data["agent_name"] == "TestAgent"
         assert data["model"] == "gpt-4"
         assert data["tokens_in"] == 100

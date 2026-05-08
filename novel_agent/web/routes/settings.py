@@ -44,6 +44,72 @@ def _normalize_openai_base_url(api_base: str) -> str:
     return base_url
 
 
+def _normalize_anthropic_base_url(api_base: str) -> str:
+    """Return Anthropic root base URL; callers append /v1/* explicitly."""
+    base_url = str(api_base or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+
+    # Anthropic SDK/raw HTTP endpoints use root base + /v1/messages or /v1/models.
+    # Users and OpenAI-compatible UIs may save a /v1 suffix, so strip it to avoid
+    # accidental /v1/v1/* requests.
+    last_segment = base_url.rsplit("/", 1)[-1].lower()
+    if re.fullmatch(r"v\d+(\.\d+)?", last_segment):
+        base_url = base_url.rsplit("/", 1)[0].rstrip("/")
+    return base_url
+
+
+def _is_mimo_api_base(api_base: str) -> bool:
+    """Return True for Xiaomi MiMo API bases that document api-key auth."""
+    return "xiaomimimo.com" in str(api_base or "").lower()
+
+
+def _build_openai_compatible_headers(api_key: str, api_base: str) -> dict[str, str]:
+    """Build headers for OpenAI-compatible providers.
+
+    Xiaomi MiMo documents both api-key and Bearer auth, with api-key shown in
+    curl examples. Keep standard Bearer auth for other OpenAI-compatible APIs.
+    """
+    headers = {"Content-Type": "application/json"}
+    if _is_mimo_api_base(api_base):
+        headers["api-key"] = api_key
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _build_anthropic_headers(api_key: str, api_base: str) -> dict[str, str]:
+    """Build headers for Anthropic-compatible providers.
+
+    Official Anthropic uses x-api-key + anthropic-version. Xiaomi MiMo's
+    Anthropic-compatible endpoint documents api-key auth under /anthropic/v1.
+    """
+    headers = {"Content-Type": "application/json"}
+    if _is_mimo_api_base(api_base):
+        headers["api-key"] = api_key
+    else:
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+    return headers
+
+
+def _mimo_openai_models_url_from_anthropic_base(api_base: str) -> str:
+    """Map MiMo Anthropic-compatible base to the same host's OpenAI models endpoint.
+
+    MiMo documents Anthropic chat at /anthropic/v1/messages, but the model list
+    endpoint is exposed by the OpenAI-compatible /v1/models path on the same
+    host. This still returns real remote models; it is not a built-in fallback.
+    """
+    base_url = _normalize_anthropic_base_url(api_base)
+    if not base_url:
+        return ""
+
+    anthropic_suffix = "/anthropic"
+    if base_url.lower().endswith(anthropic_suffix):
+        base_url = base_url[: -len(anthropic_suffix)].rstrip("/")
+    return f"{base_url}/v1/models"
+
+
 def _extract_model_ids(payload: object) -> list[str]:
     models: list[str] = []
     if isinstance(payload, dict) and isinstance(payload.get("data"), list):
@@ -63,15 +129,21 @@ def _extract_model_ids(payload: object) -> list[str]:
     return models
 
 
-async def _fetch_remote_models(api_base: str, api_key: str) -> tuple[int, list[str], str]:
+async def _fetch_remote_models(api_base: str, api_key: str, api_type: str = "openai_chat") -> tuple[int, list[str], str]:
+    """获取远端模型列表，支持不同API类型"""
+    if api_type == "anthropic":
+        return await _fetch_anthropic_models(api_key, api_base)
+    else:
+        return await _fetch_openai_models(api_base, api_key)
+
+
+async def _fetch_openai_models(api_base: str, api_key: str) -> tuple[int, list[str], str]:
+    """获取 OpenAI 兼容 API 的模型列表"""
     base_url = _normalize_openai_base_url(api_base)
     async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
         response = await client.get(
             f"{base_url}/models",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
+            headers=_build_openai_compatible_headers(api_key, api_base)
         )
     body_preview = (response.text or "")[:200]
     if response.status_code != 200:
@@ -81,6 +153,52 @@ async def _fetch_remote_models(api_base: str, api_key: str) -> tuple[int, list[s
     except Exception:
         return response.status_code, [], body_preview
     return response.status_code, _extract_model_ids(payload), body_preview
+
+
+async def _fetch_anthropic_models(api_key: str, api_base: str = "") -> tuple[int, list[str], str]:
+    """获取 Anthropic 真实模型列表。
+
+    按 Anthropic 官方示例请求 GET /v1/models。该函数不使用默认 API Base，
+    也不返回内置 Claude 列表；只有远端真实返回模型时才视为成功。
+    """
+    base_url = _normalize_anthropic_base_url(api_base)
+    if not base_url:
+        return 0, [], "缺少 Anthropic API Base URL"
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+            response = await client.get(
+                f"{base_url}/v1/models",
+                headers=_build_anthropic_headers(api_key, api_base),
+            )
+            if response.status_code == 404 and _is_mimo_api_base(api_base):
+                fallback_url = _mimo_openai_models_url_from_anthropic_base(api_base)
+                if fallback_url:
+                    logger.info(
+                        "MiMo Anthropic models endpoint returned 404; trying real OpenAI-compatible models endpoint: %s",
+                        fallback_url,
+                    )
+                    response = await client.get(
+                        fallback_url,
+                        headers=_build_openai_compatible_headers(api_key, api_base),
+                    )
+    except Exception as e:
+        return 0, [], str(e)
+
+    body_preview = (response.text or "")[:200]
+    if response.status_code in (401, 403):
+        return response.status_code, [], "Anthropic API Key 无效"
+    if response.status_code != 200:
+        return response.status_code, [], body_preview
+
+    try:
+        models = _extract_model_ids(response.json())
+    except Exception:
+        return response.status_code, [], body_preview
+
+    if not models:
+        return response.status_code, [], body_preview or "Anthropic /v1/models 未返回任何模型"
+    return response.status_code, models, body_preview
 
 
 TEST_CONNECTION_ERROR_RULES = {
@@ -330,6 +448,7 @@ async def fetch_models(request: FetchModelsRequest):
     try:
         api_base = (request.api_base or "").strip()
         api_key = (request.api_key or "").strip()
+        api_type = (getattr(request, 'api_type', '') or "openai_chat").strip()
         config_id = getattr(request, 'config_id', None)
         
         # 优先使用config_id查找配置
@@ -342,6 +461,8 @@ async def fetch_models(request: FetchModelsRequest):
                         api_base = (cfg.api_base or "").strip()
                     if not api_key:
                         api_key = (cfg.api_key or "").strip()
+                    if api_type == "openai_chat" and getattr(cfg, 'api_type', ''):
+                        api_type = cfg.api_type
                     logger.info(f"Using saved config {config_id} for fetching models")
                     break
         
@@ -371,16 +492,29 @@ async def fetch_models(request: FetchModelsRequest):
                 "models": []
             })
         
+        # Anthropic 模型列表
+        if api_type == "anthropic":
+            status_code, models, body_preview = await _fetch_anthropic_models(api_key, api_base)
+            if status_code == 200 and models:
+                return JSONResponse({
+                    "success": True,
+                    "models": models
+                })
+            else:
+                return JSONResponse({
+                    "success": False,
+                    "error": body_preview or "无法获取 Anthropic 真实模型列表",
+                    "models": []
+                })
+        
+        # OpenAI 兼容 API
         base_url = _normalize_openai_base_url(api_base)
         models_url = f"{base_url}/models"
         
         async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_SHORT) as client:
             response = await client.get(
                 models_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
+                headers=_build_openai_compatible_headers(api_key, api_base)
             )
             
             if response.status_code == 200:
@@ -447,6 +581,7 @@ async def test_connection(request: TestConnectionRequest):
         api_key = (request.api_key or "").strip()
         test_model = (request.model or "").strip()
         config_id = (request.config_id or "").strip()
+        api_type = (getattr(request, 'api_type', '') or "openai_chat").strip()
 
         if config_id:
             from ...agent_config import get_config_manager
@@ -458,7 +593,7 @@ async def test_connection(request: TestConnectionRequest):
             if not selected_config:
                 return JSONResponse({
                     "success": False,
-                    "error": f"Config ID not found or changed: {config_id}. Please refresh and retry."
+                    "error": f"Config ID not found: {config_id}. Please refresh the settings page."
                 })
             if not api_base:
                 api_base = (selected_config.api_base or "").strip()
@@ -466,6 +601,8 @@ async def test_connection(request: TestConnectionRequest):
                 api_key = (selected_config.api_key or "").strip()
             if not test_model and selected_config.models:
                 test_model = str(selected_config.models[0]).strip()
+            if api_type == "openai_chat" and getattr(selected_config, 'api_type', ''):
+                api_type = selected_config.api_type
 
         #  config_id  api_base  key
         if not api_key and api_base and not config_id:
@@ -478,6 +615,8 @@ async def test_connection(request: TestConnectionRequest):
                     api_key = cfg_key
                     if not test_model and cfg.models:
                         test_model = str(cfg.models[0]).strip()
+                    if api_type == "openai_chat" and getattr(cfg, 'api_type', ''):
+                        api_type = cfg.api_type
                     break
 
         if not api_base:
@@ -489,77 +628,15 @@ async def test_connection(request: TestConnectionRequest):
         if not api_key:
             return JSONResponse({
                 "success": False,
-                "error": "Missing API key. Save the config first, then test again."
+                "error": "Missing API key. Save the config before testing."
             })
 
-        base_url = api_base.rstrip("/")
-        #  /v1 /v4 
-        last_segment = base_url.rsplit("/", 1)[-1].lower() if base_url else ""
-        if not re.fullmatch(r"v\d+(\.\d+)?", last_segment):
-            base_url = base_url + "/v1" if not base_url.endswith("/") else base_url + "v1"
+        # Anthropic 测试连接
+        if api_type == "anthropic":
+            return await _test_anthropic_connection(api_key, test_model, api_base)
 
-        if not test_model:
-            test_model = "gpt-3.5-turbo"
-
-        start_time = time.time()
-
-        async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": test_model,
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "max_tokens": 5
-                }
-            )
-
-            response_time = int((time.time() - start_time) * 1000)
-            error_text = response.text[:400] if response.text else ""
-            error_detail = ""
-            try:
-                payload = response.json()
-                if isinstance(payload, dict):
-                    candidate = payload.get("error", payload.get("message", payload.get("detail", "")))
-                    if isinstance(candidate, dict):
-                        error_detail = str(
-                            candidate.get("message")
-                            or candidate.get("detail")
-                            or candidate.get("code")
-                            or candidate
-                        )
-                    else:
-                        error_detail = str(candidate or "")
-            except Exception:
-                error_detail = ""
-            if not error_detail:
-                error_detail = error_text
-            error_detail = (error_detail or "").strip()[:200]
-
-            if response.status_code == 200:
-                return _build_test_connection_response(
-                    success=True,
-                    title="可以正常用",
-                    solution="这套配置已经通过测试，可以直接拿来创作。",
-                    error="连通，模型也能正常回话。",
-                    model_tested=test_model,
-                    response_time=response_time,
-                    status_code=response.status_code,
-                )
-            mapped = _map_test_connection_error(response.status_code, error_detail, test_model)
-            return _build_test_connection_response(
-                success=False,
-                error_code=mapped["error_code"],
-                title=mapped["title"],
-                solution=mapped["solution"],
-                error=f"{mapped['title']}。{mapped['solution']}",
-                detail=error_detail or error_text[:200],
-                status_code=response.status_code,
-                model_tested=test_model,
-            )
+        # OpenAI 兼容 API 测试连接
+        return await _test_openai_connection(api_base, api_key, test_model)
 
     except httpx.TimeoutException:
         return _build_test_connection_response(
@@ -585,6 +662,175 @@ async def test_connection(request: TestConnectionRequest):
             title="测试失败",
             solution="根据详细报错继续排查 API 地址、模型、权限或网络。",
             error="测试没跑通，先看看详细报错。",
+            detail=str(e),
+        )
+
+
+async def _test_openai_connection(api_base: str, api_key: str, test_model: str) -> JSONResponse:
+    """测试 OpenAI 兼容 API 连接"""
+    base_url = api_base.rstrip("/")
+    last_segment = base_url.rsplit("/", 1)[-1].lower() if base_url else ""
+    if not re.fullmatch(r"v\d+(\.\d+)?", last_segment):
+        base_url = base_url + "/v1" if not base_url.endswith("/") else base_url + "v1"
+
+    if not test_model:
+        test_model = "gpt-3.5-turbo"
+
+    start_time = time.time()
+
+    async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers=_build_openai_compatible_headers(api_key, api_base),
+            json={
+                "model": test_model,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 5
+            }
+        )
+
+        response_time = int((time.time() - start_time) * 1000)
+        error_text = response.text[:400] if response.text else ""
+        error_detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                candidate = payload.get("error", payload.get("message", payload.get("detail", "")))
+                if isinstance(candidate, dict):
+                    error_detail = str(
+                        candidate.get("message")
+                        or candidate.get("detail")
+                        or candidate.get("code")
+                        or candidate
+                    )
+                else:
+                    error_detail = str(candidate or "")
+        except Exception:
+            error_detail = ""
+        if not error_detail:
+            error_detail = error_text
+        error_detail = (error_detail or "").strip()[:200]
+
+        if response.status_code == 200:
+            return _build_test_connection_response(
+                success=True,
+                title="可以正常用",
+                solution="这套配置已经通过测试，可以直接拿来创作。",
+                error="连通，模型也能正常回话。",
+                model_tested=test_model,
+                response_time=response_time,
+                status_code=response.status_code,
+            )
+        mapped = _map_test_connection_error(response.status_code, error_detail, test_model)
+        return _build_test_connection_response(
+            success=False,
+            error_code=mapped["error_code"],
+            title=mapped["title"],
+            solution=mapped["solution"],
+            error=f"{mapped['title']}。{mapped['solution']}",
+            detail=error_detail or error_text[:200],
+            status_code=response.status_code,
+            model_tested=test_model,
+        )
+
+
+async def _test_anthropic_connection(api_key: str, test_model: str, api_base: str = "") -> JSONResponse:
+    """测试 Anthropic API 连接"""
+    if not test_model:
+        test_model = "claude-3-5-haiku-20241022"
+
+    base_url = _normalize_anthropic_base_url(api_base)
+    messages_url = f"{base_url}/v1/messages"
+
+    start_time = time.time()
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+            response = await client.post(
+                messages_url,
+                headers=_build_anthropic_headers(api_key, api_base),
+                json={
+                    "model": test_model,
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                }
+            )
+
+            response_time = int((time.time() - start_time) * 1000)
+            error_text = response.text[:400] if response.text else ""
+            error_detail = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    error_obj = payload.get("error", {})
+                    if isinstance(error_obj, dict):
+                        error_detail = error_obj.get("message", "")
+                    else:
+                        error_detail = str(error_obj)
+            except Exception:
+                error_detail = ""
+            if not error_detail:
+                error_detail = error_text
+            error_detail = (error_detail or "").strip()[:200]
+
+            if response.status_code == 200:
+                return _build_test_connection_response(
+                    success=True,
+                    title="Anthropic 连接正常",
+                    solution="Anthropic API 已通过测试，可以直接拿来创作。",
+                    error="连通，Claude 模型能正常回话。",
+                    model_tested=test_model,
+                    response_time=response_time,
+                    status_code=response.status_code,
+                )
+
+            # Anthropic 特定错误映射
+            anthropic_error_map = {
+                401: ("invalid_api_key", "Anthropic API Key 无效", "检查 API Key 是否正确，是否已过期。"),
+                403: ("api_key_disabled", "Anthropic API Key 被禁用", "联系 Anthropic 管理员或检查账户状态。"),
+                429: ("rate_limit", "Anthropic API 请求频率超限", "降低请求频率，稍等一会儿再试。"),
+                529: ("overloaded", "Anthropic API 过载", "Anthropic 服务暂时过载，请稍后重试。"),
+                404: ("model_not_found", f"模型 {test_model} 不可用", "检查模型名称是否正确。"),
+            }
+
+            if response.status_code in anthropic_error_map:
+                error_code, title, solution = anthropic_error_map[response.status_code]
+                return _build_test_connection_response(
+                    success=False,
+                    error_code=error_code,
+                    title=title,
+                    solution=solution,
+                    error=f"{title}。{solution}",
+                    detail=error_detail,
+                    model_tested=test_model,
+                    status_code=response.status_code,
+                )
+
+            return _build_test_connection_response(
+                success=False,
+                error_code="anthropic_error",
+                title=f"Anthropic 返回 {response.status_code}",
+                solution="查看错误详情，检查 API Key 和模型配置。",
+                error=f"Anthropic API 返回了 {response.status_code}",
+                detail=error_detail,
+                model_tested=test_model,
+                status_code=response.status_code,
+            )
+
+    except httpx.TimeoutException:
+        return _build_test_connection_response(
+            success=False,
+            error_code="timeout",
+            title="Anthropic 连接超时",
+            solution="检查网络连接，Anthropic API 可能需要代理访问。",
+            error="连接 Anthropic API 超时。",
+        )
+    except httpx.ConnectError as e:
+        return _build_test_connection_response(
+            success=False,
+            error_code="connect_error",
+            title="无法连接 Anthropic",
+            solution="检查网络连接，可能需要配置代理才能访问 Anthropic API。",
             detail=str(e),
         )
 
@@ -704,7 +950,8 @@ async def add_api_config(request: AddAPIConfigRequest):
         api_key=request.api_key,
         models=request.models,
         temperature=request.temperature,
-        max_tokens=request.max_tokens
+        max_tokens=request.max_tokens,
+        api_type=getattr(request, 'api_type', 'openai_chat') or 'openai_chat'
     )
     
     return JSONResponse({
@@ -733,14 +980,20 @@ async def update_api_config_by_id(config_id: str, request: UpdateAPIConfigReques
         updates["temperature"] = request.temperature
     if request.max_tokens is not None:
         updates["max_tokens"] = request.max_tokens
+    if getattr(request, 'api_type', None) is not None:
+        updates["api_type"] = request.api_type
     
+    old_active_model = manager.get_global_config().model
     cfg = manager.update_api_config(config_id, **updates)
     
     if cfg:
+        active_model = manager.get_global_config().model
         return JSONResponse({
             "success": True,
-            "message": "API",
-            "config": cfg.to_dict()
+            "message": "API 配置已更新",
+            "config": cfg.to_dict(),
+            "active_model": active_model,
+            "active_model_changed": active_model != old_active_model,
         })
     else:
         raise HTTPException(status_code=404, detail="")
@@ -781,8 +1034,9 @@ async def set_active_api_config(request: SetActiveConfigRequest):
             "error": "所选 API 配置缺少 api_base 或 api_key，无法激活。",
         }, status_code=400)
 
+    api_type = getattr(target_config, 'api_type', 'openai_chat') or 'openai_chat'
     try:
-        status_code, remote_models, body_preview = await _fetch_remote_models(api_base, api_key)
+        status_code, remote_models, body_preview = await _fetch_remote_models(api_base, api_key, api_type)
     except httpx.TimeoutException:
         return JSONResponse({
             "success": False,
@@ -797,7 +1051,7 @@ async def set_active_api_config(request: SetActiveConfigRequest):
     if status_code != 200:
         return JSONResponse({
             "success": False,
-            "error": f"目标 API /models 返回 {status_code}，无法激活该配置。",
+            "error": f"目标 API 模型验证返回 {status_code}，无法激活该配置。",
             "body_preview": body_preview,
         }, status_code=400)
 
@@ -822,10 +1076,12 @@ async def set_active_api_config(request: SetActiveConfigRequest):
         }, status_code=400)
 
     if manager.set_active_config(request.config_id, chosen_model):
+        refresh_runtime_after_config_reload()
         return JSONResponse({
             "success": True,
-            "message": "",
+            "message": "当前模型配置已应用",
             "active_model": chosen_model,
+            "active_config_id": request.config_id,
             "remote_model_count": len(remote_models),
         })
     raise HTTPException(status_code=404, detail="")

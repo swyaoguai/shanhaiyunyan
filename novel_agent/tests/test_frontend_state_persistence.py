@@ -178,7 +178,7 @@ def test_copilot_workflow_sync_module_is_loaded_and_used_in_both_chat_paths():
     assert "function reloadProjectDataAndRefreshView" in auto_save
     assert "function dedupeWorkflowFiles" in auto_save
     assert "await apiCall(`/api/project-data/${dataKey}`, 'GET')" in auto_save
-    assert "chapter: 'outline'" in auto_save
+    assert "chapter: 'chapters'" in auto_save
 
 
 def test_settings_styles_are_consolidated_into_style_sheet():

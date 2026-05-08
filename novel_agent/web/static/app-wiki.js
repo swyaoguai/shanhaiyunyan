@@ -195,11 +195,10 @@
         
         content.innerHTML = `
             <div style="max-width: 800px;">
-                <div style="margin-bottom: 16px;">
-                    <button onclick="WikiModule.loadPages()" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color, #444); 
-                        background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
-                        ← 返回列表
+                <div class="app-back-row">
+                    <button onclick="WikiModule.loadPages()" type="button" class="app-back-button">
+                        <i class="ri-arrow-left-line"></i>
+                        <span>返回列表</span>
                     </button>
                 </div>
                 
@@ -320,11 +319,10 @@
             // 简单的图谱可视化（文本形式）
             content.innerHTML = `
                 <div style="padding: 20px;">
-                    <div style="margin-bottom: 16px;">
-                        <button onclick="WikiModule.loadPages()" 
-                            style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color, #444); 
-                            background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
-                            ← 返回列表
+                    <div class="app-back-row">
+                        <button onclick="WikiModule.loadPages()" type="button" class="app-back-button">
+                            <i class="ri-arrow-left-line"></i>
+                            <span>返回列表</span>
                         </button>
                     </div>
                     
@@ -387,11 +385,10 @@
             const d = data.data;
             content.innerHTML = `
                 <div style="padding: 20px;">
-                    <div style="margin-bottom: 16px;">
-                        <button onclick="WikiModule.loadPages()" 
-                            style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color, #444); 
-                            background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
-                            ← 返回列表
+                    <div class="app-back-row">
+                        <button onclick="WikiModule.loadPages()" type="button" class="app-back-button">
+                            <i class="ri-arrow-left-line"></i>
+                            <span>返回列表</span>
                         </button>
                     </div>
                     
@@ -452,11 +449,10 @@
         
         content.innerHTML = `
             <div style="max-width: 600px; padding: 20px;">
-                <div style="margin-bottom: 16px;">
-                    <button onclick="WikiModule.loadPages()" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color, #444); 
-                        background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
-                        ← 返回列表
+                <div class="app-back-row">
+                    <button onclick="WikiModule.loadPages()" type="button" class="app-back-button">
+                        <i class="ri-arrow-left-line"></i>
+                        <span>返回列表</span>
                     </button>
                 </div>
                 

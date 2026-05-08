@@ -4,6 +4,11 @@ LLM客户端模块
 封装OpenAI API调用，支持重试、指标收集和错误处理。
 从BaseAgent中提取出来，实现单一职责。
 
+支持三种API端点：
+- openai_chat: OpenAI Chat Completions API (/v1/chat/completions)
+- openai_responses: OpenAI Responses API (/v1/responses)
+- anthropic: Anthropic Messages API (/v1/messages)
+
 模块职责说明：提供统一的LLM调用接口，包含重试、指标收集和错误处理。
 """
 
@@ -11,7 +16,9 @@ import time
 import asyncio
 import logging
 import random
-from typing import Optional, Dict, Any, List, Union, AsyncGenerator
+import json
+import re
+from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Tuple
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
@@ -27,6 +34,12 @@ from ..utils.token_stats import record_token_usage
 
 
 logger = logging.getLogger(__name__)
+
+# 支持的API类型常量
+API_TYPE_OPENAI_CHAT = "openai_chat"
+API_TYPE_OPENAI_RESPONSES = "openai_responses"
+API_TYPE_ANTHROPIC = "anthropic"
+VALID_API_TYPES = {API_TYPE_OPENAI_CHAT, API_TYPE_OPENAI_RESPONSES, API_TYPE_ANTHROPIC}
 
 
 def _is_retryable_error(error: Exception) -> bool:
@@ -59,11 +72,12 @@ class LLMClient:
     """
     LLM客户端
 
-    封装OpenAI兼容API的调用，提供：
+    封装多种LLM API的调用，提供：
     - 自动重试机制
     - 指标收集
     - 错误处理和诊断
     - 流式输出支持
+    - 支持 OpenAI Chat Completions / OpenAI Responses / Anthropic Messages 三种API
     """
 
     def __init__(
@@ -84,14 +98,26 @@ class LLMClient:
         self.retry_config = retry_config or RetryConfig()
         self.metrics_namespace = metrics_namespace
 
-        # 创建OpenAI客户端
+        # 根据 api_type 创建对应的客户端
+        self._api_type = self._resolve_api_type()
         self._client = self._create_client()
 
         # 指标收集器
         self.metrics = get_metrics_collector()
 
-    def _create_client(self) -> AsyncOpenAI:
-        """创建OpenAI客户端"""
+    def _resolve_api_type(self) -> str:
+        """解析并验证 api_type"""
+        api_type = getattr(self.model_config, 'api_type', '') or API_TYPE_OPENAI_CHAT
+        if api_type not in VALID_API_TYPES:
+            logger.warning(
+                f"[LLMClient:{self.metrics_namespace}] Unknown api_type '{api_type}', "
+                f"falling back to '{API_TYPE_OPENAI_CHAT}'"
+            )
+            api_type = API_TYPE_OPENAI_CHAT
+        return api_type
+
+    def _create_client(self):
+        """根据 api_type 创建对应的客户端"""
         api_key = self.model_config.api_key or config.llm.api_key
         api_base = self.model_config.api_base or config.llm.api_base
         llm_timeouts = get_llm_timeout_settings()
@@ -104,8 +130,9 @@ class LLMClient:
         )
 
         logger.info(
-            "[LLMClient:%s] Creating client: base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss",
+            "[LLMClient:%s] Creating client: api_type=%s, base_url=%s, timeout=connect:%ss/read:%ss/write:%ss/pool:%ss",
             self.metrics_namespace,
+            self._api_type,
             api_base,
             llm_timeouts["connect"],
             llm_timeouts["read"],
@@ -113,12 +140,58 @@ class LLMClient:
             llm_timeouts["pool"],
         )
 
-        return AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            timeout=timeout_config,
-            max_retries=0  # 禁用SDK内部重试
+        if self._api_type == API_TYPE_ANTHROPIC:
+            return self._create_anthropic_client(api_key, api_base, timeout_config)
+        else:
+            # OpenAI Chat 和 OpenAI Responses 都使用 AsyncOpenAI 客户端
+            kwargs = {
+                "api_key": api_key,
+                "base_url": api_base,
+                "timeout": timeout_config,
+                "max_retries": 0,  # 禁用SDK内部重试
+            }
+            if self._is_mimo_api_base(api_base):
+                kwargs["default_headers"] = {"api-key": api_key}
+            return AsyncOpenAI(**kwargs)
+
+    def _create_anthropic_client(self, api_key: str, api_base: str, timeout_config: httpx.Timeout):
+        """创建 Anthropic 客户端"""
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError:
+            raise ImportError(
+                "anthropic SDK is required for api_type='anthropic'. "
+                "Install it with: pip install anthropic>=0.45.0"
+            )
+
+        # Anthropic SDK 使用不同的超时格式
+        anthropic_timeout = httpx.Timeout(
+            connect=timeout_config.connect,
+            read=timeout_config.read,
+            write=timeout_config.write,
+            pool=timeout_config.pool,
         )
+
+        kwargs = {
+            "api_key": api_key,
+            "timeout": anthropic_timeout,
+            "max_retries": 0,  # 禁用SDK内部重试，使用我们自己的重试
+        }
+
+        # Anthropic SDK 的 base_url 是根地址，SDK 会自行追加 /v1/messages。
+        # 兼容用户在设置页按 OpenAI 习惯填写的 .../v1，避免变成 /v1/v1/messages。
+        normalized_base_url = self._normalize_anthropic_base_url(api_base)
+        if normalized_base_url:
+            kwargs["base_url"] = normalized_base_url
+        if self._is_mimo_api_base(api_base):
+            kwargs["default_headers"] = {"api-key": api_key}
+
+        return AsyncAnthropic(**kwargs)
+
+    @property
+    def api_type(self) -> str:
+        """获取当前API类型"""
+        return self._api_type
 
     @property
     def model_name(self) -> str:
@@ -138,8 +211,9 @@ class LLMClient:
     def update_config(self, model_config: AgentModelConfig) -> None:
         """更新配置并重建客户端"""
         self.model_config = model_config
+        self._api_type = self._resolve_api_type()
         self._client = self._create_client()
-        logger.info(f"[LLMClient:{self.metrics_namespace}] Config updated, model: {self.model_name}")
+        logger.info(f"[LLMClient:{self.metrics_namespace}] Config updated, model: {self.model_name}, api_type: {self._api_type}")
 
     async def call(
         self,
@@ -227,7 +301,27 @@ class LLMClient:
         system_prompt: Optional[str],
         stream: bool
     ) -> Union[str, AsyncGenerator[str, None]]:
-        """内部LLM调用实现"""
+        """内部LLM调用实现 - 根据 api_type 路由到不同的调用方式"""
+        if self._api_type == API_TYPE_ANTHROPIC:
+            return await self._call_anthropic(messages, temperature, max_tokens, system_prompt, stream)
+        elif self._api_type == API_TYPE_OPENAI_RESPONSES:
+            return await self._call_openai_responses(messages, temperature, max_tokens, system_prompt, stream)
+        else:
+            return await self._call_openai_chat(messages, temperature, max_tokens, system_prompt, stream)
+
+    # ============================================================
+    # OpenAI Chat Completions API
+    # ============================================================
+
+    async def _call_openai_chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        system_prompt: Optional[str],
+        stream: bool
+    ) -> Union[str, AsyncGenerator[str, None]]:
+        """OpenAI Chat Completions API 调用"""
         start_time = time.time()
 
         # 构建消息
@@ -251,14 +345,14 @@ class LLMClient:
         # 日志
         total_chars = sum(len(m.get("content", "")) for m in full_messages)
         logger.info(
-            f"[LLMClient:{self.metrics_namespace}] Calling LLM - "
+            f"[LLMClient:{self.metrics_namespace}] Calling OpenAI Chat - "
             f"Model: {params['model']}, Messages: {len(full_messages)}, "
             f"Chars: {total_chars}, MaxTokens: {params['max_tokens']}"
         )
 
         try:
             if stream:
-                return self._stream_response(params)
+                return self._stream_openai_chat(params)
             else:
                 response = await self._client.chat.completions.create(**params)
                 content = response.choices[0].message.content
@@ -294,12 +388,626 @@ class LLMClient:
                 raise Exception(user_msg) from e
             raise
 
-    async def _stream_response(self, params: dict) -> AsyncGenerator[str, None]:
-        """流式响应生成器"""
+    async def _stream_openai_chat(self, params: dict) -> AsyncGenerator[str, None]:
+        """OpenAI Chat 流式响应生成器"""
         response = await self._client.chat.completions.create(**params)
         async for chunk in response:
             if chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    # ============================================================
+    # OpenAI Responses API
+    # ============================================================
+
+    async def _call_openai_responses(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        system_prompt: Optional[str],
+        stream: bool
+    ) -> Union[str, AsyncGenerator[str, None]]:
+        """OpenAI Responses API 调用 (/v1/responses)"""
+        start_time = time.time()
+
+        # 构建 input（Responses API 使用 input 字段而非 messages）。
+        #
+        # 注意：Responses API 中 system prompt 更推荐使用顶层 instructions 字段，
+        # 而不是作为 input 数组中的 system 消息。部分 OpenAI 兼容中转虽然接受
+        # {"role": "system", "content": "..."}，但可能返回 HTTP 200 且 output=[]。
+        # 因此这里按所选 api_type 使用 Responses 官方更兼容的 typed content 结构。
+        input_items = self._build_responses_input_items(messages)
+
+        resolved_max_tokens = normalize_max_tokens(
+            max_tokens if max_tokens is not None else self.max_tokens,
+            source=f"LLMClient:{self.metrics_namespace}",
+        )
+
+        # Responses API 参数
+        params = {
+            "model": self.model_name,
+            "input": input_items,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_output_tokens": resolved_max_tokens,
+        }
+        if system_prompt:
+            params["instructions"] = system_prompt
+
+        total_chars = sum(len(item.get("content", "")) for item in input_items)
+        logger.info(
+            f"[LLMClient:{self.metrics_namespace}] Calling OpenAI Responses - "
+            f"Model: {params['model']}, Input: {len(input_items)}, "
+            f"Chars: {total_chars}, MaxOutputTokens: {params['max_output_tokens']}"
+        )
+
+        try:
+            if stream:
+                return self._stream_openai_responses(params)
+            else:
+                response = await self._client.responses.create(**params)
+
+                # 提取内容 - Responses API 的输出格式
+                content = self._extract_responses_content(response)
+                if not str(content or "").strip():
+                    logger.warning(
+                        "[LLMClient:%s] Responses API returned empty visible text. Response shape: %s",
+                        self.metrics_namespace,
+                        self._summarize_responses_shape(response),
+                    )
+                    content = await self._retry_openai_responses_with_string_input(
+                        params=params,
+                        messages=messages,
+                        system_prompt=system_prompt,
+                    )
+
+                # 提取token使用
+                usage = getattr(response, 'usage', None)
+                tokens_in = getattr(usage, 'input_tokens', 0) if usage else 0
+                tokens_out = getattr(usage, 'output_tokens', 0) if usage else 0
+
+                duration = time.time() - start_time
+                self._record_metrics(tokens_in, tokens_out, duration, True)
+
+                logger.info(
+                    f"[LLMClient:{self.metrics_namespace}] Response: "
+                    f"{len(content)} chars, tokens: {tokens_in}+{tokens_out}, "
+                    f"time: {duration:.2f}s"
+                )
+
+                return content
+
+        except Exception as e:
+            duration = time.time() - start_time
+            self._record_metrics(0, 0, duration, False, str(e))
+
+            user_msg = self._parse_error(str(e), params['model'])
+            logger.error(
+                f"[LLMClient:{self.metrics_namespace}] Responses call failed after {duration:.2f}s: {e}"
+            )
+
+            if user_msg:
+                raise Exception(user_msg) from e
+            raise
+
+    @staticmethod
+    def _build_responses_input_items(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """构建 Responses API 的 typed input，按 api_type 适配官方新接口。"""
+        input_items: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = str(msg.get("role", "user") or "user").strip() or "user"
+            content = msg.get("content", "")
+            if role == "system":
+                # system 内容会在调用方合并到 instructions；这里避免重复塞入 input。
+                continue
+            if role not in {"user", "assistant", "developer"}:
+                role = "user"
+            input_items.append({
+                "role": role,
+                "content": [
+                    {
+                        "type": "input_text" if role != "assistant" else "output_text",
+                        "text": str(content or ""),
+                    }
+                ],
+            })
+        if not input_items:
+            input_items.append({
+                "role": "user",
+                "content": [{"type": "input_text", "text": ""}],
+            })
+        return input_items
+
+    @staticmethod
+    def _build_responses_string_input(messages: List[Dict[str, str]], system_prompt: Optional[str]) -> str:
+        """为空输出兜底构建最保守的 Responses string input。"""
+        parts: List[str] = []
+        if system_prompt:
+            parts.append(f"系统指令：\n{system_prompt}")
+        for msg in messages:
+            role = str(msg.get("role", "user") or "user").strip() or "user"
+            content = str(msg.get("content", "") or "").strip()
+            if not content:
+                continue
+            role_label = "用户" if role == "user" else "助手" if role == "assistant" else "系统"
+            parts.append(f"{role_label}：\n{content}")
+        return "\n\n".join(parts).strip() or "Hello"
+
+    async def _retry_openai_responses_with_string_input(
+        self,
+        *,
+        params: Dict[str, Any],
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str],
+    ) -> str:
+        """Responses typed input 返回空文本时，使用 string input 进行一次兼容兜底。"""
+        fallback_params = dict(params)
+        fallback_params["input"] = self._build_responses_string_input(messages, system_prompt)
+        # string input 已包含系统指令，避免 instructions 被部分中转重复拼接。
+        fallback_params.pop("instructions", None)
+
+        logger.warning(
+            "[LLMClient:%s] Retrying Responses API with string input fallback",
+            self.metrics_namespace,
+        )
+        fallback_response = await self._client.responses.create(**fallback_params)
+        fallback_content = self._extract_responses_content(fallback_response)
+        if str(fallback_content or "").strip():
+            return fallback_content
+
+        logger.warning(
+            "[LLMClient:%s] Responses API string fallback also returned empty visible text. Response shape: %s",
+            self.metrics_namespace,
+            self._summarize_responses_shape(fallback_response),
+        )
+        raise ValueError(
+            "Responses API returned empty visible text for both typed input and string input fallback. "
+            "Please verify the selected api_type/model/provider supports /v1/responses."
+        )
+
+    def _extract_responses_content(self, response) -> str:
+        """从 Responses API 响应中尽量提取可见文本，兼容不同中转实现。"""
+        direct_text = getattr(response, 'output_text', None)
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text
+
+        parts = []
+
+        def append_text(value: Any) -> None:
+            if isinstance(value, str) and value:
+                parts.append(value)
+
+        output = getattr(response, 'output', None) or []
+        for item in output:
+            if isinstance(item, dict):
+                item_type = str(item.get('type') or '')
+                if item_type == 'message':
+                    for content_item in item.get('content') or []:
+                        if isinstance(content_item, dict):
+                            append_text(content_item.get('text') or content_item.get('content'))
+                append_text(item.get('text') or item.get('content'))
+                continue
+
+            item_type = getattr(item, 'type', '')
+            if item_type == 'message':
+                content_list = getattr(item, 'content', []) or []
+                for content_item in content_list:
+                    if isinstance(content_item, dict):
+                        append_text(content_item.get('text') or content_item.get('content'))
+                        continue
+                    content_type = getattr(content_item, 'type', '')
+                    if content_type in {'output_text', 'text'} or hasattr(content_item, 'text'):
+                        append_text(getattr(content_item, 'text', ''))
+            elif hasattr(item, 'text'):
+                append_text(getattr(item, 'text', ''))
+
+        content = "".join(parts)
+        if content.strip():
+            return content
+
+        try:
+            raw = response.model_dump()
+            raw_output_text = raw.get('output_text')
+            if isinstance(raw_output_text, str) and raw_output_text.strip():
+                return raw_output_text
+            for choice in raw.get('choices') or []:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get('message') or {}
+                if isinstance(message, dict):
+                    append_text(message.get('content') or message.get('text'))
+            for item in raw.get('output') or []:
+                if not isinstance(item, dict):
+                    continue
+                append_text(item.get('text') or item.get('content'))
+                for content_item in item.get('content') or []:
+                    if isinstance(content_item, dict):
+                        append_text(content_item.get('text') or content_item.get('content'))
+        except Exception:
+            pass
+
+        return "".join(parts)
+
+    @staticmethod
+    def _summarize_responses_shape(response) -> str:
+        """Return a safe, compact shape summary for empty Responses API outputs."""
+        try:
+            raw = response.model_dump()
+        except Exception:
+            return str(type(response).__name__)
+
+        output_summary = []
+        for item in raw.get('output') or []:
+            if not isinstance(item, dict):
+                output_summary.append({"type": type(item).__name__})
+                continue
+            content_summary = []
+            for content_item in item.get('content') or []:
+                if isinstance(content_item, dict):
+                    content_summary.append({
+                        "type": content_item.get('type'),
+                        "has_text": bool(str(content_item.get('text') or content_item.get('content') or "").strip()),
+                    })
+                else:
+                    content_summary.append({"type": type(content_item).__name__})
+            output_summary.append({
+                "type": item.get('type'),
+                "status": item.get('status'),
+                "content": content_summary,
+            })
+
+        summary = {
+            "keys": sorted(str(key) for key in raw.keys()),
+            "status": raw.get('status'),
+            "incomplete_details": raw.get('incomplete_details'),
+            "output": output_summary,
+            "has_output_text": bool(str(raw.get('output_text') or "").strip()),
+        }
+        return json.dumps(summary, ensure_ascii=False, default=str)[:2000]
+
+    async def _stream_openai_responses(self, params: dict) -> AsyncGenerator[str, None]:
+        """OpenAI Responses 流式响应生成器"""
+        stream = await self._client.responses.create(stream=True, **params)
+        async for event in stream:
+            # Responses API 流式事件
+            event_type = getattr(event, 'type', '')
+            if event_type == 'response.output_text.delta':
+                delta = getattr(event, 'delta', '')
+                if delta:
+                    yield delta
+            elif hasattr(event, 'delta'):
+                delta_text = getattr(event.delta, 'text', '') if hasattr(event.delta, 'text') else str(event.delta)
+                if delta_text:
+                    yield delta_text
+
+    # ============================================================
+    # Anthropic Messages API
+    # ============================================================
+
+    async def _call_anthropic(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        system_prompt: Optional[str],
+        stream: bool
+    ) -> Union[str, AsyncGenerator[str, None]]:
+        """Anthropic Messages API 调用。
+
+        Anthropic 的 /v1/messages 与 OpenAI Chat/Responses 不同：
+        - system 使用顶层参数，不作为 messages 角色传入；
+        - messages 仅允许 user/assistant，并且工具结果以 user content 中的
+          {"type": "tool_result", "tool_use_id": "..."} 内容块续传；
+        - 流式工具参数通过 content_block_delta/input_json_delta.partial_json
+          分片返回，只能在 content_block_stop 后解析。
+        """
+        start_time = time.time()
+
+        anthropic_messages, system_prompt = self._build_anthropic_messages(messages, system_prompt)
+
+        resolved_max_tokens = normalize_max_tokens(
+            max_tokens if max_tokens is not None else self.max_tokens,
+            source=f"LLMClient:{self.metrics_namespace}",
+        )
+
+        # Anthropic API 参数
+        params = {
+            "model": self.model_name,
+            "messages": anthropic_messages,
+            "max_tokens": resolved_max_tokens,
+            "temperature": temperature if temperature is not None else self.temperature,
+        }
+
+        if system_prompt:
+            params["system"] = system_prompt
+
+        total_chars = sum(len(self._anthropic_content_to_text(m.get("content", ""))) for m in anthropic_messages)
+        logger.info(
+            f"[LLMClient:{self.metrics_namespace}] Calling Anthropic Messages - "
+            f"Model: {params['model']}, Messages: {len(anthropic_messages)}, "
+            f"Chars: {total_chars}, MaxTokens: {params['max_tokens']}"
+        )
+
+        try:
+            if stream:
+                return self._stream_anthropic(params)
+            else:
+                response = await self._client.messages.create(**params)
+
+                # 提取内容；如果模型以 tool_use 停止且没有可见文本，则返回
+                # JSON 形式的工具调用描述，供上层进行显式处理或记录。
+                content, tool_uses = self._extract_anthropic_content(response)
+                if not content and tool_uses:
+                    content = json.dumps({"tool_calls": tool_uses}, ensure_ascii=False)
+
+                # 提取token使用
+                tokens_in = getattr(response.usage, 'input_tokens', 0) if hasattr(response, 'usage') and response.usage else 0
+                tokens_out = getattr(response.usage, 'output_tokens', 0) if hasattr(response, 'usage') and response.usage else 0
+
+                duration = time.time() - start_time
+                self._record_metrics(tokens_in, tokens_out, duration, True)
+
+                logger.info(
+                    f"[LLMClient:{self.metrics_namespace}] Anthropic Response: "
+                    f"{len(content)} chars, tokens: {tokens_in}+{tokens_out}, "
+                    f"time: {duration:.2f}s"
+                )
+
+                return content
+
+        except Exception as e:
+            duration = time.time() - start_time
+            self._record_metrics(0, 0, duration, False, str(e))
+
+            user_msg = self._parse_anthropic_error(str(e))
+            logger.error(
+                f"[LLMClient:{self.metrics_namespace}] Anthropic call failed after {duration:.2f}s: {e}"
+            )
+
+            if user_msg:
+                raise Exception(user_msg) from e
+            raise
+
+    @staticmethod
+    def _is_mimo_api_base(api_base: str) -> bool:
+        """Return True for Xiaomi MiMo API bases that document api-key auth."""
+        return "xiaomimimo.com" in str(api_base or "").lower()
+
+    @staticmethod
+    def _normalize_anthropic_base_url(api_base: str) -> str:
+        """Normalize Anthropic SDK base_url to the API root instead of /v1."""
+        base_url = str(api_base or "").strip().rstrip("/")
+        if not base_url:
+            return ""
+        last_segment = base_url.rsplit("/", 1)[-1].lower()
+        if re.fullmatch(r"v\d+(\.\d+)?", last_segment):
+            base_url = base_url.rsplit("/", 1)[0].rstrip("/")
+        return base_url
+
+    def _build_anthropic_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        system_prompt: Optional[str],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Build Anthropic-compatible messages while preserving content blocks."""
+        anthropic_messages: List[Dict[str, Any]] = []
+        resolved_system = system_prompt
+
+        for msg in messages:
+            role = str(msg.get("role", "user") or "user").strip()
+            content = msg.get("content", "")
+
+            if role == "system":
+                system_text = self._anthropic_content_to_text(content)
+                if system_text:
+                    resolved_system = f"{system_text}\n\n{resolved_system}" if resolved_system else system_text
+                continue
+
+            if role not in {"user", "assistant"}:
+                role = "user"
+
+            anthropic_messages.append({
+                "role": role,
+                "content": self._normalize_anthropic_content(content),
+            })
+
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": "Hello"})
+
+        return self._merge_consecutive_messages(anthropic_messages), resolved_system
+
+    @staticmethod
+    def _normalize_anthropic_content(content: Any) -> Any:
+        """Keep Anthropic content blocks intact; coerce plain values to text."""
+        if isinstance(content, list):
+            normalized_blocks: List[Dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = str(block.get("type") or "").strip()
+                    if block_type:
+                        normalized_blocks.append(block)
+                    else:
+                        normalized_blocks.append({"type": "text", "text": str(block)})
+                else:
+                    normalized_blocks.append({"type": "text", "text": str(block or "")})
+            return normalized_blocks
+        return str(content or "")
+
+    @staticmethod
+    def _anthropic_content_to_text(content: Any) -> str:
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif block:
+                    parts.append(str(block))
+            return "\n".join(part for part in parts if part).strip()
+        return str(content or "").strip()
+
+    @staticmethod
+    def _merge_anthropic_content(left: Any, right: Any) -> Any:
+        """Merge consecutive same-role Anthropic content without corrupting blocks."""
+        if isinstance(left, list) or isinstance(right, list):
+            left_blocks = left if isinstance(left, list) else [{"type": "text", "text": str(left or "")}]
+            right_blocks = right if isinstance(right, list) else [{"type": "text", "text": str(right or "")}]
+            return [*left_blocks, *right_blocks]
+
+        left_text = str(left or "")
+        right_text = str(right or "")
+        if not left_text:
+            return right_text
+        if not right_text:
+            return left_text
+        return f"{left_text}\n\n{right_text}"
+
+    def _merge_consecutive_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """合并连续同角色消息，避免违反 Anthropic 多轮消息格式。"""
+        if not messages:
+            return messages
+
+        merged = [messages[0].copy()]
+        for msg in messages[1:]:
+            if msg["role"] == merged[-1]["role"]:
+                merged[-1]["content"] = self._merge_anthropic_content(
+                    merged[-1].get("content", ""),
+                    msg.get("content", ""),
+                )
+            else:
+                merged.append(msg.copy())
+        return merged
+
+    @staticmethod
+    def _event_value(event: Any, key: str, default: Any = None) -> Any:
+        if isinstance(event, dict):
+            return event.get(key, default)
+        return getattr(event, key, default)
+
+    @classmethod
+    def _nested_event_value(cls, event: Any, *keys: str, default: Any = None) -> Any:
+        value = event
+        for key in keys:
+            value = cls._event_value(value, key, None)
+            if value is None:
+                return default
+        return value
+
+    def _extract_anthropic_content(self, response: Any) -> Tuple[str, List[Dict[str, Any]]]:
+        text_parts: List[str] = []
+        tool_uses: List[Dict[str, Any]] = []
+
+        for block in getattr(response, "content", []) or []:
+            block_type = self._event_value(block, "type", "")
+            text = self._event_value(block, "text", None)
+            if isinstance(text, str):
+                text_parts.append(text)
+                continue
+
+            if block_type == "tool_use":
+                tool_input = self._event_value(block, "input", {})
+                tool_uses.append({
+                    "id": self._event_value(block, "id", ""),
+                    "name": self._event_value(block, "name", ""),
+                    "input": tool_input if isinstance(tool_input, dict) else {},
+                })
+
+        return "".join(text_parts), tool_uses
+
+    async def _stream_anthropic(self, params: dict) -> AsyncGenerator[str, None]:
+        """Anthropic 流式响应生成器。
+
+        不使用 SDK 的 text_stream 快捷通道，因为 text_stream 只返回文本，
+        无法解析 content_block_start/content_block_delta/content_block_stop
+        中的 tool_use 与 input_json_delta.partial_json。
+        """
+        tool_buffers: Dict[int, Dict[str, Any]] = {}
+
+        async with self._client.messages.stream(**params) as stream:
+            async for event in stream:
+                event_type = self._event_value(event, "type", "")
+
+                if event_type == "content_block_start":
+                    index = int(self._event_value(event, "index", 0) or 0)
+                    block = self._event_value(event, "content_block", {}) or {}
+                    if self._event_value(block, "type", "") == "tool_use":
+                        tool_buffers[index] = {
+                            "id": self._event_value(block, "id", ""),
+                            "name": self._event_value(block, "name", ""),
+                            "partial_json": "",
+                        }
+                    continue
+
+                if event_type == "content_block_delta":
+                    delta_type = self._nested_event_value(event, "delta", "type", default="")
+                    if delta_type == "text_delta":
+                        text = self._nested_event_value(event, "delta", "text", default="")
+                        if text:
+                            yield text
+                    elif delta_type == "input_json_delta":
+                        index = int(self._event_value(event, "index", 0) or 0)
+                        partial_json = self._nested_event_value(event, "delta", "partial_json", default="")
+                        if partial_json:
+                            tool_buffers.setdefault(index, {
+                                "id": "",
+                                "name": "",
+                                "partial_json": "",
+                            })["partial_json"] += partial_json
+                    continue
+
+                if event_type == "content_block_stop":
+                    index = int(self._event_value(event, "index", 0) or 0)
+                    tool_state = tool_buffers.get(index)
+                    if not tool_state:
+                        continue
+
+                    raw_input = str(tool_state.get("partial_json") or "")
+                    try:
+                        parsed_input = json.loads(raw_input) if raw_input.strip() else {}
+                    except json.JSONDecodeError as exc:
+                        logger.warning(
+                            "[LLMClient:%s] Failed to parse Anthropic tool input JSON for tool %s/%s: %s; raw=%s",
+                            self.metrics_namespace,
+                            tool_state.get("name", ""),
+                            tool_state.get("id", ""),
+                            exc,
+                            raw_input[:1000],
+                        )
+                        parsed_input = {}
+
+                    logger.info(
+                        "[LLMClient:%s] Anthropic tool_use parsed: name=%s id=%s input_keys=%s",
+                        self.metrics_namespace,
+                        tool_state.get("name", ""),
+                        tool_state.get("id", ""),
+                        sorted(parsed_input.keys()) if isinstance(parsed_input, dict) else [],
+                    )
+                    continue
+
+    def _parse_anthropic_error(self, error_msg: str) -> Optional[str]:
+        """解析 Anthropic API 错误"""
+        error_lower = error_msg.lower()
+
+        if "authentication" in error_lower or "invalid x-api-key" in error_lower or "401" in error_msg:
+            return "Anthropic API认证失败，请检查API Key配置。"
+
+        if "rate_limit" in error_lower or "429" in error_msg:
+            return "Anthropic API请求频率超限，请稍后重试。"
+
+        if "overloaded" in error_lower or "529" in error_msg:
+            return "Anthropic API当前过载，请稍后重试。"
+
+        if "not_found" in error_lower or "404" in error_msg:
+            return f"Anthropic模型 '{self.model_name}' 不可用，请检查模型名称。"
+
+        if "timeout" in error_lower:
+            return f"Anthropic API请求超时。模型: {self.model_name}"
+
+        return None
+
+    # ============================================================
+    # 通用方法
+    # ============================================================
 
     def _record_metrics(
         self,
@@ -384,6 +1092,7 @@ def create_llm_client(
     max_tokens: Optional[int] = None,
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
+    api_type: Optional[str] = None,
     retry_config: Optional[RetryConfig] = None,
     metrics_namespace: str = "default"
 ) -> LLMClient:
@@ -396,6 +1105,7 @@ def create_llm_client(
         max_tokens: 最大token数
         api_key: API密钥
         api_base: API基础URL
+        api_type: API类型 ("openai_chat", "openai_responses", "anthropic")
         retry_config: 重试配置
         metrics_namespace: 指标命名空间
 
@@ -408,7 +1118,8 @@ def create_llm_client(
         temperature=temperature if temperature is not None else config.llm.temperature,
         max_tokens=max_tokens if max_tokens is not None else config.llm.max_tokens,
         api_key=api_key,
-        api_base=api_base
+        api_base=api_base,
+        api_type=api_type or "openai_chat"
     )
 
     return LLMClient(model_config, retry_config, metrics_namespace)

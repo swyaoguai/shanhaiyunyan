@@ -47,7 +47,9 @@ beforeEach(() => {
     <span id="copilot-session-agent"></span>
     <button id="copilot-session-list-btn"></button>
     <div id="copilot-session-menu" class="hidden"></div>
-    <div class="copilot-input"><textarea id="copilot-input-text"></textarea><button></button></div>
+    <div class="copilot-input">
+      <div class="copilot-input-wrapper"><textarea id="copilot-input-text"></textarea><button></button></div>
+    </div>
   `;
   localStorage.clear();
   vi.restoreAllMocks();
@@ -65,6 +67,7 @@ beforeEach(() => {
   window.ui.workspace = document.getElementById('main-view');
   window.stopNovelCollabRuntimePolling?.();
   window.store.currentModule = 'dashboard';
+  window.store.copilotCreativeMode = 'plan';
   window.store.runtimeProjectStatus = null;
   window.store.collabRuntimePollingTimer = null;
   window.store.collabRuntimePollingBusy = false;
@@ -74,6 +77,51 @@ beforeEach(() => {
 });
 
 describe('copilot workflow panel regressions', () => {
+  it('loads and saves the user-facing creative mode selector', async () => {
+    window.apiCall.mockResolvedValueOnce({ success: true, data: { mode: 'execute' } });
+
+    await window.loadCopilotCreativeModePreference();
+
+    const select = document.getElementById('copilot-creative-mode-select');
+    expect(select).not.toBeNull();
+    expect(select?.value).toBe('execute');
+    expect(document.body.textContent).toContain('创作方式');
+    expect(document.body.textContent).toContain('直接执行');
+    expect(document.getElementById('copilot-creative-mode-hint')?.textContent).toContain('写入项目');
+
+    select.value = 'discussion';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+
+    expect(window.store.copilotCreativeMode).toBe('discussion');
+    expect(localStorage.getItem('copilot_creative_mode')).toBe('discussion');
+    expect(window.apiCall).toHaveBeenNthCalledWith(
+      2,
+      '/api/project-state/copilot_creative_mode',
+      'POST',
+      { data: { mode: 'discussion' } }
+    );
+  });
+
+  it('passes the selected creative mode to streaming and fallback chat requests', async () => {
+    window.store.copilotCreativeMode = 'plan';
+    window.fetch = vi.fn().mockResolvedValue({ ok: false });
+    globalThis.fetch = window.fetch;
+    window.apiCall = vi.fn().mockResolvedValue({ reply: 'ok' });
+
+    document.getElementById('copilot-input-text').value = '帮我整理一个角色方案';
+
+    await window.sendCopilotMessage();
+
+    const streamBody = JSON.parse(window.fetch.mock.calls[0][1].body);
+    expect(streamBody.creative_mode).toBe('plan');
+    expect(window.apiCall).toHaveBeenCalledWith(
+      '/api/chat',
+      'POST',
+      expect.objectContaining({ creative_mode: 'plan' })
+    );
+  });
+
   it('stores workflow state and renders the compact execution panel when workflow data is present', () => {
     window.updateCopilotWorkflowPanel({
       run_id: 'run-123',
@@ -87,13 +135,23 @@ describe('copilot workflow panel regressions', () => {
       created_files: [
         { path: 'C:/novel/project/worldbuilding.json', label: 'worldbuilding.json', kind: 'worldbuilding', status: 'created' }
       ],
-      updated_files: []
+      updated_files: [],
+      task_queue: [
+        { task_id: 'prepare_context', title: '准备创作上下文', task_type: 'prepare_context', status: 'completed', target_agent: 'Coordinator', review_required: false },
+        { task_id: 'create_worldbuilding', title: '生成世界观设定', task_type: 'worldbuilding', status: 'running', target_agent: 'Worldbuilder', review_required: true }
+      ],
+      reviews: []
     });
 
     expect(window.store.copilotWorkflow.run_id).toBe('run-123');
+    expect(window.store.copilotWorkflow.last_progress).toBe('世界观阶段 正在生成世界观设定...');
     expect(document.getElementById('copilot-workflow-panel')?.classList.contains('hidden')).toBe(false);
     expect(document.body.textContent).toContain('世界观构建');
+    expect(document.body.textContent).toContain('世界观阶段 正在生成世界观设定...');
     expect(document.body.textContent).toContain('进行中');
+    expect(document.body.textContent).not.toContain('###');
+    expect(document.body.textContent).toContain('准备创作上下文');
+    expect(document.body.textContent).toContain('待审查');
   });
 
   it('restoring workflow status requests backend snapshot and syncs runtime task pool', async () => {

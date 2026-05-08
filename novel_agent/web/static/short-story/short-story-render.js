@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 短篇创作渲染层
+ * 山海·云烟 - 短篇创作渲染层
  */
 
 function renderShortStoryLoadingBanner() {
@@ -154,7 +154,7 @@ function getShortStoryFusionCards() {
             <div class="short-story-choice-head">
                 <div>
                     <div class="short-story-choice-title">${escapeHtml(item.title || `方案 ${item.index}`)}</div>
-                    <div class="short-story-choice-meta">${escapeHtml(item.route || '不同故事路数')}</div>
+                    <div class="short-story-choice-meta">${escapeHtml(item.route || '不同故事方向')}</div>
                 </div>
                 <button
                     class="short-story-select-fusion short-story-btn ${workflow.selected_fusion_index === item.index ? 'short-story-btn-selected short-story-btn-warm' : ''}"
@@ -468,7 +468,7 @@ async function renderShortStoryInterface() {
                 <div class="short-story-hero-main">
                     <div class="short-story-kicker">固定创作流程</div>
                     <h1 class="short-story-title"><i class="ri-draft-line"></i>短篇创作</h1>
-                    <div class="short-story-subtitle">按“统一输入 → 3个融合方案 → 导语 → 大纲 → 正文 → 质检 → 复审 → 书名 → 成稿”顺序推进。</div>
+                    <div class="short-story-subtitle">按"统一输入 → 3个创意方案 → 导语 → 大纲 → 正文 → 质检 → 复审 → 书名 → 成稿"顺序推进。</div>
                     <div class="short-story-hero-chips">
                         <span class="short-story-chip">当前阶段：${getShortStoryStageLabel(workflow?.state)}</span>
                         <span class="short-story-chip">主分类：${categoryDraft}</span>
@@ -483,7 +483,7 @@ async function renderShortStoryInterface() {
                     <div class="short-story-progress-bar">
                         <div class="short-story-progress-fill" style="width: ${(progress.completed / Math.max(progress.total, 1)) * 100}%;"></div>
                     </div>
-                    <div class="short-story-side-note">${shortStoryState.loadingAction ? `当前操作：${getShortStoryLoadingMeta()?.text || '正在处理中...'}` : `当前聚焦步骤：${getShortStorySectionsMeta().find((item) => item.id === focusedSectionId)?.title || '融合方案'}`}</div>
+                    <div class="short-story-side-note">${shortStoryState.loadingAction ? `当前操作：${getShortStoryLoadingMeta()?.text || '正在处理中...'}` : `当前聚焦步骤：${getShortStorySectionsMeta().find((item) => item.id === focusedSectionId)?.title || '创意方案'}`}</div>
                 </div>
             </div>
 
@@ -541,9 +541,9 @@ async function renderShortStoryInterface() {
                 <div class="short-story-panel">
                     <div class="short-story-panel-title">流程提醒</div>
                     <div class="short-story-tips">
-                        <div>1. 直接输入任意创作素材，系统会自动识别并生成 3 个融合方案。</div>
+                        <div>1. 直接输入任意创作素材，系统会自动识别并生成 3 个创意方案。</div>
                         <div>2. 每一步会直接调用当前所选模型。</div>
-                        <div>3. 先选最带感的一版融合方案，再继续生成导语与大纲。</div>
+                        <div>3. 先选最满意的一版创意方案，再继续生成导语与大纲。</div>
                         <div>4. 大纲和章节都可以手改，系统会自动保存草稿。</div>
                         <div>5. 正文区支持一键生成全部章节，也支持逐章精修。</div>
                         <div>6. 顶部步骤条可直接跳转到任一流程区块。</div>
@@ -630,12 +630,12 @@ function renderShortStorySections(flags) {
             ` : ''}
             ${analysisWarnings.map((item) => `<div class="short-story-warning-text">提示：${escapeHtml(item)}</div>`).join('')}
             <div class="short-story-card-grid">
-                ${flags.hasWorkflow ? (getShortStoryFusionCards() || '<div class="short-story-empty">生成完成后，这里会展示 3 个不同故事路数的融合方案。</div>') : '<div class="short-story-empty">输入素材后，系统会自动识别并给出 3 个方案。</div>'}
+                ${flags.hasWorkflow ? (getShortStoryFusionCards() || '<div class="short-story-empty">生成完成后，这里会展示 3 个不同风格的创意方案。</div>') : '<div class="short-story-empty">输入素材后，系统会自动识别并给出 3 个方案。</div>'}
             </div>
             ${renderShortStoryRawOutput('查看原始素材识别输出', shortStoryState.inputAnalysisRawOutput)}
-            ${renderShortStoryRawOutput('查看原始融合方案输出', shortStoryState.fusionRawOutput)}
+            ${renderShortStoryRawOutput('查看原始创意方案输出', shortStoryState.fusionRawOutput)}
         `,
-        workflow?.selected_fusion?.title ? `当前已选方案：${escapeHtml(workflow.selected_fusion.title)}` : '先选定一个融合方案，再继续生成导语。'
+        workflow?.selected_fusion?.title ? `当前已选方案：${escapeHtml(workflow.selected_fusion.title)}` : '先选定一个创意方案，再继续生成导语。'
     );
 
     const synopsisSection = renderShortStorySection(
@@ -650,11 +650,11 @@ function renderShortStorySections(flags) {
         `
             <textarea id="short-story-synopsis-feedback" rows="2" placeholder="如果 5 条导语都不满意，可先填写修改方向再重新生成..." class="short-story-field short-story-textarea">${escapeHtml(shortStoryState.synopsisFeedback || '')}</textarea>
             <div class="short-story-card-grid">
-                ${flags.hasWorkflow ? (getShortStorySynopsisCards() || '<div class="short-story-empty">选定融合方案后，点击“生成导语”即可在这里生成并选择导语。</div>') : '<div class="short-story-empty">请先完成融合方案选择。</div>'}
+                ${flags.hasWorkflow ? (getShortStorySynopsisCards() || '<div class="short-story-empty">选定创意方案后，点击"生成导语"即可在这里生成并选择导语。</div>') : '<div class="short-story-empty">请先完成创意方案选择。</div>'}
             </div>
             ${renderShortStoryRawOutput('查看原始导语输出', shortStoryState.synopsisRawOutput)}
         `,
-        workflow?.selected_synopsis ? `已选导语：${escapeHtml(workflow.selected_synopsis.slice(0, 80))}${workflow.selected_synopsis.length > 80 ? '...' : ''}` : '先选融合方案，再生成候选导语。'
+        workflow?.selected_synopsis ? `已选导语：${escapeHtml(workflow.selected_synopsis.slice(0, 80))}${workflow.selected_synopsis.length > 80 ? '...' : ''}` : '先选创意方案，再生成候选导语。'
     );
 
     const outlineSection = renderShortStorySection(

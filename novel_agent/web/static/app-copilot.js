@@ -1,5 +1,5 @@
 /**
- * 文思Agent - Copilot增强模块
+ * 山海·云烟 - Copilot增强模块
  * 包含：@提及功能、智能搜索、上下文增强
  */
 
@@ -54,6 +54,14 @@ let mentionData = {
 };
 
 const COPILOT_AUTO_SAVE_STATE_KEY = 'copilot_chat_auto_save';
+let copilotAutoSaveRetryTimer = null;
+
+function clearCopilotAutoSaveRetry() {
+    if (copilotAutoSaveRetryTimer) {
+        clearTimeout(copilotAutoSaveRetryTimer);
+        copilotAutoSaveRetryTimer = null;
+    }
+}
 
 function getCopilotAutoSaveState() {
     const store = getCoreStore();
@@ -87,22 +95,22 @@ function ensureCopilotAutoSaveToggle() {
 
     let row = inputRoot.querySelector('.copilot-auto-save-row');
     if (!row) {
-        row = document.createElement('label');
+        row = document.createElement('div');
         row.className = 'copilot-auto-save-row';
-        row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 2px 10px;color:var(--text-secondary);font-size:12px;user-select:none;';
         row.innerHTML = `
-            <input type="checkbox" id="copilot-auto-save-toggle" style="accent-color: var(--accent-color); cursor: pointer;">
-            <span style="display:flex;flex-direction:column;gap:2px;line-height:1.35;">
-                <span style="color:var(--text-primary);font-size:12px;">自动保存文件</span>
-                <span id="copilot-auto-save-hint">勾选后，新增保存的文件会自动创建，自定义分类仍需手动选择。</span>
-            </span>
+            <label class="copilot-auto-save-control" title="控制 Copilot 新增的内置资料和章节是否自动写入当前项目">
+                <input type="checkbox" id="copilot-auto-save-toggle" class="copilot-auto-save-checkbox" aria-label="Copilot 自动保存">
+                <span class="copilot-auto-save-track" aria-hidden="true"></span>
+                <span class="copilot-auto-save-label"><i class="ri-save-3-line"></i> 自动保存</span>
+                <span id="copilot-auto-save-status" class="copilot-auto-save-status">已关闭</span>
+            </label>
         `;
         inputRoot.insertBefore(row, inputWrapper);
-        const checkbox = row.querySelector('#copilot-auto-save-toggle');
-        checkbox?.addEventListener('change', async (event) => {
-            const target = event.target;
-            if (!target) return;
-            await saveCopilotAutoSavePreference(Boolean(target.checked));
+        row.querySelector('#copilot-auto-save-toggle')?.addEventListener('change', async (event) => {
+            const checkbox = event.target;
+            if (!checkbox) return;
+            checkbox.disabled = true;
+            await saveCopilotAutoSavePreference(Boolean(checkbox.checked));
         });
     }
     return row;
@@ -113,22 +121,18 @@ function renderCopilotAutoSaveToggle() {
     if (!row) return;
 
     const checkbox = row.querySelector('#copilot-auto-save-toggle');
-    const hint = row.querySelector('#copilot-auto-save-hint');
+    const status = row.querySelector('#copilot-auto-save-status');
     const state = getCopilotAutoSaveState();
-    const projectId = getCopilotActiveProjectId();
-    const disabled = !projectId;
+    const disabled = !getCopilotActiveProjectId();
 
+    row.classList.toggle('is-disabled', disabled);
     if (checkbox) {
         checkbox.checked = Boolean(state.enabled);
         checkbox.disabled = disabled;
-        checkbox.title = disabled ? '请先选择项目' : '控制新增接入的内置资料自动保存';
     }
-    if (hint) {
-        hint.textContent = disabled
-            ? '请先选择项目后再配置自动保存。'
-            : '勾选后，新增保存的文件会自动创建，自定义分类仍需手动选择。';
+    if (status) {
+        status.textContent = disabled ? '未选择项目' : (state.enabled ? '已开启' : '已关闭');
     }
-    row.style.opacity = disabled ? '0.6' : '1';
 }
 
 async function loadCopilotAutoSavePreference() {
@@ -151,24 +155,45 @@ async function loadCopilotAutoSavePreference() {
     return getCopilotAutoSaveState().enabled;
 }
 
-async function saveCopilotAutoSavePreference(enabled) {
+function scheduleCopilotAutoSaveRetry(enabled, error) {
+    clearCopilotAutoSaveRetry();
+    const retryAfterSeconds = Number(error?.retryAfter || 0) || 0;
+    const retryAfterMs = retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 10000;
+    copilotAutoSaveRetryTimer = setTimeout(() => {
+        copilotAutoSaveRetryTimer = null;
+        void saveCopilotAutoSavePreference(enabled, { silent: true, retryOnRateLimit: false });
+    }, retryAfterMs);
+}
+
+async function saveCopilotAutoSavePreference(enabled, options = {}) {
     const projectId = getCopilotActiveProjectId();
+    const silent = Boolean(options?.silent);
+    const retryOnRateLimit = options?.retryOnRateLimit !== false;
     if (!projectId || typeof apiCall !== 'function') {
         renderCopilotAutoSaveToggle();
         return false;
     }
 
     try {
+        clearCopilotAutoSaveRetry();
         await apiCall(`/api/project-state/${COPILOT_AUTO_SAVE_STATE_KEY}`, 'POST', {
             data: { enabled: Boolean(enabled) }
         });
         setCopilotAutoSaveState({ enabled: Boolean(enabled), loaded: true, projectId });
-        if (typeof showToast === 'function') {
+        if (!silent && typeof showToast === 'function') {
             showToast(enabled ? '已开启聊天自动保存（内置类型）' : '已关闭新增聊天自动保存');
         }
     } catch (error) {
-        console.error('[Copilot] 保存自动保存开关失败:', error);
-        if (typeof showToast === 'function') {
+        if (Number(error?.status) === 429) {
+            console.warn('[Copilot] 自动保存开关保存过于频繁，稍后重试');
+            setCopilotAutoSaveState({ enabled: Boolean(enabled), loaded: true, projectId });
+            if (retryOnRateLimit) {
+                scheduleCopilotAutoSaveRetry(Boolean(enabled), error);
+            }
+        } else {
+            console.error('[Copilot] 保存自动保存开关失败:', error);
+        }
+        if (Number(error?.status) !== 429 && !silent && typeof showToast === 'function') {
             showToast(`保存自动保存设置失败: ${error.message}`, 'error');
         }
     }
@@ -380,8 +405,11 @@ function searchMentions(query) {
 
 function getCommandChapters() {
     const store = getCoreStore();
-    if (!Array.isArray(store.projectData?.outline)) return [];
-    return store.projectData.outline
+    const chapters = typeof window.getMultiAgentChapters === 'function'
+        ? window.getMultiAgentChapters()
+        : (Array.isArray(store.projectData?.chapters) ? store.projectData.chapters : []);
+    if (!Array.isArray(chapters)) return [];
+    return chapters
         .map((chapter, index) => {
             const chapterNo = index + 1;
             const title = String(chapter?.title || '').trim();
@@ -953,7 +981,7 @@ function ensureCommandPromptBar() {
 
     const items = getPromptCommandItems();
     promptBar.innerHTML = `
-        <div class="copilot-command-prompts-label">Slash 命令</div>
+        <div class="copilot-command-prompts-label">快捷命令</div>
         <div class="copilot-command-prompts-list">
             ${items.map((item) => `
                 <button
@@ -1013,8 +1041,11 @@ async function updateMentionData() {
         }
         
         // 获取章节
-        if (store.projectData?.outline) {
-            mentionData.chapters = store.projectData.outline.map((ch, i) => ({
+        const chapters = typeof window.getMultiAgentChapters === 'function'
+            ? window.getMultiAgentChapters()
+            : (Array.isArray(store.projectData?.chapters) ? store.projectData.chapters : []);
+        if (Array.isArray(chapters)) {
+            mentionData.chapters = chapters.map((ch, i) => ({
                 id: i,
                 name: `第${i + 1}章 ${ch.title}`,
                 title: ch.title
@@ -1025,7 +1056,7 @@ async function updateMentionData() {
         if (Array.isArray(store.projectData?.worldbuilding)) {
             mentionData.worlds = store.projectData.worldbuilding.slice(0, 6).map((item, index) => ({
                 id: item.name || `world-${index}`,
-                name: item.name || `世界设定${index + 1}`,
+                name: item.name || `世界观设定${index + 1}`,
                 summary: String(item.description || item.details || '').trim(),
                 type: 'world'
             }));
@@ -1145,7 +1176,7 @@ async function sendCopilotMessageWithMentions(message) {
                         ? [worldItem.description, worldItem.details].filter(Boolean).join('｜')
                         : summarizeWorldRows(store.projectData.worldbuilding, 3).join('\n');
                     if (worldSummary) {
-                        context += `\n【世界设定】\n${worldItem ? `${mention.name}：${worldSummary}` : worldSummary}\n`;
+                        context += `\n【世界观设定】\n${worldItem ? `${mention.name}：${worldSummary}` : worldSummary}\n`;
                     }
                 }
                 break;
@@ -1404,7 +1435,10 @@ window.sendCopilotMessageWithMentions = sendCopilotMessageWithMentions;
 window.initInputResizer = initInputResizer;
 window.initPanelWidthResizer = initPanelWidthResizer;
 window.hideCopilotAutocomplete = hideCopilotAutocomplete;
+window.getCopilotActiveProjectId = getCopilotActiveProjectId;
+window.getCopilotAutoSaveState = getCopilotAutoSaveState;
 window.loadCopilotAutoSavePreference = loadCopilotAutoSavePreference;
 window.renderCopilotAutoSaveToggle = renderCopilotAutoSaveToggle;
+window.saveCopilotAutoSavePreference = saveCopilotAutoSavePreference;
 
 console.log('[app-copilot.js] Copilot增强模块已加载');

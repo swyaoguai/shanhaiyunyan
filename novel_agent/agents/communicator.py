@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional, List, AsyncGenerator
 
 from .base_agent import BaseAgent
 from .knowledge_mixin import KnowledgeBaseMixin, SharedKnowledgeContext
+from .visible_text import stream_visible_text, strip_visible_technical_markers
 from ..constants import AGENT_TEMPERATURE, WRITING_CONFIG, TIMEOUTS
 
 logger = logging.getLogger(__name__)
@@ -38,26 +39,52 @@ AUTO_TOOL_PATTERNS = {
 }
 
 
+_USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
+    "Worldbuilder那边": "后续世界观设定流程这边",
+    "WorldBuilder那边": "后续世界观设定流程这边",
+    "WorldbuilderAgent": "世界观构建师",
+    "WorldBuilderAgent": "世界观构建师",
+    "Worldbuilder": "世界观构建师",
+    "WorldBuilder": "世界观构建师",
+    "OutlinerAgent": "大纲规划师",
+    "Outliner": "大纲规划师",
+    "ChapterWriter": "章节写作助手",
+    "Communicator": "沟通助手",
+    "Coordinator": "创作协调器",
+    "Router": "智能路由",
+    "CharacterBuilder": "角色构建师",
+    "EventlineBuilder": "事件线构建师",
+    "DetailOutlineBuilder": "细纲构建师",
+    "ChapterSettingBuilder": "章纲构建师",
+    "ContinuousWriter": "续写助手",
+    "Polisher": "润色助手",
+    "Evaluator": "质量评估师",
+    "SummaryOrchestrator": "摘要编排助手",
+    "ContextStrategy": "上下文策略助手",
+    "ContentReader": "内容读取助手",
+    "ContentExpansion": "内容扩展助手",
+    "FileNaming": "文件命名助手",
+    "WebSearch": "网络搜索助手",
+    "TrendsSearch": "热点搜索助手",
+}
+
+
+def _localize_user_visible_agent_names(text: str) -> str:
+    """将用户可见文本中的内部 Agent 代号替换成自然中文显示。"""
+    value = str(text or "")
+    if not value:
+        return ""
+    for old, new in _USER_VISIBLE_AGENT_NAME_REPLACEMENTS.items():
+        value = value.replace(old, new)
+    value = value.replace("后续世界观设定流程这边能", "后续世界观设定会")
+    value = value.replace("世界观构建师那边", "后续世界观设定流程这边")
+    value = value.replace("大纲规划师那边", "后续大纲规划流程这边")
+    return value
+
+
 def _strip_technical_markers(text: str) -> str:
     """移除技术标记，并从JSON格式中提取reply字段"""
-    text = str(text or "").replace("[INFO_COMPLETE]", "").strip()
-    
-    # 如果文本看起来像JSON，尝试提取reply字段
-    if text.startswith('{') and '"reply"' in text:
-        try:
-            import json as _json
-            # 尝试解析JSON
-            json_match = __import__('re').search(r'\{[\s\S]*\}', text)
-            if json_match:
-                data = _json.loads(json_match.group())
-                if isinstance(data, dict) and "reply" in data:
-                    reply = str(data["reply"] or "").strip()
-                    if reply:
-                        return reply
-        except (ValueError, KeyError, TypeError):
-            pass
-    
-    return text
+    return strip_visible_technical_markers(text, _localize_user_visible_agent_names)
 
 
 class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
@@ -257,6 +284,9 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         """
         runtime_context = runtime_context or {}
         response_mode = str(runtime_context.get("response_mode") or "lightweight").strip() or "lightweight"
+        heuristic_info = self._extract_info_from_user_message(user_message)
+        if heuristic_info:
+            self.collected_info.update(heuristic_info)
 
         # 添加用户消息到历史
         self.conversation_history.append({
@@ -398,6 +428,9 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
         try:
             runtime_context = runtime_context or {}
             response_mode = str(runtime_context.get("response_mode") or "lightweight").strip() or "lightweight"
+            heuristic_info = self._extract_info_from_user_message(user_message)
+            if heuristic_info:
+                self.collected_info.update(heuristic_info)
 
             # === 预处理（同步） ===
             auto_tool_result = await self._check_auto_tool_call(user_message)
@@ -421,40 +454,20 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             visible_text = ""
             chunk_count = 0
             marker = "[INFO_COMPLETE]"
-            json_extracted_reply = ""
             
             async for chunk in stream:
                 chunk_count += 1
                 full_text += chunk
 
-                # 检测LLM是否输出了JSON格式（而非纯文本）
-                if not json_extracted_reply:
-                    json_match = re.search(r'\{[\s\S]*"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', full_text)
-                    if json_match:
-                        json_extracted_reply = json_match.group(1).replace('\\"', '"').replace('\\n', '\n')
-                        logger.info(f"[{self.name}] 检测到JSON格式输出，提取reply字段")
-                
-                # 如果已提取到reply，使用提取的内容
-                if json_extracted_reply:
-                    current_visible_text = json_extracted_reply.replace(marker, "")
-                else:
-                    # 正常模式：过滤技术标记
-                    current_visible_text = full_text.replace(marker, "")
-                    # 如果文本以JSON开头，等待更多内容再决定是否输出
-                    stripped = current_visible_text.lstrip()
-                    if stripped.startswith('{') and '"reply"' not in stripped[:200]:
-                        visible_text = current_visible_text
-                        continue
-                
+                current_visible_text = stream_visible_text(full_text, _localize_user_visible_agent_names)
+                if current_visible_text is None:
+                    continue
+
                 visible_delta = current_visible_text[len(visible_text):]
                 visible_text = current_visible_text
 
                 if visible_delta:
                     yield f"data: {_json.dumps({'type': 'chunk', 'content': visible_delta}, ensure_ascii=False)}\n\n"
-            
-            # 如果从JSON中提取了reply，更新full_text
-            if json_extracted_reply:
-                full_text = json_extracted_reply
             
             logger.info(f"[{self.name}] 流式输出完成，共 {chunk_count} 个chunk，总长度 {len(full_text)} 字符")
 
@@ -572,10 +585,47 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 
 **重要**：请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
 **绝对不要**输出JSON格式、代码块、或任何技术标记。
+**中文显示要求**：不要向用户暴露内部英文Agent代号（如 Worldbuilder、Outliner、ChapterWriter、Communicator、Coordinator、Router）。需要提及时请使用自然中文说法，例如“后续世界观设定流程”“大纲规划流程”“章节写作流程”。避免使用“Worldbuilder那边”“Outliner那边”这类工程化表达。
 结合知识库内容和工具结果给出准确、有条理的回复。
 如果信息已经足够，在回复末尾加上 [INFO_COMPLETE]。""")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_info_from_user_message(message: str) -> Dict[str, Any]:
+        """Lightweight deterministic extraction for streaming chat sessions."""
+        text = str(message or "").strip()
+        if not text:
+            return {}
+
+        extracted: Dict[str, Any] = {}
+        novel_types = (
+            "玄幻", "仙侠", "都市", "科幻", "悬疑", "言情", "历史", "武侠",
+            "奇幻", "末世", "赛博", "现实", "校园", "游戏", "无限流",
+        )
+        for novel_type in novel_types:
+            if novel_type in text:
+                extracted.setdefault("novel_type", novel_type)
+                break
+
+        patterns = {
+            "theme": r"(?:主题|核心主题|基调|风格)[是为:： ]+([^。；;，,\n]+)",
+            "protagonist": r"(?:主角|男主|女主)[叫是为:： ]+([^。；;，,\n]+)",
+            "plot_idea": r"(?:剧情|故事|主线|走向|设定)[是为:： ]+([^。；;，,\n]+)",
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                value = str(match.group(1) or "").strip()
+                if value:
+                    extracted[key] = value[:500]
+
+        requirement_markers = ("不要", "不能", "必须", "要求", "保留", "改成", "改为", "以后", "后续")
+        if any(marker in text for marker in requirement_markers):
+            existing = str(extracted.get("requirements") or "").strip()
+            extracted["requirements"] = (existing + "\n" + text if existing else text)[:1200]
+
+        return extracted
 
     async def _check_auto_tool_call(self, message: str) -> Optional[Dict[str, Any]]:
         """
@@ -733,6 +783,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 4. 如果信息足够，在回复末尾加上 [INFO_COMPLETE]
 5. 如果还需要更多信息，友好地继续提问
 6. 严格遵守当前回复模式，不要在 lightweight 模式下过度结构化
+7. 不要向用户暴露内部英文Agent代号（如 Worldbuilder、Outliner、ChapterWriter、Communicator、Coordinator、Router）；需要说明流程时，用“后续世界观设定流程”“大纲规划流程”“章节写作流程”等自然中文表达，避免“Worldbuilder那边”这类工程化说法
 
 以JSON格式返回：
 {{

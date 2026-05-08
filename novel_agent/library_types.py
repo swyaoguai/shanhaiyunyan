@@ -138,7 +138,7 @@ class CategoryMeta:
 
 BUILTIN_CATEGORIES: List[CategoryMeta] = [
     CategoryMeta(key="character", name="角色档案", icon="ri-user-smile-line"),
-    CategoryMeta(key="world", name="世界设定", icon="ri-earth-line"),
+    CategoryMeta(key="world", name="世界观设定", icon="ri-earth-line"),
     CategoryMeta(key="item", name="道具物品", icon="ri-sword-line"),
     CategoryMeta(key="eventline", name="事件线", icon="ri-git-branch-line"),
     CategoryMeta(key="outline", name="大纲", icon="ri-file-list-3-line"),

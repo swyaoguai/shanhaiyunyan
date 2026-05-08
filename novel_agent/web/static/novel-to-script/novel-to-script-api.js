@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 小说转剧本接口层
+ * 山海·云烟 - 小说转剧本接口层
  */
 
 function getNovelToScriptFallbackCapabilities() {
@@ -14,29 +14,29 @@ function getNovelToScriptFallbackCapabilities() {
         },
         options: {
             script_styles: [
-                { value: 'scene_block_webnovel_script', label: '网文场景台本' },
-                { value: 'dialogue_enhanced_script', label: '对话强化版' },
-                { value: 'web_short_drama_script', label: '网文短剧版' }
+                { value: 'scene_block_webnovel_script', label: '网文分场景剧本' },
+                { value: 'dialogue_enhanced_script', label: '对话增强版' },
+                { value: 'web_short_drama_script', label: '短剧改编版' }
             ],
             convert_modes: [
                 { value: 'auto', label: '自动识别（推荐）' },
-                { value: 'full_text', label: '单次转换' },
-                { value: 'chapterwise', label: '按章节转换' },
-                { value: 'batchwise', label: '批量转换' }
+                { value: 'full_text', label: '一次性转换' },
+                { value: 'chapterwise', label: '逐章转换' },
+                { value: 'batchwise', label: '分批转换' }
             ],
             scene_densities: [
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' }
+                { value: 'low', label: '简洁（少场景切换）' },
+                { value: 'medium', label: '适中（推荐）' },
+                { value: 'high', label: '详细（多场景切换）' }
             ],
             dialogue_ratios: [
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' }
+                { value: 'low', label: '少对话（偏叙述）' },
+                { value: 'medium', label: '适中（推荐）' },
+                { value: 'high', label: '多对话（偏台词）' }
             ],
             human_name_strategies: [
                 { value: 'keep_original', label: '保留原名' },
-                { value: 'soft_correct', label: '模糊修正' }
+                { value: 'soft_correct', label: '智能修正' }
             ]
         },
         strategy: {

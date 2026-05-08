@@ -1,5 +1,5 @@
 /**
- * 文思Agent - 设置模块入口
+ * 山海·云烟 - 设置模块入口
  */
 
 function renderSettings() {
@@ -36,7 +36,7 @@ function loadSettingsTab(tabName) {
             loadResourcesSettings();
             break;
         case 'writing':
-            loadWritingSettings();
+            loadKnowledgeBaseSettings();
             break;
     }
 }

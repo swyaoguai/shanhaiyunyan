@@ -271,6 +271,7 @@ def build_default_creation_contract(
         },
         deliverables=[
             "worldbuilding.json",
+            "characters.json",
             "outline.json",
             "chapters/*.md",
             "stage_summaries/*.md",
@@ -302,6 +303,15 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
     """基于合同生成阶段一默认任务图草案。"""
     scope = contract.scope or {}
     total_chapters = max(1, int(scope.get("total_chapters") or 1))
+    discussion_context = str(scope.get("discussion_context") or "").strip()
+    discussion_inputs = (
+        {
+            "discussion_context": discussion_context,
+            "recent_discussion": discussion_context,
+        }
+        if discussion_context
+        else {}
+    )
 
     tasks: List[TaskDefinition] = [
         TaskDefinition(
@@ -315,13 +325,14 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 "novel_type": scope.get("novel_type", ""),
                 "theme": scope.get("theme", ""),
                 "requirements": scope.get("requirements", ""),
+                **discussion_inputs,
             },
         ),
         TaskDefinition(
-            task_type="build_outline",
-            title="生成大纲",
-            description="基于世界观和主角设定生成章节大纲",
-            priority=95,
+            task_type="build_characters",
+            title="生成角色档案",
+            description="基于世界观、主角设定和创作要求生成角色档案",
+            priority=98,
             depends_on=[],
             dependencies=[
                 TaskDependency(
@@ -330,6 +341,36 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                     description="需要先完成世界观生成",
                 )
             ],
+            expected_outputs=["characters.json"],
+            candidate_agents=["CharacterBuilder"],
+            inputs={
+                "novel_type": scope.get("novel_type", ""),
+                "theme": scope.get("theme", ""),
+                "protagonist": scope.get("protagonist", ""),
+                "plot_idea": scope.get("plot_idea", ""),
+                "character_request": scope.get("protagonist", "") or scope.get("plot_idea", ""),
+                "request_mode": "draft",
+                **discussion_inputs,
+            },
+        ),
+        TaskDefinition(
+            task_type="build_outline",
+            title="生成大纲",
+            description="基于世界观、角色档案和主角设定生成章节大纲",
+            priority=95,
+            depends_on=[],
+            dependencies=[
+                TaskDependency(
+                    dependency_key="world_ready",
+                    required=True,
+                    description="需要先完成世界观生成",
+                ),
+                TaskDependency(
+                    dependency_key="characters_ready",
+                    required=True,
+                    description="需要先完成角色档案生成",
+                ),
+            ],
             expected_outputs=["outline.json"],
             candidate_agents=["Outliner"],
             inputs={
@@ -337,6 +378,7 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 "plot_idea": scope.get("plot_idea", ""),
                 "volume_count": scope.get("volume_count", 1),
                 "chapters_per_volume": scope.get("chapters_per_volume", 5),
+                **discussion_inputs,
             },
             review_required=True,
         ),
@@ -361,6 +403,7 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 candidate_agents=["ChapterWriter"],
                 inputs={
                     "chapter_number": chapter_number,
+                    **discussion_inputs,
                 },
             )
         )
@@ -380,6 +423,7 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                     "start_chapter": start_chapter,
                     "end_chapter": end_chapter,
                     "chapters": [],
+                    **discussion_inputs,
                 },
                 metadata={
                     "result_kind": "stage_summary",
