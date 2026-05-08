@@ -117,9 +117,20 @@ OPENAI_API_KEY=your-api-key-here
 OPENAI_API_BASE=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4
 
-# 知识库向量化配置（可选）
+# 知识库向量化配置（二选一）
+
+# 方案A：使用硅基流动线上嵌入模型
+KB_EMBEDDING_PROVIDER=api
 SILICONFLOW_API_KEY=your-siliconflow-api-key
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_EMBEDDING_MODEL=BAAI/bge-m3
+SILICONFLOW_EMBEDDING_DIM=1024
+
+# 方案B：使用本地 ONNX 嵌入模型
+# KB_EMBEDDING_PROVIDER=local_onnx
+# KB_ONNX_MODEL_DIR=novel_agent/models/embedding/default
+# KB_ONNX_MODEL_FILE=model.onnx
+# KB_ONNX_POOLING=cls
 ```
 
 ### 启动
@@ -226,6 +237,56 @@ novel_agent/
 | `OPENAI_MODEL` | 模型名称 | gpt-4 |
 | `MAX_TOKENS` | 最大Token数 | 4096 |
 | `TEMPERATURE` | 温度参数 | 0.7 |
+
+### 知识库嵌入模型配置
+
+知识库检索需要先把文本转成向量。项目现在支持两种方式：线上硅基流动和本地 ONNX。测试阶段建议只给用户一个清晰入口：下载模型包，选择模型包，软件自动检测并启用；不要让用户理解 ONNX、tokenizer、pooling 这些细节。
+
+#### 方式一：本地 ONNX 模型
+
+适合离线使用，不消耗线上 API 额度。推荐模型包为 `embedding-model-bge-small-zh-v1.5.zip`，解压后目录结构应为：
+
+```text
+novel_agent/models/embedding/default/
+├── model.onnx
+├── tokenizer.json
+├── tokenizer_config.json
+├── special_tokens_map.json
+├── vocab.txt
+├── config.json
+└── metadata.json
+```
+
+`.env` 配置：
+
+```env
+KB_EMBEDDING_PROVIDER=local_onnx
+KB_ONNX_MODEL_DIR=novel_agent/models/embedding/default
+KB_ONNX_MODEL_FILE=model.onnx
+KB_ONNX_POOLING=cls
+```
+
+#### 方式二：硅基流动线上嵌入模型
+
+适合不想下载本地模型、或希望直接使用线上向量模型的场景。切换到硅基流动时，把 `.env` 改成：
+
+```env
+KB_EMBEDDING_PROVIDER=api
+SILICONFLOW_API_KEY=你的硅基流动Key
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_EMBEDDING_MODEL=BAAI/bge-m3
+SILICONFLOW_EMBEDDING_DIM=1024
+```
+
+可选模型：
+
+| 模型 | 维度 | 说明 |
+|------|------|------|
+| `BAAI/bge-m3` | 1024 | 推荐，多语言，通用检索 |
+| `BAAI/bge-large-zh-v1.5` | 1024 | 中文优化 |
+| `BAAI/bge-large-en-v1.5` | 1024 | 英文优化 |
+
+从本地 ONNX 切到硅基流动，或从硅基流动切回本地 ONNX 后，建议重建知识库索引。不同模型的向量维度和分布可能不同，旧索引继续混用会影响检索效果，维度不同还可能导致向量库写入失败。
 
 ### 支持的LLM提供商
 
