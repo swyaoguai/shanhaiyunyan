@@ -1,0 +1,14 @@
+{
+  "package_name": "embedding-model-bge-small-zh-v1.5",
+  "model_id": "Xenova/bge-small-zh-v1.5",
+  "base_model": "BAAI/bge-small-zh-v1.5",
+  "provider": "local_onnx",
+  "model_file": "model.onnx",
+  "tokenizer_file": "tokenizer.json",
+  "pooling": "cls",
+  "embedding_dim": 512,
+  "max_length": 512,
+  "license": "MIT",
+  "source": "https://huggingface.co/Xenova/bge-small-zh-v1.5",
+  "notes": "Chinese local ONNX embedding model for offline semantic recall and knowledge-base retrieval."
+}
