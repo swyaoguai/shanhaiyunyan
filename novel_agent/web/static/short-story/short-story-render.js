@@ -32,6 +32,32 @@ function renderShortStoryRawOutput(summaryText, content) {
     `;
 }
 
+function resolveShortStoryCategory(value, fallback = '其他') {
+    if (typeof normalizeShortStoryCategory === 'function') {
+        return normalizeShortStoryCategory(value, fallback);
+    }
+    const fallbackText = String(fallback || '其他').replace(/\s+/g, ' ').trim() || '其他';
+    const category = String(value || '').replace(/\s+/g, ' ').trim();
+    return (category || fallbackText).slice(0, 32) || '其他';
+}
+
+function getShortStoryMainCategoryOptions() {
+    const categories = Array.isArray(window.SHORT_STORY_MAIN_CATEGORIES)
+        ? window.SHORT_STORY_MAIN_CATEGORIES
+        : ['其他'];
+    return categories.map((item) => resolveShortStoryCategory(item)).filter(Boolean);
+}
+
+function renderShortStoryCategoryField(categoryDraft) {
+    const category = resolveShortStoryCategory(categoryDraft);
+    return `
+        <input id="short-story-category" list="short-story-category-options" type="text" maxlength="32" value="${escapeHtml(category)}" placeholder="输入或选择主分类" class="short-story-field" autocomplete="off">
+        <datalist id="short-story-category-options">
+            ${getShortStoryMainCategoryOptions().map((item) => `<option value="${escapeHtml(item)}"></option>`).join('')}
+        </datalist>
+    `;
+}
+
 function renderShortStorySection(meta, workflow, currentSectionId, actionsHtml, bodyHtml, noteHtml = '') {
     const status = getShortStorySectionStatus(meta.id, workflow, currentSectionId);
     const collapsed = isShortStorySectionCollapsed(meta.id, currentSectionId);
@@ -444,7 +470,7 @@ async function renderShortStoryInterface() {
     const totalWordDraft = workflow?.target_total_words || shortStoryState.draftTotalWords || 5000;
     const recommendedChapterWords = getRecommendedShortStoryChapterWords(totalWordDraft);
     const chapterWordDraft = workflow?.chapter_word_target || (shortStoryState.draftChapterWordsCustomized ? shortStoryState.draftChapterWords : recommendedChapterWords);
-    const categoryDraft = workflow?.category || workflow?.tone || shortStoryState.draftCategory || '其他';
+    const categoryDraft = resolveShortStoryCategory(workflow?.category || workflow?.tone || shortStoryState.draftCategory);
     const plannedChapterCount = Number(workflow?.planned_chapters || 0);
     const actualOutlineChapterCount = Array.isArray(workflow?.chapter_blueprints) ? workflow.chapter_blueprints.length : 0;
     const existingChapterCount = Array.isArray(workflow?.chapters) ? workflow.chapters.length : 0;
@@ -487,8 +513,8 @@ async function renderShortStoryInterface() {
                     <h1 class="short-story-title"><i class="ri-draft-line"></i>短篇创作</h1>
                     <div class="short-story-subtitle">按"统一输入 → 3个创意方案 → 导语 → 大纲 → 正文 → 质检 → 复审 → 书名 → 成稿"顺序推进。</div>
                     <div class="short-story-hero-chips">
-                        <span class="short-story-chip">当前阶段：${getShortStoryStageLabel(workflow?.state)}</span>
-                        <span class="short-story-chip">主分类：${categoryDraft}</span>
+                        <span class="short-story-chip">当前阶段：${escapeHtml(getShortStoryStageLabel(workflow?.state))}</span>
+                        <span class="short-story-chip">主分类：${escapeHtml(categoryDraft)}</span>
                         <span class="short-story-chip">计划章节：${workflow?.planned_chapters || 0}</span>
                         <span class="short-story-chip">已写章节：${workflow?.chapters?.length || 0}</span>
                         <span class="short-story-chip">${formatShortStorySavedTime()}</span>
@@ -546,9 +572,7 @@ async function renderShortStoryInterface() {
                         </div>
                         <div>
                             <label class="short-story-label">主分类</label>
-                            <select id="short-story-category" class="short-story-field">
-                                ${SHORT_STORY_MAIN_CATEGORIES.map((item) => `<option value="${item}" ${categoryDraft === item ? 'selected' : ''}>${item}</option>`).join('')}
-                            </select>
+                            ${renderShortStoryCategoryField(categoryDraft)}
                         </div>
                     </div>
                     <div class="short-story-action-row">
@@ -661,7 +685,7 @@ function renderShortStorySections(flags) {
         currentSectionId,
         `
             <button id="short-story-generate-synopsis" class="short-story-btn short-story-btn-primary" ${flags.canGenerateSynopsis && !isShortStoryActionLoading('generate-synopsis') ? '' : 'disabled'}>
-                ${getShortStoryButtonLabel('generate-synopsis', '生成导语', '生成中...')}
+                ${getShortStoryButtonLabel('generate-synopsis', (workflow?.synopsis_candidates?.length || 0) > 0 ? '重新生成 5 条导语' : '生成 5 条导语', '生成中...')}
             </button>
         `,
         `
@@ -948,6 +972,9 @@ function renderShortStoryFinalView(workflow) {
 
 window.renderShortStoryLoadingBanner = renderShortStoryLoadingBanner;
 window.renderShortStoryRawOutput = renderShortStoryRawOutput;
+window.resolveShortStoryCategory = resolveShortStoryCategory;
+window.getShortStoryMainCategoryOptions = getShortStoryMainCategoryOptions;
+window.renderShortStoryCategoryField = renderShortStoryCategoryField;
 window.renderShortStorySection = renderShortStorySection;
 window.renderShortStoryPartialChapterResume = renderShortStoryPartialChapterResume;
 window.renderShortStoryScrollTools = renderShortStoryScrollTools;

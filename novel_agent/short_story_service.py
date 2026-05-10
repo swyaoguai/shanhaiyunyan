@@ -80,6 +80,17 @@ SHORT_STORY_MAIN_CATEGORIES = [
     "其他",
 ]
 
+
+def _normalize_main_category(value: Any, fallback: str = "其他") -> str:
+    """Normalize a built-in or user-defined short-story main category."""
+
+    fallback_text = re.sub(r"\s+", " ", str(fallback or "其他")).strip() or "其他"
+    category = re.sub(r"\s+", " ", str(value or "").strip())
+    if not category:
+        category = fallback_text
+    return category[:32] or "其他"
+
+
 SHORT_STORY_TAG_GROUPS = {
     "plot_tags": [
         "追妻火葬场",
@@ -574,6 +585,7 @@ TAG_SELECTION_PROMPT_TEMPLATE = """你是一位短篇内容运营编辑，需要
 
 请严格执行：
 1. 主分类固定使用“用户指定主分类”，不要改写。
+   如果用户指定主分类不在候选列表中，也必须原样使用用户指定主分类。
 2. 除主分类外，再从标签库中选出最贴切的 4 到 7 个标签，优先输出 7 个。
 3. 不得自造标签，不得输出标签库之外的内容。
 4. 标签尽量覆盖多个维度，但以贴合作品为准。
@@ -805,7 +817,6 @@ def parse_title_candidates(raw_text: str) -> List[Dict[str, Any]]:
 def parse_story_tags(raw_text: str, default_category: str = "") -> Dict[str, Any]:
     """从模型输出中解析主分类和内容标签。"""
 
-    allowed_categories = set(SHORT_STORY_MAIN_CATEGORIES)
     allowed_map = {group: set(items) for group, items in SHORT_STORY_TAG_GROUPS.items()}
     data: Dict[str, Any] = {}
     text = (raw_text or "").strip()
@@ -818,12 +829,10 @@ def parse_story_tags(raw_text: str, default_category: str = "") -> Dict[str, Any
             except json.JSONDecodeError:
                 data = {}
 
-    if default_category and default_category in allowed_categories:
-        main_category = default_category
-    else:
-        main_category = str(data.get("main_category") or "").strip()
-        if main_category not in allowed_categories:
-            main_category = "其他"
+    main_category = _normalize_main_category(
+        default_category or data.get("main_category") or "",
+        default_category or "其他",
+    )
 
     normalized: Dict[str, Any] = {"main_category": main_category}
     selected_all: List[str] = []
@@ -1339,6 +1348,7 @@ class ShortStoryWorkflowStateMachine:
         source_input: str = "",
     ) -> None:
         normalized_keywords = self._normalize_keywords(keywords or [])
+        normalized_category = _normalize_main_category(category)
         raw_input = (source_input or "").strip()
         if not raw_input and normalized_keywords:
             raw_input = "、".join(normalized_keywords)
@@ -1378,8 +1388,8 @@ class ShortStoryWorkflowStateMachine:
                 "chapter_word_target": int(plan["chapter_word_target"]),
                 "chapter_word_min": int(plan["chapter_word_min"]),
                 "chapter_word_max": int(plan["chapter_word_max"]),
-                "category": category if category in SHORT_STORY_MAIN_CATEGORIES else "其他",
-                "tone": category if category in SHORT_STORY_MAIN_CATEGORIES else "其他",
+                "category": normalized_category,
+                "tone": normalized_category,
                 "warnings": warnings,
                 "selected_synopsis": "",
                 "selected_synopsis_index": None,
@@ -1398,7 +1408,7 @@ class ShortStoryWorkflowStateMachine:
                 "selected_title": "",
                 "selected_title_index": None,
                 "story_tags": {
-                    "main_category": category if category in SHORT_STORY_MAIN_CATEGORIES else "其他",
+                    "main_category": normalized_category,
                     "plot_tags": [],
                     "role_tags": [],
                     "emotion_tags": [],
@@ -1812,7 +1822,7 @@ class ShortStoryWorkflowStateMachine:
 
     def record_story_tags(self, story_tags: Dict[str, Any]) -> None:
         self._assert_state([ShortStoryStage.ASSEMBLING_OUTPUT, ShortStoryStage.COMPLETED])
-        normalized = self._normalize_story_tags(story_tags)
+        normalized = self._normalize_story_tags(story_tags, self.state.get("category") or "其他")
         self.state["story_tags"] = normalized
         self.state["category"] = normalized["main_category"]
         self.state["tone"] = normalized["main_category"]
@@ -1828,7 +1838,7 @@ class ShortStoryWorkflowStateMachine:
 
         title = self.state["selected_title"]
         keywords_line = " | ".join(self.state.get("keywords", []))
-        story_tags = self._normalize_story_tags(self.state.get("story_tags", {}))
+        story_tags = self._normalize_story_tags(self.state.get("story_tags", {}), self.state.get("category") or "其他")
         main_category = story_tags.get("main_category") or self.state.get("category") or "其他"
         tag_line = " | ".join(story_tags.get("all_tags", []))
         synopsis = self.state["selected_synopsis"]
@@ -1947,9 +1957,7 @@ class ShortStoryWorkflowStateMachine:
         merged["chapter_word_target"] = int(plan["chapter_word_target"])
         merged["chapter_word_min"] = int(plan["chapter_word_min"])
         merged["chapter_word_max"] = int(plan["chapter_word_max"])
-        category = str(merged.get("category") or merged.get("tone") or "其他").strip()
-        if category not in SHORT_STORY_MAIN_CATEGORIES:
-            category = "其他"
+        category = _normalize_main_category(merged.get("category") or merged.get("tone") or "其他")
         merged["category"] = category
         merged["tone"] = category
         merged["synopsis_candidates"] = self._normalize_named_candidates(
@@ -2110,9 +2118,7 @@ class ShortStoryWorkflowStateMachine:
     @staticmethod
     def _normalize_story_tags(story_tags: Optional[Dict[str, Any]], default_category: str = "其他") -> Dict[str, Any]:
         payload = story_tags if isinstance(story_tags, dict) else {}
-        main_category = str(payload.get("main_category") or default_category or "其他").strip()
-        if main_category not in SHORT_STORY_MAIN_CATEGORIES:
-            main_category = "其他"
+        main_category = _normalize_main_category(payload.get("main_category") or default_category, default_category)
 
         normalized = {"main_category": main_category}
         all_tags: List[str] = []
@@ -2219,6 +2225,7 @@ class ShortStoryCreatorService:
                 },
             ],
             "main_categories": SHORT_STORY_MAIN_CATEGORIES,
+            "custom_main_category_supported": True,
             "tag_groups": SHORT_STORY_TAG_GROUPS,
         }
 

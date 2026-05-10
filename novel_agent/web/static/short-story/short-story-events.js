@@ -4,6 +4,15 @@
 
 let shortStoryLoadingHeartbeatTimer = null;
 
+function resolveShortStoryCategoryInput(value, fallback = '其他') {
+    if (typeof normalizeShortStoryCategory === 'function') {
+        return normalizeShortStoryCategory(value, fallback);
+    }
+    const fallbackText = String(fallback || '其他').replace(/\s+/g, ' ').trim() || '其他';
+    const category = String(value || '').replace(/\s+/g, ' ').trim();
+    return (category || fallbackText).slice(0, 32) || '其他';
+}
+
 function syncShortStoryLoadingHeartbeat() {
     if (shortStoryLoadingHeartbeatTimer) {
         clearInterval(shortStoryLoadingHeartbeatTimer);
@@ -43,7 +52,7 @@ async function ensureShortStoryWorkflowForSourceInput() {
     const totalWords = parseInt(document.getElementById('short-story-total-words')?.value || '5000', 10);
     const recommendedChapterWords = getRecommendedShortStoryChapterWords(totalWords);
     const chapterWords = parseInt(document.getElementById('short-story-chapter-words')?.value || `${recommendedChapterWords}`, 10);
-    const category = document.getElementById('short-story-category')?.value || '其他';
+    const category = resolveShortStoryCategoryInput(document.getElementById('short-story-category')?.value);
 
     shortStoryState.draftSourceInput = sourceInput;
     shortStoryState.draftKeywords = sourceInput;
@@ -210,13 +219,13 @@ function bindShortStoryDraftAutosave() {
     }, 'change');
 
     bindInput('#short-story-category', (element) => {
-        shortStoryState.draftCategory = element.value || '其他';
+        shortStoryState.draftCategory = resolveShortStoryCategoryInput(element.value);
         const workflow = getCurrentShortStoryWorkflow();
         if (workflow) {
             workflow.category = shortStoryState.draftCategory;
             workflow.tone = shortStoryState.draftCategory;
         }
-    }, 'change');
+    });
 
     bindInput('#short-story-synopsis-feedback', (element) => {
         shortStoryState.synopsisFeedback = element.value;

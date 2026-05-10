@@ -36,7 +36,7 @@ function resetSharedGlobals() {
   window.bindRegexRuleEvents = window.bindRegexRuleEvents || vi.fn();
   window.bindSkillsSettingsEvents = window.bindSkillsSettingsEvents || vi.fn();
 
-  window.shortStoryState = {
+  const shortStoryStateDefaults = {
     apiConfigs: [],
     globalModel: '',
     selectedApiConfigId: '',
@@ -44,6 +44,12 @@ function resetSharedGlobals() {
     selectedModel: '',
     globalConfigured: false,
     workflow: null,
+    draftCategory: '其他',
+    draftSourceInput: '',
+    draftKeywords: '',
+    draftTotalWords: 5000,
+    draftChapterWords: 800,
+    draftChapterWordsCustomized: false,
     synopsisRawOutput: '',
     outlineRawOutput: '',
     qualityReportDraft: '',
@@ -58,15 +64,26 @@ function resetSharedGlobals() {
     qualitySuggestedChapters: [],
     coherenceSuggestedChapters: [],
     partialChapterGeneration: null,
+    activeView: 'panel',
     collapsedSections: {},
+    draftSavedAt: 0,
     loadingAction: '',
     loadingStartedAt: 0,
     batchGenerationProgress: null,
     highlightSection: ''
   };
+  if (window.shortStoryState && typeof window.shortStoryState === 'object') {
+    Object.keys(window.shortStoryState).forEach((key) => {
+      delete window.shortStoryState[key];
+    });
+    Object.assign(window.shortStoryState, shortStoryStateDefaults);
+  } else {
+    window.shortStoryState = shortStoryStateDefaults;
+  }
   window.isShortStorySectionCollapsed = vi.fn(() => false);
 
   window.bindShortStoryDraftAutosave = vi.fn();
+  window.markShortStoryDraftSaved = vi.fn();
   window.saveShortStoryData = vi.fn();
   window.persistShortStoryProjectStateNow = vi.fn().mockResolvedValue(undefined);
   window.hydrateShortStoryProjectState = vi.fn().mockResolvedValue(undefined);
@@ -100,6 +117,7 @@ beforeAll(() => {
   loadBrowserScript('novel_agent/web/static/short-story/short-story-api.js');
   loadBrowserScript('novel_agent/web/static/short-story/short-story-render.js');
   loadBrowserScript('novel_agent/web/static/short-story/short-story-events.js');
+  window.__actualBindShortStoryDraftAutosave = window.bindShortStoryDraftAutosave;
 });
 
 beforeEach(() => {
@@ -688,6 +706,68 @@ describe('short-story DOM regressions', () => {
     expect(document.getElementById('short-story-generate-fusion')).not.toBeNull();
     expect(document.getElementById('short-story-generate-fusion')?.textContent).toContain('再来 3 个方案');
     expect(document.querySelector('.short-story-select-fusion')).toBeInstanceOf(HTMLButtonElement);
+  });
+
+  it('allows typing a custom short-story main category while keeping built-in suggestions', async () => {
+    window.SHORT_STORY_MAIN_CATEGORIES = ['婚姻家庭', '悬疑惊悚', '其他'];
+    window.shortStoryState.draftCategory = '都市怪谈';
+
+    document.body.innerHTML = window.renderShortStoryCategoryField(window.shortStoryState.draftCategory);
+    window.bindShortStoryEvents();
+
+    const categoryInput = document.getElementById('short-story-category');
+    expect(categoryInput).toBeInstanceOf(HTMLInputElement);
+    expect(categoryInput?.getAttribute('list')).toBe('short-story-category-options');
+    expect(categoryInput?.value).toBe('都市怪谈');
+    expect(document.querySelector('#short-story-category-options option[value="悬疑惊悚"]')).not.toBeNull();
+
+    window.eval('markShortStoryDraftSaved = function() {};');
+    window.bindShortStoryDraftAutosave = window.__actualBindShortStoryDraftAutosave;
+    window.bindShortStoryDraftAutosave();
+    categoryInput.value = '赛博民俗';
+    categoryInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(window.shortStoryState.draftCategory).toBe('赛博民俗');
+  });
+
+  it('renders five synopsis choices and exposes a regenerate action', () => {
+    window.shortStoryState.workflow = {
+      state: 'awaiting_synopsis_selection',
+      selected_fusion: { title: '暗房追索' },
+      synopsis_candidates: [
+        { index: 1, style: '悬疑向', content: '第一条导语。' },
+        { index: 2, style: '温情向', content: '第二条导语。' },
+        { index: 3, style: '反转向', content: '第三条导语。' },
+        { index: 4, style: '暗黑向', content: '第四条导语。' },
+        { index: 5, style: '治愈向', content: '第五条导语。' }
+      ],
+      fusion_candidates: [],
+      chapters: [],
+      planned_chapters: 0,
+      chapter_blueprints: []
+    };
+    window.getCurrentShortStoryWorkflow = vi.fn(() => window.shortStoryState.workflow);
+    window.isShortStoryActionLoading = vi.fn(() => false);
+    window.getShortStoryButtonLabel = vi.fn((action, idle) => idle);
+
+    document.body.innerHTML = '<div id="short-story-sections"></div>';
+    window.renderShortStorySections({
+      hasWorkflow: true,
+      canGenerateFusion: false,
+      canGenerateSynopsis: true,
+      canGenerateOutline: false,
+      canConfirmOutline: false,
+      canWriteContent: false,
+      canQualityCheck: false,
+      canCoherenceReview: false,
+      canGenerateTitles: false,
+      canAssemble: false,
+      hasPlaceholderBlueprints: false
+    });
+
+    expect(document.querySelectorAll('.short-story-select-synopsis')).toHaveLength(5);
+    expect(document.getElementById('short-story-generate-synopsis')?.textContent).toContain('重新生成 5 条导语');
+    expect(document.body.textContent).toContain('第五条导语。');
   });
 
   it('offers one-click input rewrite guidance when analysis confidence is low', () => {

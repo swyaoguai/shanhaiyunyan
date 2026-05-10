@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from novel_agent.agents.router_agent import RouterAgent, UserIntent
+from novel_agent.agents.router_agent import IntentAnalysis, RouterAgent, UserIntent
 from novel_agent.web.app import create_app
 from novel_agent.web.routes import short_story as short_story_routes
 
@@ -24,7 +24,7 @@ def _fake_prompt_output(prompt: str, api_config_id: str = "", model: str = "") -
   "constraints": [],
   "warnings": []
 }"""
-    if "生成 3 个“不同故事路数”的融合方案" in prompt:
+    if "生成 3 个“不同故事路数”的融合方案" in prompt or '生成 3 个"不同风格"的创意方案' in prompt:
         return """【方案一】
 标题：暗房追索
 路数：悬疑追查
@@ -447,6 +447,7 @@ def test_short_story_generate_all_keeps_partial_progress_when_later_chapter_fail
         if (
             "短篇小说创作输入分析师" in prompt
             or "生成 3 个“不同故事路数”的融合方案" in prompt
+            or '生成 3 个"不同风格"的创意方案' in prompt
             or "生成 5 条风格各异的故事导语" in prompt
             or "生成一份详细的短篇小说章节大纲" in prompt
         ):
@@ -964,7 +965,17 @@ def test_short_story_run_prompt_connection_error_raises_http_502(monkeypatch):
         assert "无法连接到API服务器" in str(getattr(exc, "detail", exc))
 
 
-def test_router_guides_short_story_requests_to_fixed_panel():
+def test_router_guides_short_story_requests_to_fixed_panel(monkeypatch):
+    async def fake_analyze_intent_with_llm(self, message: str):
+        return IntentAnalysis(
+            primary_intent=UserIntent.CREATE_NOVEL,
+            confidence=0.96,
+            entities={"short_story_requested": True},
+            requires_knowledge_base=False,
+            requires_tool_call=False,
+        )
+
+    monkeypatch.setattr(RouterAgent, "_analyze_intent_with_llm", fake_analyze_intent_with_llm)
     router = RouterAgent(coordinator=None)
     message = "我想写个短篇，灵感是雨夜重逢，参考旧相机和失约这个钩子"
 
@@ -977,4 +988,4 @@ def test_router_guides_short_story_requests_to_fixed_panel():
     assert delegated["action"] == "open_short_story_panel"
     assert delegated["params"]["module"] == "short-story"
     assert "固定入口" in delegated["response"]
-    assert "3 个融合方案" in delegated["response"]
+    assert "3 个创意方案" in delegated["response"]

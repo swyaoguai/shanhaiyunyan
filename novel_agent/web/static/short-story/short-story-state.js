@@ -18,6 +18,12 @@ function escapeShortStoryRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeShortStoryCategory(value, fallback = '其他') {
+    const fallbackText = String(fallback || '其他').replace(/\s+/g, ' ').trim() || '其他';
+    const category = String(value || '').replace(/\s+/g, ' ').trim();
+    return (category || fallbackText).slice(0, 32) || '其他';
+}
+
 function coerceShortStoryChapterNumber(value, fallback) {
     const text = String(value || '').trim();
     if (/^\d+$/.test(text)) {
@@ -221,7 +227,7 @@ function applyShortStoryProjectState(data = {}) {
     shortStoryState.draftChapterWords = shortStoryState.draftChapterWordsCustomized
         ? Number(data.draftChapterWords || workflowChapterWords)
         : workflowChapterWords;
-    shortStoryState.draftCategory = data.draftCategory || data.draftTone || defaults.draftCategory;
+    shortStoryState.draftCategory = normalizeShortStoryCategory(data.draftCategory || data.draftTone, defaults.draftCategory);
     shortStoryState.inputAnalysisRawOutput = data.inputAnalysisRawOutput || defaults.inputAnalysisRawOutput;
     shortStoryState.fusionRawOutput = data.fusionRawOutput || defaults.fusionRawOutput;
     shortStoryState.synopsisRawOutput = data.synopsisRawOutput || defaults.synopsisRawOutput;
@@ -481,7 +487,7 @@ function syncShortStoryWorkflowDrafts() {
     const totalWords = parseInt(document.getElementById('short-story-total-words')?.value || `${shortStoryState.draftTotalWords || 5000}`, 10);
     const recommendedChapterWords = getRecommendedShortStoryChapterWords(totalWords);
     const chapterWords = parseInt(document.getElementById('short-story-chapter-words')?.value || `${shortStoryState.draftChapterWords || recommendedChapterWords}`, 10);
-    const category = document.getElementById('short-story-category')?.value || shortStoryState.draftCategory || '其他';
+    const category = normalizeShortStoryCategory(document.getElementById('short-story-category')?.value || shortStoryState.draftCategory);
 
     shortStoryState.draftSourceInput = sourceInput;
     shortStoryState.draftKeywords = sourceInput;
@@ -548,6 +554,7 @@ window.isShortStorySectionCollapsed = isShortStorySectionCollapsed;
 window.markShortStoryDraftSaved = markShortStoryDraftSaved;
 window.resetShortStoryWorkflowArtifacts = resetShortStoryWorkflowArtifacts;
 window.resetShortStoryReviewArtifacts = resetShortStoryReviewArtifacts;
+window.normalizeShortStoryCategory = normalizeShortStoryCategory;
 window.parseShortStoryKeywords = parseShortStoryKeywords;
 window.getRecommendedShortStoryChapterWords = getRecommendedShortStoryChapterWords;
 window.syncShortStoryWorkflowDrafts = syncShortStoryWorkflowDrafts;

@@ -77,10 +77,46 @@ def test_short_story_capabilities_expose_workflow_metadata():
     assert result["module"] == "short_story"
     assert "generating_fusion_options" in result["states"]
     assert "generating_synopsis" in result["states"]
+    assert result["custom_main_category_supported"] is True
     assert len(result["steps"]) == 8
     assert result["chapter_word_target_range"] == [500, 3000]
     assert result["chapter_word_count_range"] == [400, 3100]
     assert result["chapter_plan_rules"][0]["mode"] == "dynamic_by_total_and_chapter_words"
+
+
+def test_custom_main_category_is_preserved_in_workflow_and_tags():
+    service = ShortStoryCreatorService()
+    custom_category = "都市怪谈"
+
+    workflow = service.start_workflow(
+        keywords=["雨夜", "旧楼", "失踪"],
+        target_total_words=4200,
+        category=custom_category,
+    )["data"]["workflow"]
+
+    assert workflow["category"] == custom_category
+    assert workflow["tone"] == custom_category
+    assert workflow["story_tags"]["main_category"] == custom_category
+
+    parsed = parse_story_tags(
+        """{
+  "main_category": "女性成长",
+  "plot_tags": ["推理"],
+  "role_tags": ["医生"],
+  "emotion_tags": ["惊悚"],
+  "background_tags": ["现代"]
+}""",
+        default_category=custom_category,
+    )
+    assert parsed["main_category"] == custom_category
+
+    workflow["state"] = "assembling_output"
+    tagged = service.record_story_tags(
+        workflow,
+        {"plot_tags": ["推理"], "role_tags": ["医生"], "emotion_tags": ["惊悚"], "background_tags": ["现代"]},
+    )["data"]["workflow"]
+    assert tagged["category"] == custom_category
+    assert tagged["story_tags"]["main_category"] == custom_category
 
 
 def test_short_story_start_workflow_accepts_unified_source_input():
