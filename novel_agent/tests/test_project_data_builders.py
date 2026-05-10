@@ -129,6 +129,34 @@ async def test_chapter_setting_builder_fallback_adds_required_fields(model_confi
 
 
 @pytest.mark.asyncio
+async def test_chapter_setting_builder_fallback_expands_global_outline_to_total_chapters(model_config, monkeypatch):
+    builder = _build_agent(ChapterSettingBuilderAgent, model_config)
+
+    async def _fake_call_llm(messages, temperature=None, max_tokens=None, stream=False, enable_retry=True):
+        return "主线大纲正文，但不是 JSON"
+
+    monkeypatch.setattr(builder, "call_llm", _fake_call_llm)
+    result = await builder.execute(
+        {
+            "user_request": "生成章纲",
+            "total_chapters": 3,
+            "outline_rows": [
+                {
+                    "title": "主线大纲",
+                    "summary": "旧城幸存者回归，追查宗门覆灭真相。",
+                    "global_outline": "旧城幸存者回归，追查宗门覆灭真相。",
+                }
+            ],
+        }
+    )
+
+    assert result["success"] is True
+    assert result["fallback_used"] is True
+    assert [row["chapter_number"] for row in result["rows"]] == [1, 2, 3]
+    assert result["rows"][0]["chapter_goal"] == "旧城幸存者回归，追查宗门覆灭真相。"
+
+
+@pytest.mark.asyncio
 async def test_chapter_setting_builder_fallback_adds_plot_thread_from_eventline(model_config, monkeypatch):
     builder = _build_agent(ChapterSettingBuilderAgent, model_config)
 

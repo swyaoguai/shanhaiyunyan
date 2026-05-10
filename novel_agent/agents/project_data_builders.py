@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from .base_agent import BaseAgent
+from .base_agent import AgentCapability, BaseAgent
 from .structured_output import StructuredOutputValidator
 
 
@@ -28,6 +28,23 @@ class _ProjectDataBuilderAgent(BaseAgent):
 
     def __init__(self, name: str):
         super().__init__(name=name, prompt_file=None)
+
+    def get_capabilities(self) -> AgentCapability:
+        """Expose project-data builders to the formal task router."""
+        task_type = str(self.output_key or "").strip()
+        return AgentCapability(
+            agent_name=self.name,
+            capabilities=[task_type, f"build_{task_type}"] if task_type else [],
+            accept_task_types=[task_type] if task_type else [],
+            required_inputs=["outline_rows"],
+            produced_outputs=[task_type, "rows"] if task_type else ["rows"],
+            priority=90,
+            max_concurrency=1,
+            metadata={
+                "agent_class": self.__class__.__name__,
+                "data_type": task_type,
+            },
+        )
 
     def _get_default_prompt(self) -> str:
         return (
@@ -337,6 +354,39 @@ class ChapterSettingBuilderAgent(_ProjectDataBuilderAgent):
         outline_rows = input_data.get("outline_rows")
         if not isinstance(outline_rows, list):
             return []
+
+        try:
+            total_chapters = max(0, int(input_data.get("total_chapters") or 0))
+        except (TypeError, ValueError):
+            total_chapters = 0
+        if total_chapters > len(outline_rows) and len(outline_rows) <= 1:
+            source_row = outline_rows[0] if outline_rows and isinstance(outline_rows[0], dict) else {}
+            overview = self._stringify_outline_field(
+                source_row,
+                "summary",
+                "global_outline",
+                "story_synopsis",
+                "volume_plan",
+                "description",
+                "content",
+            )
+            expanded_rows: List[Dict[str, Any]] = []
+            for chapter_number in range(1, total_chapters + 1):
+                expanded_rows.append(
+                    self._build_fallback_row(
+                        {
+                            **source_row,
+                            "chapter_number": chapter_number,
+                            "title": f"第{chapter_number}章",
+                            "summary": overview or f"依据主线大纲推进第{chapter_number}章剧情",
+                        },
+                        chapter_number,
+                    )
+                )
+            return self._enrich_rows_with_eventlines(
+                self._normalize_rows(expanded_rows),
+                input_data,
+            )
 
         fallback_rows: List[Dict[str, Any]] = []
         for index, item in enumerate(outline_rows, start=1):

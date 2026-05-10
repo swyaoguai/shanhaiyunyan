@@ -21,6 +21,7 @@ class ProjectReadyTaskExecutor:
             "build_world": self._execute_build_world,
             "build_characters": self._execute_build_characters,
             "build_outline": self._execute_build_outline,
+            "chapter_settings": self._execute_chapter_settings,
             "write_chapter": self._execute_write_chapter,
             "summary_orchestrate": self._execute_summary_orchestrate,
         }
@@ -276,26 +277,79 @@ class ProjectReadyTaskExecutor:
         result_ref = ""
         if isinstance(result_payload, dict):
             outline_data = result_payload.get("outline", {})
-            if isinstance(outline_data, dict) and outline_data:
+            if outline_data:
                 self.coordinator.context_manager.save("outline", outline_data, "plot")
-                outline_rows = self.coordinator._extract_chapters(outline_data)
+                outline_rows = self.coordinator._outline_to_project_rows(outline_data)
                 if outline_rows:
-                    timestamp = datetime.now().isoformat()
-                    project_rows = []
-                    for index, chapter in enumerate(outline_rows, start=1):
-                        title = str(chapter.get("title") or f"第{index}章").strip() if isinstance(chapter, dict) else f"第{index}章"
-                        summary = str(chapter.get("summary") or "").strip() if isinstance(chapter, dict) else str(chapter or "").strip()
-                        project_rows.append({
-                            "chapter_number": index,
-                            "title": title,
-                            "summary": summary,
-                            "content": "",
-                            "created_at": timestamp,
-                            "updated_at": timestamp,
-                        })
-                    self.coordinator.project_manager.save_project_data("outline", project_rows)
-                    self.coordinator._sync_outline_to_library(project_rows)
+                    self.coordinator._persist_outline_rows(outline_rows)
+                self.coordinator._sync_eventlines_from_outline(outline_data)
             result_ref = "outline.json"
+
+        metadata_patch = self.coordinator._build_metadata_patch(run_result)
+        return {
+            "run_result": run_result,
+            "result_ref": result_ref,
+            "metadata_patch": metadata_patch,
+            "chapter_task_executed": False,
+        }
+
+    async def _execute_chapter_settings(self, current_task: Any) -> Dict[str, Any]:
+        """Execute chapter_settings task and persist rows before chapter writing."""
+        input_data = self._enrich_input_with_creation_contract(
+            "chapter_settings",
+            dict(current_task.inputs or {}),
+        )
+        outline_rows = self.coordinator._load_project_outline_rows()
+        eventlines = self.coordinator.project_manager.load_project_data("eventlines")
+        if not isinstance(eventlines, list):
+            eventlines = []
+        world = self.coordinator.world_manager.get_world_context()
+        characters = self.coordinator.character_manager.export_for_llm()
+
+        input_data["outline_rows"] = outline_rows
+        input_data["eventlines"] = [row for row in eventlines if isinstance(row, dict)]
+        input_data.setdefault("world_summary", str(world or ""))
+        input_data.setdefault(
+            "user_request",
+            current_task.description or current_task.title or "生成章纲设定",
+        )
+        task_context = {
+            "project_dir": str(self.coordinator.project_dir),
+            "outline_rows": outline_rows,
+            "eventlines": input_data["eventlines"],
+            "world": world,
+            "characters": characters,
+        }
+
+        run_result = await self.coordinator._run_autonomous_task(
+            task_type="chapter_settings",
+            input_data=input_data,
+            context=task_context,
+            fallback_agent=self._registered_fallback_agent(
+                "chapter_settings",
+                self.coordinator.chapter_setting_builder,
+            ),
+            stage="project_ready",
+            title=current_task.title,
+            description=current_task.description,
+            expected_outputs=current_task.expected_outputs,
+            review_required=bool(current_task.review_required),
+        )
+
+        result_payload = run_result.get("result", {})
+        rows: List[Dict[str, Any]] = []
+        if isinstance(result_payload, dict):
+            raw_rows = result_payload.get("chapter_settings") or result_payload.get("rows") or []
+            if isinstance(raw_rows, list):
+                rows = [dict(row) for row in raw_rows if isinstance(row, dict)]
+
+        result_ref = ""
+        if rows:
+            self.coordinator.project_manager.save_project_data("chapter_settings", rows)
+            self.coordinator._sync_chapter_settings_to_library(rows)
+            result_ref = "chapter_settings.json"
+        else:
+            raise RuntimeError("章纲设定生成未产出有效条目")
 
         metadata_patch = self.coordinator._build_metadata_patch(run_result)
         return {

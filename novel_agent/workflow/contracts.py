@@ -283,6 +283,7 @@ def build_default_creation_contract(
             "worldbuilding.json",
             "characters.json",
             "outline.json",
+            "chapter_settings.json",
             "chapters/*.md",
             "stage_summaries/*.md",
         ],
@@ -415,6 +416,33 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
             },
             review_required=True,
         ),
+        TaskDefinition(
+            task_type="chapter_settings",
+            title="生成章纲设定",
+            description="基于大纲生成逐章可执行章纲，作为正文写作前置资料",
+            priority=94,
+            depends_on=[],
+            dependencies=[
+                TaskDependency(
+                    dependency_key="outline_ready",
+                    required=True,
+                    description="需要先完成大纲生成",
+                )
+            ],
+            expected_outputs=["chapter_settings.json"],
+            candidate_agents=["ChapterSettingBuilder"],
+            inputs={
+                "user_request": "请基于已确认的大纲生成逐章章纲设定，供后续正文写作严格引用。",
+                "volume_count": scope.get("volume_count", 1),
+                "chapters_per_volume": scope.get("chapters_per_volume", 5),
+                "total_chapters": total_chapters,
+                "target_word_count": target_word_count,
+                "target_words_per_chapter": target_words_per_chapter,
+                "ai_autonomy_requested": ai_autonomy_requested,
+                **({"autonomous_brief": autonomous_brief} if autonomous_brief else {}),
+                **discussion_inputs,
+            },
+        ),
     ]
 
     for chapter_number in range(1, total_chapters + 1):
@@ -427,9 +455,9 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 depends_on=[],
                 dependencies=[
                     TaskDependency(
-                        dependency_key="outline_ready",
+                        dependency_key="chapter_settings_ready",
                         required=True,
-                        description="需要先完成大纲生成",
+                        description="需要先完成章纲设定生成",
                     )
                 ],
                 expected_outputs=[f"chapters/chapter_{chapter_number}.md"],

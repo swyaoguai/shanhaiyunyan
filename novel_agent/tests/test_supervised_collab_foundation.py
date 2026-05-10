@@ -102,6 +102,28 @@ def build_character_stub() -> StubAgent:
     )
 
 
+def build_chapter_settings_stub(total_chapters: int = 2) -> StubAgent:
+    return StubAgent(
+        "AutoChapterSettingBuilder",
+        accepted_tasks=["chapter_settings"],
+        priority=94,
+        result={
+            "success": True,
+            "rows": [
+                {
+                    "name": f"第{chapter_number}章",
+                    "description": f"章纲摘要{chapter_number}",
+                    "chapter_number": chapter_number,
+                    "chapter_goal": f"目标{chapter_number}",
+                    "key_event": f"事件{chapter_number}",
+                    "ending_hook": f"钩子{chapter_number}",
+                }
+                for chapter_number in range(1, total_chapters + 1)
+            ],
+        },
+    )
+
+
 @pytest.fixture
 def mock_model_config():
     return AgentModelConfig(
@@ -206,12 +228,14 @@ class TestContractModels:
         assert contract.scope["total_chapters"] == 6
         assert contract.user_confirmed is True
         assert contract.metadata["draft"] is False
-        assert len(task_graph) == 9
+        assert len(task_graph) == 10
         assert task_graph[0].task_type == "build_world"
         assert task_graph[1].task_type == "build_characters"
         assert task_graph[2].task_type == "build_outline"
-        assert task_graph[3].task_type == "write_chapter"
+        assert task_graph[3].task_type == "chapter_settings"
+        assert task_graph[4].task_type == "write_chapter"
         assert task_graph[-1].inputs["chapter_number"] == 6
+        assert task_graph[4].dependencies[0].dependency_key == "chapter_settings_ready"
 
     def test_build_default_task_graph_adds_stage_summary_tasks_for_ten_chapters(self):
         contract = build_default_creation_contract(
@@ -252,6 +276,7 @@ class TestContractModels:
         assert "合欢宗元素" in task_by_type["build_world"].inputs["discussion_context"]
         assert "合欢宗元素" in task_by_type["build_characters"].inputs["recent_discussion"]
         assert "合欢宗元素" in task_by_type["build_outline"].inputs["discussion_context"]
+        assert "合欢宗元素" in task_by_type["chapter_settings"].inputs["discussion_context"]
         assert "合欢宗元素" in task_by_type["write_chapter"].inputs["discussion_context"]
 
 
@@ -1177,7 +1202,7 @@ class TestCoordinatorContractConfirmation:
             priority=95,
             result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
         )
-        registry.register_many([failing_world_agent, outline_agent])
+        registry.register_many([failing_world_agent, fallback_world_agent, outline_agent])
 
         coordinator.capability_registry = registry
         coordinator.worldbuilder = fallback_world_agent
@@ -1298,6 +1323,7 @@ class TestCoordinatorContractConfirmation:
             },
         )
         character_agent = build_character_stub()
+        chapter_settings_agent = build_chapter_settings_stub(total_chapters=2)
         context_agent = StubAgent(
             "AutoContextStrategy",
             accepted_tasks=["context_plan"],
@@ -1344,6 +1370,7 @@ class TestCoordinatorContractConfirmation:
             world_agent,
             character_agent,
             outline_agent,
+            chapter_settings_agent,
             context_agent,
             reader_agent,
             chapter_agent,
@@ -1356,6 +1383,7 @@ class TestCoordinatorContractConfirmation:
         coordinator.worldbuilder = world_agent
         coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
+        coordinator.chapter_setting_builder = chapter_settings_agent
         coordinator.context_strategy = context_agent
         coordinator.content_reader = reader_agent
         coordinator.chapter_writer = chapter_agent
@@ -1377,7 +1405,7 @@ class TestCoordinatorContractConfirmation:
         contract.task_graph = build_default_task_graph(contract)
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
-        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=4)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=5)
 
         task_by_type = {}
         for item in execute_result["task_pool"]["tasks"]:
@@ -1390,12 +1418,16 @@ class TestCoordinatorContractConfirmation:
         assert task_by_type["build_world"][0]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_characters"][0]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_outline"][0]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["chapter_settings"][0]["status"] == TaskStatus.COMPLETED
         assert first_write_task["status"] == TaskStatus.COMPLETED
         assert first_write_task["assigned_agent"] == "ChapterWriter"
         assert first_write_task["result_ref"]
         assert chapter_path.exists()
         assert chapter_path.read_text(encoding="utf-8") == "第一章正式正文"
         assert isinstance(outline_rows, list) and outline_rows[0]["content"] == "第一章正式正文"
+        saved_settings = coordinator.project_manager.load_project_data("chapter_settings")
+        assert saved_settings[0]["chapter_goal"] == "目标1"
+        assert "目标1" in chapter_agent.calls[0]["context"]["chapter_outline"]
         assert execute_result["stopped_on_task_type"] == ""
         assert execute_result["chapter_tasks_executed"] == 1
         assert execute_result["stop_reason"] == "max_tasks_reached"
@@ -1429,6 +1461,7 @@ class TestCoordinatorContractConfirmation:
             },
         )
         character_agent = build_character_stub()
+        chapter_settings_agent = build_chapter_settings_stub(total_chapters=3)
         context_agent = StubAgent(
             "AutoContextStrategy",
             accepted_tasks=["context_plan"],
@@ -1475,6 +1508,7 @@ class TestCoordinatorContractConfirmation:
             world_agent,
             character_agent,
             outline_agent,
+            chapter_settings_agent,
             context_agent,
             reader_agent,
             chapter_agent,
@@ -1487,6 +1521,7 @@ class TestCoordinatorContractConfirmation:
         coordinator.worldbuilder = world_agent
         coordinator.character_builder = character_agent
         coordinator.outliner = outline_agent
+        coordinator.chapter_setting_builder = chapter_settings_agent
         coordinator.context_strategy = context_agent
         coordinator.content_reader = reader_agent
         coordinator.chapter_writer = chapter_agent
@@ -1509,7 +1544,7 @@ class TestCoordinatorContractConfirmation:
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
         execute_result = await coordinator.execute_project_ready_tasks(
-            max_tasks=6,
+            max_tasks=7,
             max_chapter_tasks=2,
         )
 
@@ -1595,6 +1630,13 @@ class TestCoordinatorContractConfirmation:
                     TaskStatus.COMPLETED,
                     assigned_agent="Outliner",
                     result_ref="outline.json",
+                )
+            elif task.task_type == "chapter_settings":
+                runtime_pool.update_task_status(
+                    task.task_id,
+                    TaskStatus.COMPLETED,
+                    assigned_agent="ChapterSettingBuilder",
+                    result_ref="chapter_settings.json",
                 )
             elif task.task_type == "write_chapter":
                 chapter_number = int((task.inputs or {}).get("chapter_number") or 0)

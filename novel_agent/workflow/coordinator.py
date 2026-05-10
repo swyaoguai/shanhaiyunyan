@@ -27,6 +27,7 @@ from ..agents.chapter_writer import ChapterWriterAgent
 from ..agents.polisher import PolisherAgent
 from ..agents.evaluator import EvaluatorAgent
 from ..agents.character_builder import CharacterBuilderAgent
+from ..agents.project_data_builders import ChapterSettingBuilderAgent
 from ..agents.capability_registry import get_capability_registry
 from ..agents.message_bus import (
     get_message_bus, MessageType, AgentMessage,
@@ -182,6 +183,7 @@ class NovelCoordinator:
         self.polisher = PolisherAgent()
         self.evaluator = EvaluatorAgent()
         self.character_builder = CharacterBuilderAgent()
+        self.chapter_setting_builder = ChapterSettingBuilderAgent()
         self.collab_service_registry = CollabServiceRegistry()
         self.collab_service_registry.register_many(build_default_collab_service_registry())
         self.collab_agent_registry = CollabAgentRegistry(
@@ -257,6 +259,7 @@ class NovelCoordinator:
             self.polisher,
             self.evaluator,
             self.character_builder,
+            self.chapter_setting_builder,
         ])
         self.allow_ephemeral_agents = True
         self.routing_policy = RoutingPolicy.default()
@@ -331,6 +334,15 @@ class NovelCoordinator:
             svc.upsert_from_legacy("eventlines", eventline_rows)
         except Exception as e:
             logger.warning(f"[Coordinator] Library eventlines sync failed: {e}")
+
+    def _sync_chapter_settings_to_library(self, chapter_setting_rows: List[Dict[str, Any]]) -> None:
+        """Dedup: sync chapter settings to library service."""
+        try:
+            from ..library_service import get_library_service
+            svc = get_library_service()
+            svc.upsert_from_legacy("chapter_settings", chapter_setting_rows)
+        except Exception as e:
+            logger.warning(f"[Coordinator] Library chapter settings sync failed: {e}")
 
     def _sync_eventlines_from_outline(self, outline_data: Any) -> Dict[str, Any]:
         generated_rows = extract_eventlines_from_outline(outline_data)
@@ -421,6 +433,7 @@ class NovelCoordinator:
             self.polisher,
             self.evaluator,
             self.character_builder,
+            self.chapter_setting_builder,
             self.context_strategy,
             self.content_reader,
             self.content_expansion,
@@ -672,6 +685,7 @@ class NovelCoordinator:
             self.polisher,
             self.evaluator,
             self.character_builder,
+            self.chapter_setting_builder,
             self.context_strategy,
             self.content_reader,
             self.content_expansion,
@@ -959,6 +973,7 @@ class NovelCoordinator:
             "world_ready": first_by_type.get("build_world"),
             "characters_ready": first_by_type.get("build_characters"),
             "outline_ready": first_by_type.get("build_outline"),
+            "chapter_settings_ready": first_by_type.get("chapter_settings"),
         }
 
         for task in tasks:
@@ -1087,14 +1102,27 @@ class NovelCoordinator:
         return self._sort_chapter_rows(rows)
 
     def _load_project_chapter_rows(self) -> List[Dict[str, Any]]:
-        """Load executable chapter rows, preferring chapters and then chapter settings."""
+        """Load executable chapter rows, preferring chapter settings for planning."""
         chapter_rows = self.project_manager.load_project_data("chapters")
-        if isinstance(chapter_rows, list) and any(isinstance(row, dict) for row in chapter_rows):
-            return self._sort_chapter_rows([row for row in chapter_rows if isinstance(row, dict)])
-
+        chapter_rows = [row for row in chapter_rows if isinstance(row, dict)] if isinstance(chapter_rows, list) else []
         chapter_settings = self.project_manager.load_project_data("chapter_settings")
         if isinstance(chapter_settings, list) and any(isinstance(row, dict) for row in chapter_settings):
-            return self._chapter_rows_from_settings([row for row in chapter_settings if isinstance(row, dict)])
+            merged_by_number: Dict[int, Dict[str, Any]] = {}
+            for row in self._chapter_rows_from_settings([row for row in chapter_settings if isinstance(row, dict)]):
+                merged_by_number[int(row.get("chapter_number") or len(merged_by_number) + 1)] = dict(row)
+            for row in self._sort_chapter_rows(chapter_rows):
+                number = int(row.get("chapter_number") or len(merged_by_number) + 1)
+                target = merged_by_number.setdefault(number, dict(row))
+                content = str(row.get("content") or "").strip()
+                if content:
+                    target["content"] = content
+                    target["word_count"] = row.get("word_count", target.get("word_count", 0))
+                    target["source_file"] = row.get("source_file", target.get("source_file", ""))
+                    target["updated_at"] = row.get("updated_at", target.get("updated_at", ""))
+            return self._sort_chapter_rows(list(merged_by_number.values()))
+
+        if chapter_rows:
+            return self._sort_chapter_rows(chapter_rows)
 
         outline_rows = self._load_project_outline_rows()
         legacy_rows = extract_outline_chapter_rows(outline_rows)

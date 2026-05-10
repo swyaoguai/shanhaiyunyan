@@ -366,7 +366,7 @@ async def confirm_creation_contract(request: ConfirmCreationContractRequest):
 
     result = coordinator.initialize_task_pool_from_contract(payload, approved=True)
     ready_task_result = await coordinator.execute_project_ready_tasks(
-        max_tasks=4,
+        max_tasks=7,
         max_chapter_tasks=2,
     )
     return JSONResponse({

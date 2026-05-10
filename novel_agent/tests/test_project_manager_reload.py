@@ -90,6 +90,19 @@ def test_chapters_fallback_loads_legacy_markdown_files(tmp_path):
     assert chapters[0]["content"] == "旧章节正文"
 
 
+def test_empty_chapters_json_still_loads_markdown_files(tmp_path):
+    manager = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = manager.get_current_project_dir()
+    chapters_dir = project_dir / "chapters"
+    chapters_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "chapters.json").write_text("[]", encoding="utf-8")
+    (chapters_dir / "003_雨夜摊牌.md").write_text("第三章正文", encoding="utf-8")
+
+    chapters = manager.load_project_data("chapters")
+    assert chapters[0]["chapter_number"] == 3
+    assert chapters[0]["content"] == "第三章正文"
+
+
 def test_get_chapters_dir_returns_markdown_directory_not_chapters_json(tmp_path):
     manager = ProjectManager(data_dir=tmp_path / "data")
     chapters_dir = manager.get_chapters_dir()

@@ -316,16 +316,17 @@ class ProjectManager:
 
         proj_dir = self._get_project_dir(self.current_project_id)
         chapters_json = proj_dir / "chapters.json"
+        json_rows: List[Dict] = []
         if chapters_json.exists() and chapters_json.is_file():
             try:
                 payload = json.loads(chapters_json.read_text(encoding="utf-8"))
                 if isinstance(payload, list):
-                    return [row for row in payload if isinstance(row, dict)]
+                    json_rows = [row for row in payload if isinstance(row, dict)]
             except Exception as exc:
                 logger.warning(f"Failed to load chapters.json: {exc}")
 
         chapters_dir = proj_dir / "chapters"
-        chapter_rows: List[Dict] = []
+        file_rows: List[Dict] = []
         if chapters_dir.exists() and chapters_dir.is_dir():
             for index, file_path in enumerate(sorted(chapters_dir.glob("*.md")), start=1):
                 try:
@@ -335,18 +336,37 @@ class ProjectManager:
                     continue
                 chapter_number = self._extract_chapter_number(file_path.stem, index)
                 title = self._clean_chapter_title(file_path.stem, chapter_number)
-                chapter_rows.append({
+                file_rows.append({
                     "chapter_number": chapter_number,
                     "title": title,
                     "content": content,
                     "summary": content[:200],
                     "source_file": str(file_path),
                 })
-            if chapter_rows:
-                return sorted(chapter_rows, key=lambda row: int(row.get("chapter_number", 0) or 0))
+        if json_rows:
+            merged_by_number: Dict[int, Dict] = {}
+            for index, row in enumerate(json_rows, start=1):
+                number = self._extract_chapter_number(
+                    row.get("chapter_number") or row.get("number"),
+                    index,
+                )
+                copied = dict(row)
+                copied["chapter_number"] = number
+                merged_by_number[number] = copied
+            for index, row in enumerate(file_rows, start=1):
+                number = self._extract_chapter_number(row.get("chapter_number"), index)
+                target = merged_by_number.setdefault(number, dict(row))
+                if not str(target.get("content") or "").strip() and str(row.get("content") or "").strip():
+                    target.update(dict(row))
+                    target["chapter_number"] = number
+            return sorted(merged_by_number.values(), key=lambda row: int(row.get("chapter_number", 0) or 0))
+
+        if file_rows:
+            return sorted(file_rows, key=lambda row: int(row.get("chapter_number", 0) or 0))
 
         # Legacy compatibility: old builds stored chapter text inside outline rows.
         outline_path = proj_dir / "outline.json"
+        chapter_rows: List[Dict] = []
         if outline_path.exists() and outline_path.is_file():
             try:
                 outline_payload = json.loads(outline_path.read_text(encoding="utf-8"))
