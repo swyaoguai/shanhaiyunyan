@@ -417,8 +417,8 @@ describe('copilot realtime status', () => {
     expect(document.getElementById('copilot-workflow-panel')?.textContent).toContain('世界观构建');
     expect(document.getElementById('copilot-workflow-panel')?.textContent).toContain('正在生成世界观骨架');
     expect(document.getElementById('copilot-session-mode')?.textContent).toBe('模型：claude-opus-4-6');
-    expect(document.getElementById('copilot-session-agent')?.textContent).toContain('世界观构建师');
-    expect(document.getElementById('copilot-session-agent')?.textContent).not.toContain('准备就绪');
+    expect(document.getElementById('copilot-session-agent')?.textContent).toBe('');
+    expect(document.getElementById('copilot-session-agent')?.classList.contains('hidden')).toBe(true);
 
     await vi.advanceTimersByTimeAsync(1600);
     expect(statusFetchCount).toBe(1);

@@ -86,6 +86,7 @@ describe('copilot slash command prompts', () => {
     expect(window.apiCall).toHaveBeenCalledTimes(1);
     expect(window.showToast).not.toHaveBeenCalled();
     expect(window.store.copilotAutoSave.enabled).toBe(true);
+    expect(localStorage.getItem('copilot_chat_auto_save_enabled:project-1')).toBe('true');
 
     await vi.advanceTimersByTimeAsync(12000);
 
@@ -108,6 +109,24 @@ describe('copilot slash command prompts', () => {
 
     expect(document.getElementById('copilot-auto-save-toggle')?.checked).toBe(true);
     expect(document.getElementById('copilot-auto-save-status')?.textContent).toBe('已开启');
+  });
+
+  it('restores auto-save from local memory when project state has no saved preference', async () => {
+    localStorage.setItem('copilot_chat_auto_save_enabled:project-1', 'true');
+    window.store.currentProjectId = 'project-1';
+    window.store.copilotAutoSave = { enabled: false, loaded: false, projectId: null };
+    window.apiCall
+      .mockResolvedValueOnce({ success: true, data: null })
+      .mockResolvedValueOnce({ success: true });
+
+    await window.loadCopilotAutoSavePreference();
+
+    expect(window.store.copilotAutoSave.enabled).toBe(true);
+    expect(document.getElementById('copilot-auto-save-toggle')?.checked).toBe(true);
+    expect(document.getElementById('copilot-auto-save-status')?.textContent).toBe('已开启');
+    expect(window.apiCall).toHaveBeenLastCalledWith('/api/project-state/copilot_chat_auto_save', 'POST', {
+      data: { enabled: true }
+    });
   });
 
   it('does not render a manual creative mode selector in the Copilot input area', () => {

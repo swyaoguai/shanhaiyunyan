@@ -54,12 +54,65 @@ let mentionData = {
 };
 
 const COPILOT_AUTO_SAVE_STATE_KEY = 'copilot_chat_auto_save';
+const COPILOT_AUTO_SAVE_STORAGE_KEY = 'copilot_chat_auto_save_enabled';
 let copilotAutoSaveRetryTimer = null;
 
 function clearCopilotAutoSaveRetry() {
     if (copilotAutoSaveRetryTimer) {
         clearTimeout(copilotAutoSaveRetryTimer);
         copilotAutoSaveRetryTimer = null;
+    }
+}
+
+function getCopilotAutoSaveStorageKey(projectId) {
+    const normalizedProjectId = String(projectId || '').trim();
+    return normalizedProjectId
+        ? `${COPILOT_AUTO_SAVE_STORAGE_KEY}:${normalizedProjectId}`
+        : COPILOT_AUTO_SAVE_STORAGE_KEY;
+}
+
+function parseStoredCopilotAutoSaveValue(value) {
+    if (value === null || value === undefined) return null;
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    try {
+        const parsed = JSON.parse(value);
+        if (typeof parsed === 'boolean') return parsed;
+        if (parsed && typeof parsed === 'object' && Object.prototype.hasOwnProperty.call(parsed, 'enabled')) {
+            return Boolean(parsed.enabled);
+        }
+    } catch (_error) {
+        // Ignore malformed local preference and fall back to the project state API.
+    }
+    return null;
+}
+
+function readCopilotAutoSaveFromLocalStorage(projectId) {
+    try {
+        const keys = [getCopilotAutoSaveStorageKey(projectId)];
+        if (projectId) {
+            keys.push(COPILOT_AUTO_SAVE_STORAGE_KEY);
+        }
+        for (const key of keys) {
+            const parsed = parseStoredCopilotAutoSaveValue(localStorage.getItem(key));
+            if (parsed !== null) return parsed;
+        }
+    } catch (_error) {
+        return null;
+    }
+    return null;
+}
+
+function writeCopilotAutoSaveToLocalStorage(enabled, projectId) {
+    try {
+        const serialized = Boolean(enabled) ? 'true' : 'false';
+        localStorage.setItem(COPILOT_AUTO_SAVE_STORAGE_KEY, serialized);
+        if (projectId) {
+            localStorage.setItem(getCopilotAutoSaveStorageKey(projectId), serialized);
+        }
+    } catch (_error) {
+        // Local storage is a convenience fallback; the project-state API remains authoritative.
     }
 }
 
@@ -137,19 +190,33 @@ function renderCopilotAutoSaveToggle() {
 
 async function loadCopilotAutoSavePreference() {
     const projectId = getCopilotActiveProjectId();
+    const localEnabled = readCopilotAutoSaveFromLocalStorage(projectId);
     if (!projectId || typeof apiCall !== 'function') {
-        setCopilotAutoSaveState({ enabled: false, loaded: true, projectId: projectId || null });
+        setCopilotAutoSaveState({ enabled: localEnabled === null ? false : localEnabled, loaded: true, projectId: projectId || null });
         renderCopilotAutoSaveToggle();
-        return false;
+        return getCopilotAutoSaveState().enabled;
     }
 
+    let enabled = localEnabled === null ? false : localEnabled;
+    let hasProjectPreference = false;
     try {
         const response = await apiCall(`/api/project-state/${COPILOT_AUTO_SAVE_STATE_KEY}`, 'GET');
-        const enabled = Boolean(response?.data?.enabled);
+        const data = response && Object.prototype.hasOwnProperty.call(response, 'data') ? response.data : null;
+        if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, 'enabled')) {
+            enabled = Boolean(data.enabled);
+            hasProjectPreference = true;
+        } else if (typeof data === 'boolean') {
+            enabled = data;
+            hasProjectPreference = true;
+        }
         setCopilotAutoSaveState({ enabled, loaded: true, projectId });
+        writeCopilotAutoSaveToLocalStorage(enabled, projectId);
+        if (!hasProjectPreference && localEnabled !== null) {
+            await saveCopilotAutoSavePreference(enabled, { silent: true, retryOnRateLimit: false });
+        }
     } catch (error) {
-        console.warn('[Copilot] 加载自动保存开关失败:', error);
-        setCopilotAutoSaveState({ enabled: false, loaded: true, projectId });
+        console.warn('[Copilot] 加载自动保存开关失败，使用本地偏好:', error);
+        setCopilotAutoSaveState({ enabled, loaded: true, projectId });
     }
     renderCopilotAutoSaveToggle();
     return getCopilotAutoSaveState().enabled;
@@ -167,28 +234,29 @@ function scheduleCopilotAutoSaveRetry(enabled, error) {
 
 async function saveCopilotAutoSavePreference(enabled, options = {}) {
     const projectId = getCopilotActiveProjectId();
+    const nextEnabled = Boolean(enabled);
     const silent = Boolean(options?.silent);
     const retryOnRateLimit = options?.retryOnRateLimit !== false;
+    writeCopilotAutoSaveToLocalStorage(nextEnabled, projectId);
+    setCopilotAutoSaveState({ enabled: nextEnabled, loaded: true, projectId: projectId || null });
     if (!projectId || typeof apiCall !== 'function') {
         renderCopilotAutoSaveToggle();
-        return false;
+        return getCopilotAutoSaveState().enabled;
     }
 
     try {
         clearCopilotAutoSaveRetry();
         await apiCall(`/api/project-state/${COPILOT_AUTO_SAVE_STATE_KEY}`, 'POST', {
-            data: { enabled: Boolean(enabled) }
+            data: { enabled: nextEnabled }
         });
-        setCopilotAutoSaveState({ enabled: Boolean(enabled), loaded: true, projectId });
         if (!silent && typeof showToast === 'function') {
             showToast(enabled ? '已开启聊天自动保存（内置类型）' : '已关闭新增聊天自动保存');
         }
     } catch (error) {
         if (Number(error?.status) === 429) {
             console.warn('[Copilot] 自动保存开关保存过于频繁，稍后重试');
-            setCopilotAutoSaveState({ enabled: Boolean(enabled), loaded: true, projectId });
             if (retryOnRateLimit) {
-                scheduleCopilotAutoSaveRetry(Boolean(enabled), error);
+                scheduleCopilotAutoSaveRetry(nextEnabled, error);
             }
         } else {
             console.error('[Copilot] 保存自动保存开关失败:', error);

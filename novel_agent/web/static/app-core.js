@@ -2482,24 +2482,25 @@ async function createCopilotSession() {
     return `copilot_${Date.now()}`;
 }
 
-function setCopilotSessionHeader(modelLabel, agentLabel) {
-    const normalizedModelLabel = String(modelLabel || '').trim() || '未识别模型';
-    const normalizedAgentLabel = translateTechnicalText(String(agentLabel || '').trim());
-    if (ui.copilotSessionMode) {
-        ui.copilotSessionMode.textContent = `模型：${normalizedModelLabel}`;
-    }
-    if (ui.copilotSessionAgent) {
-        ui.copilotSessionAgent.textContent = normalizedAgentLabel;
-    }
-}
-
-function updateCopilotSessionAgentLabel(agentLabel, statusLabel = '') {
+function hideCopilotSessionAgentLabel() {
     if (!ui.copilotSessionAgent) {
         return;
     }
-    const normalizedAgentLabel = translateTechnicalText(String(agentLabel || '').trim());
-    const normalizedStatusLabel = translateTechnicalText(String(statusLabel || '').trim());
-    ui.copilotSessionAgent.textContent = [normalizedAgentLabel, normalizedStatusLabel].filter(Boolean).join(' · ');
+    ui.copilotSessionAgent.textContent = '';
+    ui.copilotSessionAgent.classList.add('hidden');
+    ui.copilotSessionAgent.setAttribute('aria-hidden', 'true');
+}
+
+function setCopilotSessionHeader(modelLabel, _agentLabel) {
+    const normalizedModelLabel = String(modelLabel || '').trim() || '未识别模型';
+    if (ui.copilotSessionMode) {
+        ui.copilotSessionMode.textContent = `模型：${normalizedModelLabel}`;
+    }
+    hideCopilotSessionAgentLabel();
+}
+
+function updateCopilotSessionAgentLabel(_agentLabel, _statusLabel = '') {
+    hideCopilotSessionAgentLabel();
 }
 
 function updateCopilotSessionModelLabel(modelLabel) {
