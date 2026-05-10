@@ -564,17 +564,4 @@ def build_default_collab_participants(services: Dict[str, BaseCollabService]) ->
                 metadata={"stage": "stage_summary", "runtime": "service_backed"},
             ),
         ),
-        "FileNaming": ServiceBackedCollabParticipant(
-            services["file_naming"],
-            AgentCapability(
-                agent_name="FileNaming",
-                capabilities=["generate_filename", "count_words"],
-                accept_task_types=["file_naming"],
-                required_inputs=["chapter_number", "chapter_title", "content"],
-                produced_outputs=["filename", "word_count"],
-                priority=60,
-                max_concurrency=1,
-                metadata={"stage": "post_processing", "runtime": "service_backed"},
-            ),
-        ),
     }

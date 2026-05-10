@@ -24,6 +24,7 @@ from .chapter_writer import ChapterWriterAgent
 from .polisher import PolisherAgent
 from .evaluator import EvaluatorAgent
 from .communicator import CommunicatorAgent
+from .ephemeral_task_agent import EphemeralTaskAgent
 from .continuous_writer import ContinuousWriter, ContinuousWriteConfig
 from .character_builder import CharacterBuilderAgent
 from .project_data_builders import (
@@ -87,6 +88,7 @@ __all__ = [
     "PolisherAgent",
     "EvaluatorAgent",
     "CommunicatorAgent",
+    "EphemeralTaskAgent",
 
     # 无限续写智能体
     "ContinuousWriter",

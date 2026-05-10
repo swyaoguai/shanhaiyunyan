@@ -19,31 +19,16 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from ..models.requests import ChatRequest, UserInputRequest
 from ..dependencies import get_coordinator, get_router_agent
 from ...agents.visible_text import strip_visible_technical_markers
+from ...route_targets import get_default_intent_route_target
 from ...workflow.user_interruptions import apply_interruption
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-INTENT_TARGET_AGENT_MAP = {
-    "create_novel": "Coordinator",
-    "create_character": "CharacterBuilder",
-    "create_eventlines": "EventlineBuilder",
-    "create_detail_outline": "DetailOutlineBuilder",
-    "create_chapter_settings": "ChapterSettingBuilder",
-    "create_project_data": "ProjectDataBuilder",
-    "continue_write": "ContinuousWriter",
-    "polish_content": "Polisher",
-    "search_web": "WebSearch",
-    "search_trends": "TrendsSearch",
-    "query_knowledge": "Communicator",
-    "general_chat": "Communicator",
-    "ask_help": "Communicator",
-    "provide_feedback": "Communicator",
-    "project_manage": "ProjectManager",
-    # 当前并无独立 SettingsAssistant Agent，配置类问题统一由 Communicator 承接
-    "config_settings": "Communicator",
-}
+def _target_agent_for_intent(intent_name: str) -> str:
+    target = get_default_intent_route_target(intent_name)
+    return str(getattr(target, "id", "") or "Communicator").strip() or "Communicator"
 
 
 def _resolve_agent_effective_model(agent_name: str, fallback_model: str = "") -> str:
@@ -1822,7 +1807,7 @@ async def _build_chat_routing_hint(
             confidence = float(getattr(intent_analysis, "confidence", 0.0) or 0.0)
             routing_hint = {
                 "intent": intent_name,
-                "target_agent": INTENT_TARGET_AGENT_MAP.get(intent_name, "Communicator"),
+                "target_agent": _target_agent_for_intent(intent_name),
                 "confidence": confidence,
             }
             if active_model and routing_hint.get("target_agent") == "Communicator":

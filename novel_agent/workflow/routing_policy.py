@@ -92,6 +92,33 @@ class RoutingPolicy:
     ) -> RouteDecision:
         rule = self._match_rule(task_type, stage)
         if rule is None:
+            candidates: List[Dict[str, Any]] = []
+            if capability_registry is not None:
+                candidates = capability_registry.find_candidates(
+                    {
+                        "task_type": str(task_type or "").strip(),
+                        "inputs": dict(input_data or {}),
+                    }
+                )
+            candidate_names = [
+                str(item.get("agent_name") or item.get("target_id") or "").strip()
+                for item in candidates
+                if str(item.get("agent_name") or item.get("target_id") or "").strip()
+            ]
+            if candidate_names:
+                selected_agent_name = candidate_names[0]
+                return RouteDecision(
+                    agent_name=selected_agent_name,
+                    route_reason=(
+                        f"matched dynamic route {task_type}"
+                        + (f"@{stage}" if stage else "")
+                        + f" via capability candidate {selected_agent_name}"
+                    ),
+                    candidate_source="dynamic_capability_registry",
+                    candidate_names=candidate_names,
+                    required_context_keys=[],
+                    fallback_agent_names=[str(fallback_agent_name or "").strip()] if str(fallback_agent_name or "").strip() else [],
+                )
             raise RoutingPolicyError(f"No route rule found for task_type={task_type}, stage={stage}")
 
         missing_keys = context.missing_keys(rule.required_context_keys)
@@ -143,7 +170,7 @@ class RoutingPolicy:
                     + f" via fixed route agent {fixed_agent_name}"
                 ),
                 candidate_source="fixed_route_rule",
-                candidate_names=candidate_names,
+                candidate_names=candidate_names or [fixed_agent_name],
                 required_context_keys=list(rule.required_context_keys or []),
                 fallback_agent_names=[fixed_agent_name],
             )

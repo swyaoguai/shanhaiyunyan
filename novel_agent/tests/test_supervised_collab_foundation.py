@@ -11,6 +11,11 @@ import pytest
 from novel_agent.agent_config import AgentModelConfig
 from novel_agent.agents.base_agent import AgentCapability, BaseAgent
 from novel_agent.agents.capability_registry import AgentCapabilityRegistry
+from novel_agent.route_targets import (
+    ROUTE_TARGET_AGENT,
+    ROUTE_TARGET_HELPER_SERVICE,
+    ROUTE_TARGET_UI_VIRTUAL,
+)
 from novel_agent.workflow.contracts import (
     CreationContract,
     ExecutionPolicy,
@@ -20,6 +25,8 @@ from novel_agent.workflow.contracts import (
     build_default_task_graph,
 )
 from novel_agent.workflow.coordinator import NovelCoordinator
+from novel_agent.workflow.execution_context import CollabExecutionContext
+from novel_agent.workflow.routing_policy import RoutingPolicy
 from novel_agent.workflow.task_pool import TaskPool, TaskStatus
 from novel_agent.web.routes.novel import get_status
 
@@ -308,11 +315,29 @@ class TestCapabilityRegistry:
         snapshot = registry.to_dict()
         assert snapshot["agent_count"] == 1
         assert snapshot["agents"] == ["SnapshotAgent"]
+        assert snapshot["route_targets"][0]["id"] == "SnapshotAgent"
+        assert snapshot["route_targets"][0]["kind"] == ROUTE_TARGET_AGENT
 
         removed = registry.unregister("SnapshotAgent")
         assert removed is True
         assert registry.get_agent("SnapshotAgent") is None
         assert registry.list_agents() == []
+
+    def test_routing_policy_uses_dynamic_capability_candidate_without_explicit_rule(self):
+        registry = AgentCapabilityRegistry()
+        registry.register(StubAgent("RepairAgent", accepted_tasks=["unexpected_repair"], priority=90))
+
+        decision = RoutingPolicy.default().resolve(
+            task_type="unexpected_repair",
+            stage="",
+            context=CollabExecutionContext.from_legacy_context({}),
+            capability_registry=registry,
+            input_data={"input": "x"},
+        )
+
+        assert decision.agent_name == "RepairAgent"
+        assert decision.candidate_source == "dynamic_capability_registry"
+        assert decision.candidate_names == ["RepairAgent"]
 
 
 class TestTaskPool:
@@ -399,6 +424,16 @@ class TestCoordinatorAutonomousTask:
         assert "SummaryOrchestrator" in scoped_agents
         assert "FileNaming" not in scoped_agents
         assert coordinator.collab_service_registry.get("file_naming") is coordinator.file_naming
+
+    def test_route_target_snapshot_unifies_agents_helpers_and_virtual_targets(self, coordinator):
+        snapshot = coordinator.get_route_targets()
+        targets = {item["id"]: item for item in snapshot["targets"]}
+
+        assert targets["Coordinator"]["kind"] == ROUTE_TARGET_UI_VIRTUAL
+        assert targets["ChapterWriter"]["kind"] == ROUTE_TARGET_AGENT
+        assert targets["ContextStrategy"]["kind"] == ROUTE_TARGET_HELPER_SERVICE
+        assert "write_chapter" in targets["ChapterWriter"]["accept_task_types"]
+        assert "context_plan" in targets["ContextStrategy"]["accept_task_types"]
 
     @pytest.mark.asyncio
     async def test_phase2_scoped_collab_registry_routes_helper_tasks(self, coordinator):
@@ -605,6 +640,33 @@ class TestCoordinatorAutonomousTask:
         assert "fixed route agent" in result["route_reason"]
         assert runtime_task is not None
         assert runtime_task["metadata"]["candidate_source"] == "fixed_route_rule"
+
+    @pytest.mark.asyncio
+    async def test_run_autonomous_task_creates_and_removes_task_scoped_ephemeral_agent(self, coordinator):
+        coordinator.capability_registry = AgentCapabilityRegistry()
+        coordinator.allow_ephemeral_agents = True
+        coordinator.agent_dispatcher.ephemeral_agent_factory = lambda envelope, reason: StubAgent(
+            "EphemeralRepair",
+            accepted_tasks=[envelope.task_type],
+            priority=5,
+            result={"success": True, "response": "临时处理完成"},
+        )
+
+        result = await coordinator._run_autonomous_task(
+            task_type="unexpected_repair",
+            input_data={"input": "broken state"},
+            title="突发修复",
+        )
+
+        runtime_trace = coordinator.project_manager.load_project_state("collab_execution_trace", default={})
+        event_types = [item["type"] for item in runtime_trace["events"]]
+
+        assert result["selected_agent"] == "EphemeralRepair"
+        assert result["candidate_source"] == "ephemeral_agent"
+        assert result["result"]["response"] == "临时处理完成"
+        assert "EphemeralRepair" not in coordinator.collab_agent_registry.list_agents()
+        assert "ephemeral_agent_created" in event_types
+        assert "ephemeral_agent_removed" in event_types
 
     @pytest.mark.asyncio
     async def test_run_autonomous_task_fails_fast_when_required_context_is_missing(self, coordinator):

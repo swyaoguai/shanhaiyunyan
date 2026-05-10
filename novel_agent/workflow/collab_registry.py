@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional
 
+from ..route_targets import (
+    ROUTE_TARGET_HELPER_SERVICE,
+    ROUTE_TARGET_AGENT,
+    RouteTargetDescriptor,
+    descriptor_from_capability,
+)
+
 
 class CollabServiceRegistry:
     """管理长篇协作阶段使用的本地服务。"""
@@ -105,6 +112,45 @@ class CollabAgentRegistry:
             return fallback.get_capability(normalized_name)
         return None
 
+    def get_route_target(self, agent_name: str) -> Optional[RouteTargetDescriptor]:
+        normalized_name = str(agent_name or "").strip()
+        capability = self._capabilities.get(normalized_name)
+        if capability is not None:
+            metadata = dict(getattr(capability, "metadata", {}) or {})
+            runtime = str(metadata.get("runtime") or "").strip()
+            kind = (
+                ROUTE_TARGET_HELPER_SERVICE
+                if runtime == "service_backed"
+                else metadata.get("route_target_kind") or ROUTE_TARGET_AGENT
+            )
+            return descriptor_from_capability(
+                capability,
+                kind=kind,
+                execution_backend=str(metadata.get("execution_backend") or runtime or "collab_participant"),
+                visibility=str(metadata.get("visibility") or "internal"),
+                risk_level=str(metadata.get("risk_level") or "normal"),
+            )
+        fallback = self._get_fallback_registry()
+        if fallback is not None and hasattr(fallback, "get_route_target"):
+            return fallback.get_route_target(normalized_name)
+        return None
+
+    def list_route_targets(self) -> List[RouteTargetDescriptor]:
+        targets_by_id: Dict[str, RouteTargetDescriptor] = {}
+        for agent_name in sorted(self._capabilities.keys(), key=str.lower):
+            target = self.get_route_target(agent_name)
+            if target is not None:
+                targets_by_id[target.id] = target
+        fallback = self._get_fallback_registry()
+        if fallback is not None and hasattr(fallback, "list_route_targets"):
+            for target in fallback.list_route_targets() or []:
+                if isinstance(target, RouteTargetDescriptor) and target.id not in targets_by_id:
+                    targets_by_id[target.id] = target
+        return [
+            target
+            for _, target in sorted(targets_by_id.items(), key=lambda item: item[0].lower())
+        ]
+
     def list_agents(self) -> List[str]:
         names = set(self._agents.keys())
         fallback = self._get_fallback_registry()
@@ -195,5 +241,6 @@ class CollabAgentRegistry:
             "agents": self.list_agents(),
             "scoped_agents": sorted(self._agents.keys(), key=str.lower),
             "scoped_capabilities": local_capabilities,
+            "route_targets": [target.to_dict() for target in self.list_route_targets()],
             "coverage_by_task_type": self.coverage_by_task_type(),
         }

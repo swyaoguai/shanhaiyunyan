@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import json
 import re
 import logging
@@ -14,7 +14,7 @@ import uuid
 from ..constants import WRITING_CONFIG
 from ..utils.atomic_write import atomic_write_json
 from .execution_context import CollabExecutionContext, TaskExecutionEnvelope
-from .routing_policy import RoutingPolicy
+from .routing_policy import RoutingPolicy, RoutingPolicyError
 from .runtime_state import RuntimeStateStore
 from .task_pool import TaskPool, TaskStatus
 from .contracts import TaskDefinition
@@ -58,6 +58,8 @@ class AgentDispatcher:
         notify_progress: Callable[[Dict[str, Any]], Awaitable[None]],
         supervised_mode_provider: Callable[[], bool],
         fallback_to_orchestrated_provider: Callable[[], bool],
+        allow_ephemeral_agent_provider: Optional[Callable[[], bool]] = None,
+        ephemeral_agent_factory: Optional[Callable[[Any, str], Any]] = None,
         runtime_state_store: Optional[RuntimeStateStore] = None,
     ) -> None:
         self.routing_policy = routing_policy
@@ -68,6 +70,8 @@ class AgentDispatcher:
         self.notify_progress = notify_progress
         self.supervised_mode_provider = supervised_mode_provider
         self.fallback_to_orchestrated_provider = fallback_to_orchestrated_provider
+        self.allow_ephemeral_agent_provider = allow_ephemeral_agent_provider or (lambda: False)
+        self.ephemeral_agent_factory = ephemeral_agent_factory
         self.runtime_state_store = runtime_state_store
         # 13.5 批量写入：延迟持久化缓存
         self._deferred_events: List[Dict[str, Any]] = []
@@ -209,6 +213,74 @@ class AgentDispatcher:
             if fallback_name and fallback_name == str(agent_name or "").strip():
                 return fallback_agent
         return None
+
+    def _ephemeral_agents_enabled(self) -> bool:
+        try:
+            return bool(self.allow_ephemeral_agent_provider())
+        except Exception:
+            return False
+
+    def _build_ephemeral_agent(self, envelope: TaskExecutionEnvelope, reason: str) -> Any:
+        if self.ephemeral_agent_factory is not None:
+            return self.ephemeral_agent_factory(envelope, reason)
+
+        from ..agents.ephemeral_task_agent import EphemeralTaskAgent
+
+        return EphemeralTaskAgent(
+            task_type=envelope.task_type,
+            stage=envelope.stage,
+            title=envelope.title,
+            reason=reason,
+        )
+
+    def _register_ephemeral_agent(
+        self,
+        envelope: TaskExecutionEnvelope,
+        reason: str,
+    ) -> Tuple[Any, str, bool]:
+        if not self._ephemeral_agents_enabled():
+            return None, "", False
+        registry = self._get_capability_registry()
+        if registry is None or not hasattr(registry, "register"):
+            return None, "", False
+
+        agent = self._build_ephemeral_agent(envelope, reason)
+        agent_name = str(getattr(agent, "name", "") or "").strip()
+        if not agent_name:
+            raise RuntimeError("临时Agent缺少名称")
+        registry.register(agent)
+        self._append_execution_event(
+            "ephemeral_agent_created",
+            {
+                "agent": agent_name,
+                "task_type": envelope.task_type,
+                "stage": envelope.stage,
+                "title": envelope.title,
+                "reason": reason,
+                "lifecycle": "task_scoped",
+            },
+        )
+        return agent, agent_name, True
+
+    def _unregister_ephemeral_agent(self, agent_name: str) -> None:
+        normalized = str(agent_name or "").strip()
+        if not normalized:
+            return
+        registry = self._get_capability_registry()
+        removed = False
+        if registry is not None and hasattr(registry, "unregister"):
+            try:
+                removed = bool(registry.unregister(normalized))
+            except Exception:
+                removed = False
+        self._append_execution_event(
+            "ephemeral_agent_removed",
+            {
+                "agent": normalized,
+                "removed": removed,
+                "lifecycle": "task_scoped",
+            },
+        )
 
     def _resolve_agent_model(self, agent_name: str, agent_instance: Any = None) -> str:
         target_name = str(agent_name or getattr(agent_instance, "name", "") or "").strip()
@@ -356,6 +428,7 @@ class AgentDispatcher:
         fallback_agent_name = str(
             envelope.fallback_agent_name or getattr(fallback_agent, "name", "") or ""
         ).strip()
+        ephemeral_agent_name = ""
 
         try:
             envelope.validate_required_context()
@@ -382,38 +455,87 @@ class AgentDispatcher:
                 if selected_agent is None:
                     raise RuntimeError(f"任务 {envelope.task_type} 缺少可执行Agent: {selected_agent_name}")
         except Exception as exc:
-            route_reason = str(exc)
-            candidate_source = "route_rejected"
-            context_snapshot_id = self._record_context_snapshot(
-                envelope=envelope,
-                route_reason=route_reason,
-                candidate_source=candidate_source,
-                candidate_agents=[],
-            )
-            task_pool.fail_task(task.task_id, error=route_reason)
-            runtime_pool.fail_task(runtime_task.task_id, error=route_reason)
-            self._update_task_metadata(
-                task=task,
-                runtime_task=runtime_task,
-                candidate_names=[],
-                route_reason=route_reason,
-                candidate_source=candidate_source,
-                context_snapshot_id=context_snapshot_id,
-                execution_mode="rejected",
-                selected_agent_name="",
-            )
-            self.save_runtime_task_pool(runtime_pool)
-            self._append_execution_event(
-                "task_rejected",
-                {
-                    "task_id": runtime_task.task_id,
-                    "task_type": envelope.task_type,
-                    "title": envelope.title,
-                    "reason": route_reason,
-                    "context_snapshot_id": context_snapshot_id,
-                },
-            )
-            raise
+            if isinstance(exc, RoutingPolicyError):
+                try:
+                    selected_agent, selected_agent_name, registered = self._register_ephemeral_agent(
+                        envelope,
+                        reason=str(exc),
+                    )
+                    if registered and selected_agent is not None:
+                        ephemeral_agent_name = selected_agent_name
+                        candidate_names = [selected_agent_name]
+                        route_reason = (
+                            f"{str(exc)}; created task-scoped ephemeral agent {selected_agent_name}"
+                        )
+                        candidate_source = "ephemeral_agent"
+                    else:
+                        raise
+                except Exception:
+                    route_reason = str(exc)
+                    candidate_source = "route_rejected"
+                    context_snapshot_id = self._record_context_snapshot(
+                        envelope=envelope,
+                        route_reason=route_reason,
+                        candidate_source=candidate_source,
+                        candidate_agents=[],
+                    )
+                    task_pool.fail_task(task.task_id, error=route_reason)
+                    runtime_pool.fail_task(runtime_task.task_id, error=route_reason)
+                    self._update_task_metadata(
+                        task=task,
+                        runtime_task=runtime_task,
+                        candidate_names=[],
+                        route_reason=route_reason,
+                        candidate_source=candidate_source,
+                        context_snapshot_id=context_snapshot_id,
+                        execution_mode="rejected",
+                        selected_agent_name="",
+                    )
+                    self.save_runtime_task_pool(runtime_pool)
+                    self._append_execution_event(
+                        "task_rejected",
+                        {
+                            "task_id": runtime_task.task_id,
+                            "task_type": envelope.task_type,
+                            "title": envelope.title,
+                            "reason": route_reason,
+                            "context_snapshot_id": context_snapshot_id,
+                        },
+                    )
+                    raise
+            else:
+                route_reason = str(exc)
+                candidate_source = "route_rejected"
+                context_snapshot_id = self._record_context_snapshot(
+                    envelope=envelope,
+                    route_reason=route_reason,
+                    candidate_source=candidate_source,
+                    candidate_agents=[],
+                )
+                task_pool.fail_task(task.task_id, error=route_reason)
+                runtime_pool.fail_task(runtime_task.task_id, error=route_reason)
+                self._update_task_metadata(
+                    task=task,
+                    runtime_task=runtime_task,
+                    candidate_names=[],
+                    route_reason=route_reason,
+                    candidate_source=candidate_source,
+                    context_snapshot_id=context_snapshot_id,
+                    execution_mode="rejected",
+                    selected_agent_name="",
+                )
+                self.save_runtime_task_pool(runtime_pool)
+                self._append_execution_event(
+                    "task_rejected",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "title": envelope.title,
+                        "reason": route_reason,
+                        "context_snapshot_id": context_snapshot_id,
+                    },
+                )
+                raise
 
         context_snapshot_id = self._record_context_snapshot(
             envelope=envelope,
@@ -609,6 +731,8 @@ class AgentDispatcher:
                 and fallback_agent is not selected_agent
             )
             if not can_fallback:
+                if ephemeral_agent_name:
+                    self._unregister_ephemeral_agent(ephemeral_agent_name)
                 raise
 
             retry_claimed_by = fallback_agent_name or str(getattr(fallback_agent, "name", "") or "").strip()
@@ -722,6 +846,8 @@ class AgentDispatcher:
                         "model_used": retry_model,
                     },
                 )
+                if ephemeral_agent_name:
+                    self._unregister_ephemeral_agent(ephemeral_agent_name)
                 raise RuntimeError(fallback_error)
 
             current_context = envelope.context.clone()
@@ -762,6 +888,9 @@ class AgentDispatcher:
                 },
             )
             claimed_by = retry_claimed_by
+
+        if ephemeral_agent_name:
+            self._unregister_ephemeral_agent(ephemeral_agent_name)
 
         return DispatchResult(
             success=True,

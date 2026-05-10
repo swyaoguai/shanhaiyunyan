@@ -46,6 +46,7 @@ from ..outline_utils import (
 from ..memory_manager import get_memory_manager
 from ..aux_memory import get_aux_memory_service
 from ..project_manager import get_project_manager
+from ..route_targets import build_default_route_target_registry
 from .plot_thread_state import PlotThreadStateMachine
 from .contracts import (
     CreationContract,
@@ -256,6 +257,7 @@ class NovelCoordinator:
             self.evaluator,
             self.character_builder,
         ])
+        self.allow_ephemeral_agents = True
         self.routing_policy = RoutingPolicy.default()
         self.agent_dispatcher = AgentDispatcher(
             routing_policy=self.routing_policy,
@@ -266,6 +268,7 @@ class NovelCoordinator:
             notify_progress=self._notify_progress,
             supervised_mode_provider=lambda: self.supervised_mode,
             fallback_to_orchestrated_provider=lambda: self.fallback_to_orchestrated,
+            allow_ephemeral_agent_provider=lambda: self.allow_ephemeral_agents,
             runtime_state_store=self.runtime_state_store,
         )
 
@@ -2595,6 +2598,15 @@ class NovelCoordinator:
     def get_candidate_agents_for_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         """查询指定任务的候选 Agent 列表。"""
         return self.collab_agent_registry.find_candidates(task)
+
+    def get_route_targets(self) -> Dict[str, Any]:
+        """Return the unified route target snapshot used by router, dispatcher, and UI."""
+        registry = build_default_route_target_registry()
+        if hasattr(self.capability_registry, "list_route_targets"):
+            registry.register_many(self.capability_registry.list_route_targets())
+        if hasattr(self.collab_agent_registry, "list_route_targets"):
+            registry.register_many(self.collab_agent_registry.list_route_targets())
+        return registry.to_dict()
 
     def _resolve_runtime_model_label(self) -> str:
         """解析当前运行态可见模型名称，用于前端实时状态显示。"""

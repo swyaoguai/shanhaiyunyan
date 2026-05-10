@@ -6,6 +6,11 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from .base_agent import AgentCapability, BaseAgent
+from ..route_targets import (
+    ROUTE_TARGET_AGENT,
+    RouteTargetDescriptor,
+    descriptor_from_agent,
+)
 
 
 class AgentCapabilityRegistry:
@@ -59,6 +64,22 @@ class AgentCapabilityRegistry:
     def get_agent(self, agent_name: str) -> Optional[BaseAgent]:
         """获取指定 Agent 实例。"""
         return self._agents.get(str(agent_name or "").strip())
+
+    def get_route_target(self, agent_name: str) -> Optional[RouteTargetDescriptor]:
+        """获取统一路由目标描述。"""
+        agent = self.get_agent(agent_name)
+        if agent is None:
+            return None
+        return descriptor_from_agent(agent, kind=ROUTE_TARGET_AGENT)
+
+    def list_route_targets(self) -> List[RouteTargetDescriptor]:
+        """列出统一路由目标描述。"""
+        targets: List[RouteTargetDescriptor] = []
+        for agent_name in self.list_agents():
+            target = self.get_route_target(agent_name)
+            if target is not None:
+                targets.append(target)
+        return targets
 
     def list_capabilities(self) -> List[Dict[str, Any]]:
         """以字典形式列出全部能力声明。"""
@@ -140,6 +161,7 @@ class AgentCapabilityRegistry:
             "agent_count": len(self._agents),
             "agents": self.list_agents(),
             "capabilities": self.list_capabilities(),
+            "route_targets": [target.to_dict() for target in self.list_route_targets()],
             "coverage_by_task_type": self.coverage_by_task_type(),
         }
 
