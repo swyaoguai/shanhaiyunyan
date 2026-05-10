@@ -73,7 +73,10 @@ async def update_auto_backup_config(updates: AutoBackupConfigUpdate):
         service = get_auto_backup_service()
         
         # 只更新提供的字段
-        update_dict = updates.dict(exclude_unset=True)
+        if hasattr(updates, "model_dump"):
+            update_dict = updates.model_dump(exclude_unset=True)
+        else:
+            update_dict = updates.dict(exclude_unset=True)
         
         # 验证schedule值
         if "schedule" in update_dict:
@@ -121,6 +124,21 @@ async def update_auto_backup_config(updates: AutoBackupConfigUpdate):
     except Exception as e:
         logger.error(f"Failed to update auto backup config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/toggle")
+async def toggle_auto_backup(updates: AutoBackupConfigUpdate):
+    """
+    切换自动备份启用状态
+
+    兼容旧版前端调用的 `/auto-backup/toggle` 接口。
+    """
+    if updates.enabled is None:
+        raise HTTPException(status_code=400, detail="enabled is required")
+
+    response = await update_auto_backup_config(AutoBackupConfigUpdate(enabled=updates.enabled))
+    response["message"] = "自动备份已启用" if updates.enabled else "自动备份已禁用"
+    return response
 
 
 @router.post("/start")

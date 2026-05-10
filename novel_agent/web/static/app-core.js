@@ -71,6 +71,13 @@ const store = {
     collabRealtimeReconnectTimer: null,
     collabRealtimeRefreshTimer: null,
     activeSubAgent: null,  // 当前活跃的子Agent实时状态 {agent, taskType, title, status, message, timestamp}
+    copilotModel: {
+        configs: [],
+        activeConfigId: '',
+        activeModel: '',
+        loading: false,
+        applying: false
+    },
     settings: {
         bgUrl: '',
         bgOpacity: 0.85,
@@ -107,12 +114,98 @@ const ui = {
     currentProjectName: null,
     copilotSessionMode: null,
     copilotSessionAgent: null,
+    copilotModelSelect: null,
+    copilotModelStatus: null,
     copilotSessionListBtn: null,
     copilotSessionMenu: null,
     copilotWorkflowPanel: null
 };
 
 let currentStreamAbort = null;
+const appRuntimeLifecycle = {
+    windowId: '',
+    enabled: false,
+    heartbeatTimer: null,
+    closeSent: false,
+    heartbeatIntervalMs: 5000
+};
+
+function createRuntimeWindowId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return `win-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function postAppRuntimeEvent(path, useBeacon = false) {
+    if (!appRuntimeLifecycle.enabled || !appRuntimeLifecycle.windowId) return false;
+    const payload = JSON.stringify({ window_id: appRuntimeLifecycle.windowId });
+    if (useBeacon && navigator.sendBeacon) {
+        const blob = new Blob([payload], { type: 'application/json' });
+        return navigator.sendBeacon(path, blob);
+    }
+    fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: Boolean(useBeacon),
+        credentials: 'same-origin'
+    }).catch(() => {});
+    return true;
+}
+
+function stopAppRuntimeHeartbeat() {
+    if (appRuntimeLifecycle.heartbeatTimer) {
+        clearInterval(appRuntimeLifecycle.heartbeatTimer);
+        appRuntimeLifecycle.heartbeatTimer = null;
+    }
+}
+
+function notifyAppRuntimeWindowClosed() {
+    if (!appRuntimeLifecycle.enabled || appRuntimeLifecycle.closeSent) return;
+    appRuntimeLifecycle.closeSent = true;
+    stopAppRuntimeHeartbeat();
+    postAppRuntimeEvent('/api/app/window-closed', true);
+}
+
+async function initAppRuntimeLifecycle() {
+    if (appRuntimeLifecycle.windowId) return;
+    try {
+        const response = await fetch('/api/app/runtime', {
+            method: 'GET',
+            cache: 'no-store',
+            credentials: 'same-origin'
+        });
+        if (!response.ok) return;
+        const runtime = await response.json();
+        if (!runtime || !runtime.close_shutdown_enabled) return;
+
+        appRuntimeLifecycle.enabled = true;
+        appRuntimeLifecycle.windowId = createRuntimeWindowId();
+        appRuntimeLifecycle.heartbeatIntervalMs = Math.max(
+            Number(runtime.heartbeat_interval_ms || 5000),
+            2000
+        );
+
+        postAppRuntimeEvent('/api/app/window-heartbeat');
+        appRuntimeLifecycle.heartbeatTimer = setInterval(() => {
+            postAppRuntimeEvent('/api/app/window-heartbeat');
+        }, appRuntimeLifecycle.heartbeatIntervalMs);
+
+        window.addEventListener('pagehide', notifyAppRuntimeWindowClosed);
+        window.addEventListener('beforeunload', notifyAppRuntimeWindowClosed);
+    } catch (error) {
+        console.debug('[Runtime] 生命周期检测不可用:', error);
+    }
+}
+
+function resetAppRuntimeLifecycleForTests() {
+    stopAppRuntimeHeartbeat();
+    appRuntimeLifecycle.windowId = '';
+    appRuntimeLifecycle.enabled = false;
+    appRuntimeLifecycle.closeSent = false;
+    appRuntimeLifecycle.heartbeatIntervalMs = 5000;
+}
 
 function setStreamingButtonState(streaming) {
     if (!ui.copilotSendBtn) return;
@@ -160,6 +253,8 @@ function initUIReferences() {
     ui.currentProjectName = document.getElementById('current-project-name');
     ui.copilotSessionMode = document.getElementById('copilot-session-mode');
     ui.copilotSessionAgent = document.getElementById('copilot-session-agent');
+    ui.copilotModelSelect = document.getElementById('copilot-model-select');
+    ui.copilotModelStatus = document.getElementById('copilot-model-status');
     ui.copilotSessionListBtn = document.getElementById('copilot-session-list-btn');
     ui.copilotSessionMenu = document.getElementById('copilot-session-menu');
     ui.copilotWorkflowPanel = document.getElementById('copilot-workflow-panel');
@@ -171,12 +266,14 @@ async function init() {
     restoreCopilotSessionId();
     setCopilotSessionHeader('加载中...');
     bindEvents();
+    initAppRuntimeLifecycle();
     await loadSavedSettings(); // 加载保存的主题和背景设置（异步加载IndexedDB背景图片）
     restoreSidebarState(); // 恢复侧边栏状态
     loadKnowledgeCategories(); // 加载自定义资料库分类
     await loadProjects(); // 加载项目列表
     await loadCopilotCreativeModePreference(); // 加载当前项目的Copilot创作方式
     await checkGlobalAPIConfig(); // 检查全局API配置
+    await loadCopilotModelOptions({ silent: true }); // 加载聊天面板模型快速切换
     switchModule('dashboard');
     await restoreCopilotHistory();
     await restoreCopilotWorkflowStatus();
@@ -208,16 +305,202 @@ async function checkGlobalAPIConfig() {
     }
 }
 
+function getCopilotModelOptionValue(configId, model) {
+    return `${encodeURIComponent(String(configId || ''))}::${encodeURIComponent(String(model || ''))}`;
+}
+
+function getCopilotModelSelectedOption() {
+    const select = ui.copilotModelSelect || document.getElementById('copilot-model-select');
+    const option = select?.selectedOptions?.[0];
+    if (!option) return { configId: '', model: '' };
+    return {
+        configId: String(option.dataset.configId || '').trim(),
+        model: String(option.dataset.model || '').trim()
+    };
+}
+
+function setCopilotModelStatus(text = '', state = '') {
+    const status = ui.copilotModelStatus || document.getElementById('copilot-model-status');
+    if (!status) return;
+    status.textContent = text;
+    status.className = `copilot-model-status${state ? ` is-${state}` : ''}`;
+}
+
+function setCopilotModelApplying(applying) {
+    store.copilotModel.applying = Boolean(applying);
+    const select = ui.copilotModelSelect || document.getElementById('copilot-model-select');
+    if (select) {
+        select.disabled = Boolean(applying || store.copilotModel.loading || !store.copilotModel.configs.length);
+    }
+}
+
+function renderCopilotModelSelector() {
+    const select = ui.copilotModelSelect || document.getElementById('copilot-model-select');
+    if (!select) return;
+
+    const configs = Array.isArray(store.copilotModel.configs) ? store.copilotModel.configs : [];
+    const activeConfigId = String(store.copilotModel.activeConfigId || '').trim();
+    const activeModel = String(store.copilotModel.activeModel || '').trim();
+    select.innerHTML = '';
+
+    if (store.copilotModel.loading) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '加载模型中...';
+        select.appendChild(option);
+        select.disabled = true;
+        return;
+    }
+
+    const configured = configs.filter((cfg) => cfg && Array.isArray(cfg.models) && cfg.models.length > 0);
+    if (!configured.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '未配置可切换模型';
+        select.appendChild(option);
+        select.disabled = true;
+        return;
+    }
+
+    let selectedValue = '';
+    configured.forEach((cfg) => {
+        const configId = String(cfg.id || '').trim();
+        const configName = String(cfg.name || '未命名配置').trim();
+        (cfg.models || []).forEach((rawModel) => {
+            const model = String(rawModel || '').trim();
+            if (!configId || !model) return;
+            const option = document.createElement('option');
+            option.value = getCopilotModelOptionValue(configId, model);
+            option.dataset.configId = configId;
+            option.dataset.model = model;
+            option.textContent = `${configName} / ${model}`;
+            if (configId === activeConfigId && model === activeModel) {
+                option.selected = true;
+                selectedValue = option.value;
+            }
+            select.appendChild(option);
+        });
+    });
+
+    if (!selectedValue && select.options.length > 0) {
+        select.selectedIndex = 0;
+    }
+    select.disabled = Boolean(store.copilotModel.applying);
+}
+
+function syncCopilotModelSelectorSelection(configId, model) {
+    const select = ui.copilotModelSelect || document.getElementById('copilot-model-select');
+    const normalizedConfigId = String(configId || '').trim();
+    const normalizedModel = String(model || '').trim();
+    if (normalizedConfigId) {
+        store.copilotModel.activeConfigId = normalizedConfigId;
+    }
+    if (normalizedModel) {
+        store.copilotModel.activeModel = normalizedModel;
+    }
+    if (!select) return;
+    for (const option of Array.from(select.options || [])) {
+        if (
+            (!normalizedConfigId || option.dataset.configId === normalizedConfigId)
+            && (!normalizedModel || option.dataset.model === normalizedModel)
+        ) {
+            select.value = option.value;
+            return;
+        }
+    }
+}
+
+async function loadCopilotModelOptions(options = {}) {
+    if (typeof apiCall !== 'function') return;
+    const silent = Boolean(options.silent);
+    store.copilotModel.loading = true;
+    renderCopilotModelSelector();
+    try {
+        const data = await apiCall('/api/api-configs', 'GET');
+        store.copilotModel.configs = Array.isArray(data?.configs) ? data.configs : [];
+        store.copilotModel.activeConfigId = String(data?.active_config_id || '').trim();
+        store.copilotModel.activeModel = String(data?.active_model || '').trim();
+        if (store.copilotModel.activeModel) {
+            updateCopilotSessionModelLabel(store.copilotModel.activeModel);
+        }
+        setCopilotModelStatus('');
+    } catch (error) {
+        console.warn('[Copilot] 加载模型选择器失败:', error);
+        if (!silent) {
+            setCopilotModelStatus('加载失败', 'error');
+        }
+    } finally {
+        store.copilotModel.loading = false;
+        renderCopilotModelSelector();
+    }
+}
+
+async function applyCopilotModelSelection(configId, model) {
+    const normalizedConfigId = String(configId || '').trim();
+    const normalizedModel = String(model || '').trim();
+    if (!normalizedConfigId || !normalizedModel || typeof apiCall !== 'function') return false;
+
+    setCopilotModelApplying(true);
+    setCopilotModelStatus('应用中...', 'loading');
+    try {
+        const response = await apiCall('/api/api-configs/active', 'POST', {
+            config_id: normalizedConfigId,
+            model: normalizedModel
+        });
+        const activeConfigId = String(response?.active_config_id || normalizedConfigId).trim();
+        const activeModel = String(response?.active_model || normalizedModel).trim();
+        store.copilotModel.activeConfigId = activeConfigId;
+        store.copilotModel.activeModel = activeModel;
+        updateCopilotSessionModelLabel(activeModel);
+        syncCopilotModelSelectorSelection(activeConfigId, activeModel);
+        setCopilotModelStatus('已切换', 'success');
+        window.dispatchEvent(new CustomEvent('global-api-config-updated', {
+            detail: { activeConfigId, activeModel }
+        }));
+        if (typeof showToast === 'function') {
+            showToast(`聊天模型已切换为 ${activeModel}`, 'success');
+        }
+        setTimeout(() => {
+            if (String(store.copilotModel.activeModel || '') === activeModel) {
+                setCopilotModelStatus('');
+            }
+        }, 1800);
+        return true;
+    } catch (error) {
+        console.error('[Copilot] 切换聊天模型失败:', error);
+        renderCopilotModelSelector();
+        setCopilotModelStatus('切换失败', 'error');
+        if (typeof showToast === 'function') {
+            showToast(`切换模型失败: ${error.message || error}`, 'error');
+        }
+        return false;
+    } finally {
+        setCopilotModelApplying(false);
+    }
+}
+
 // 绑定事件
 function bindEvents() {
     window.addEventListener('global-api-config-updated', (event) => {
         const activeModel = String(event.detail?.activeModel || event.detail?.active_model || '').trim();
+        const activeConfigId = String(event.detail?.activeConfigId || event.detail?.active_config_id || '').trim();
         if (activeModel) {
             updateCopilotSessionModelLabel(activeModel);
+            syncCopilotModelSelectorSelection(activeConfigId, activeModel);
+            void loadCopilotModelOptions({ silent: true });
         } else {
             checkGlobalAPIConfig();
+            void loadCopilotModelOptions({ silent: true });
         }
     });
+
+    if (ui.copilotModelSelect && ui.copilotModelSelect.dataset.bound !== 'true') {
+        ui.copilotModelSelect.dataset.bound = 'true';
+        ui.copilotModelSelect.addEventListener('change', () => {
+            const { configId, model } = getCopilotModelSelectedOption();
+            applyCopilotModelSelection(configId, model);
+        });
+    }
 
     // 资源栏切换
     ui.resItems.forEach(item => {
@@ -592,7 +875,7 @@ function normalizeCopilotWorkflow(workflow) {
         target_agent: String(workflow.target_agent || '').trim(),
         stage: String(workflow.stage || '').trim(),
         last_progress: formatWorkflowProgressText(workflow.last_progress || ''),
-        last_error: String(workflow.last_error || '').trim(),
+        last_error: translateTechnicalText(String(workflow.last_error || '').trim()),
         output_dir: String(workflow.output_dir || '').trim(),
         focus_module: String(workflow.focus_module || '').trim(),
         focus_chapter: Number(workflow.focus_chapter || 0) || 0,
@@ -659,6 +942,24 @@ function translateTechnicalText(text) {
         [/Router/gi, '智能路由'],
         [/WebSearch/gi, '网络搜索助手'],
         [/TrendsSearch/gi, '热点搜索助手'],
+        [/missing_chapter_number/gi, '缺少章节号：当前任务没有拿到要写第几章'],
+        [/chapter_not_found/gi, '未找到对应章节：请先生成或检查大纲'],
+        [/missing_outline/gi, '缺少大纲：需要先有章节大纲才能写正文'],
+        [/empty_workflow_plan/gi, '没有可执行的工作流计划'],
+        [/unsupported_task_type/gi, '当前任务类型还不支持自动执行'],
+        [/max_chapter_tasks_reached/gi, '这一轮连续写章先跑满了'],
+        [/max_tasks_reached/gi, '这一轮任务先跑到上限了'],
+        [/fallback_triggered/gi, '系统已触发回退处理'],
+        [/review_required/gi, '这一步需要先复核确认'],
+        [/task_failed/gi, '任务执行失败'],
+        [/\bchapters\b/gi, '正文章节'],
+        [/\bworldbuilding\b/gi, '世界观设定'],
+        [/\bcharacters\b/gi, '角色档案'],
+        [/\boutline\b/gi, '大纲'],
+        [/\beventlines\b/gi, '事件线'],
+        [/\bdetail_settings\b/gi, '细纲设定'],
+        [/\bchapter_settings\b/gi, '章纲设定'],
+        [/\bchapter_summary\b/gi, '正文摘要'],
         [/running/gi, '执行中'],
         [/starting/gi, '准备中'],
         [/completed/gi, '已完成'],
@@ -697,6 +998,221 @@ function formatWorkflowProgressText(text) {
     return translateTechnicalText(stripVisibleMarkdownHeadingMarkers(text));
 }
 
+function isInternalStreamEventType(value) {
+    const type = String(value || '').trim();
+    return [
+        'llm_chunk',
+        'tool_call',
+        'tool_result',
+        'agent_task_progress',
+        'agent_task_completed',
+        'agent_task_failed'
+    ].includes(type);
+}
+
+function isProtocolOnlyPayload(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    const type = String(payload.type || '').trim();
+    if (isInternalStreamEventType(type)) return true;
+    if (type === 'chunk' && (payload.content !== undefined || payload.delta !== undefined || payload.text !== undefined)) {
+        return false;
+    }
+    if (payload.reply || payload.response || payload.message || payload.text || payload.summary || payload.result_summary) {
+        return false;
+    }
+    const protocolKeys = [
+        'type', 'agent', 'current_agent', 'target_agent', 'delta', 'seed', 'source', 'source_type',
+        'source_preview', 'metadata', 'created_at', 'updated_at', 'revision_notes', 'task_id',
+        'task_type', 'status', 'stage', 'model', 'model_used', 'current_model', 'active_model',
+        'usage', 'index', 'id', '_id'
+    ];
+    return Object.keys(payload).length > 0 && Object.keys(payload).every((key) => protocolKeys.includes(key));
+}
+
+function extractVisibleTextFromStructuredPayload(payload, depth = 0) {
+    if (depth > 5 || payload === null || payload === undefined) return '';
+    if (typeof payload === 'string') {
+        return payload.trim();
+    }
+    if (Array.isArray(payload)) {
+        return payload
+            .map((item) => extractVisibleTextFromStructuredPayload(item, depth + 1))
+            .filter(Boolean)
+            .join('\n')
+            .trim();
+    }
+    if (typeof payload !== 'object') return '';
+    if (isProtocolOnlyPayload(payload)) return '';
+
+    const preferredFields = ['reply', 'response'];
+    const visibleFields = ['reply', 'response', 'content', 'message', 'text', 'summary', 'result_summary'];
+    for (const field of preferredFields) {
+        const value = payload[field];
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+    for (const field of visibleFields) {
+        const value = payload[field];
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+    for (const field of ['delegated_result', 'result', 'data', 'payload', 'output']) {
+        const visible = extractVisibleTextFromStructuredPayload(payload[field], depth + 1);
+        if (visible) return visible;
+    }
+    return '';
+}
+
+function parseFirstJsonPayloadFromText(text) {
+    const rawValue = String(text || '');
+    const leadingMatch = rawValue.match(/^\s*/);
+    const leadingLength = leadingMatch ? leadingMatch[0].length : 0;
+    const value = rawValue.slice(leadingLength);
+    if (!value || !/^[\[{]/.test(value)) {
+        return { status: 'not-json' };
+    }
+
+    const closingFor = { '{': '}', '[': ']' };
+    const stack = [];
+    let inString = false;
+    let escaped = false;
+    let jsonEnd = -1;
+
+    for (let i = 0; i < value.length; i += 1) {
+        const char = value[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{' || char === '[') {
+            stack.push(closingFor[char]);
+            continue;
+        }
+
+        if (char === '}' || char === ']') {
+            if (!stack.length || stack[stack.length - 1] !== char) {
+                return { status: 'invalid' };
+            }
+            stack.pop();
+            if (!stack.length) {
+                jsonEnd = i + 1;
+                break;
+            }
+        }
+    }
+
+    if (jsonEnd < 0) {
+        return { status: 'partial' };
+    }
+
+    try {
+        const jsonText = value.slice(0, jsonEnd);
+        const payload = JSON.parse(jsonText);
+        const rest = value.slice(jsonEnd);
+        return { status: 'complete', payload, rest };
+    } catch (_) {
+        return { status: 'invalid' };
+    }
+}
+
+function looksLikeProtocolFragment(text) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    if (/^[\[{]/.test(value)) return true;
+    if (/^(data:\s*)?["']?(type|agent|current_agent|target_agent|delta|content|seed|source|metadata|status|stage|task_id|task_type)["']?\s*[:：,]?/i.test(value)) {
+        return true;
+    }
+    if (/^["']?[A-Za-z_][\w-]{0,40}["']?\s*[:：,]\s*["']?[^"']{0,80}$/.test(value) && !/[。！？!?，、]/.test(value)) {
+        return true;
+    }
+    const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length || lines.length > 18) return false;
+    const protocolLineCount = lines.filter((line) => (
+        /^["']?[A-Za-z_][\w-]{0,40}["']?\s*[:：,]?\s*["']?[^"']{0,80}["']?,?$/.test(line)
+        || /^[{}\[\]",:：-]+$/.test(line)
+    )).length;
+    return protocolLineCount === lines.length;
+}
+
+function stripLeadingProtocolNoise(text) {
+    let value = String(text || '').replace(/^\s+/, '');
+    while (value) {
+        const next = value.replace(/^(?:[{}\[\]",:：-]|\b(?:type|agent|current_agent|target_agent|delta|content|seed|source|metadata|status|stage|task_id|task_type)\b)\s*/i, '');
+        if (next === value) break;
+        value = next.replace(/^\s+/, '');
+    }
+    return value;
+}
+
+function createCopilotStreamTextFilter() {
+    let pending = '';
+
+    function consume(value) {
+        if (value === null || value === undefined) return '';
+        pending += String(value);
+        if (!pending.trim()) {
+            pending = '';
+            return '';
+        }
+
+        const visibleParts = [];
+        while (pending.trim()) {
+            const parsed = parseFirstJsonPayloadFromText(pending);
+            if (parsed.status === 'partial') {
+                return visibleParts.join('');
+            }
+            if (parsed.status === 'complete') {
+                const visible = extractVisibleTextFromStructuredPayload(parsed.payload);
+                if (visible) {
+                    visibleParts.push(visible);
+                }
+                pending = parsed.rest || '';
+                continue;
+            }
+
+            if (looksLikeProtocolFragment(pending)) {
+                return visibleParts.join('');
+            }
+
+            const visible = stripLeadingProtocolNoise(pending).replace(/^\s+/, '');
+            pending = '';
+            if (visible) {
+                visibleParts.push(visible);
+            }
+        }
+
+        pending = '';
+        return visibleParts.join('');
+    }
+
+    function flush() {
+        if (!pending) return '';
+        const leftover = pending;
+        pending = '';
+        if (looksLikeProtocolFragment(leftover)) return '';
+        return stripLeadingProtocolNoise(leftover).trim();
+    }
+
+    return {
+        push: consume,
+        flush
+    };
+}
+
 function getWorkflowStageDisplayName(stageName) {
     const labels = {
         build_world: '世界观构建',
@@ -711,6 +1227,7 @@ function getWorkflowStageDisplayName(stageName) {
         project_dispatch: '项目调度',
         contract_init: '合同初始化',
         worldbuilding: '世界观构建',
+        chapters: '正文章节',
         outlining: '大纲生成',
         writing: '章节写作',
         completed: '已完成',
@@ -1994,6 +2511,7 @@ function updateCopilotSessionModelLabel(modelLabel) {
     if (normalizedModelLabel !== currentLabel) {
         ui.copilotSessionMode.textContent = `模型：${normalizedModelLabel}`;
     }
+    syncCopilotModelSelectorSelection('', normalizedModelLabel);
 }
 
 function extractModelLabelFromPayload(payload) {
@@ -2252,6 +2770,10 @@ function toggleFocusMode() {
 
 function renderMarkdown(text) {
     if (!text) return '';
+    const structuredPayloadHtml = renderStructuredPayloadBlock(text);
+    if (structuredPayloadHtml) {
+        return structuredPayloadHtml;
+    }
     try {
         if (typeof marked !== 'undefined') {
             // Escape HTML entities before passing to marked to prevent XSS
@@ -2264,11 +2786,53 @@ function renderMarkdown(text) {
     return '<p>' + escapeHtml(text) + '</p>';
 }
 
+function renderStructuredPayloadBlock(text) {
+    const rawText = String(text || '').trim();
+    if (!rawText || rawText.startsWith('<div class="copilot-')) return '';
+    if (!/^[\[{]/.test(rawText)) return '';
+
+    let displayText = rawText;
+    let language = '';
+    try {
+        displayText = JSON.stringify(JSON.parse(rawText), null, 2);
+        language = 'json';
+    } catch (_) {
+        if (!/^[\[{][\s\S]*(?:"[^"]+"\s*:|\][\s,]*$|\}[\s,]*$)/.test(rawText)) {
+            return '';
+        }
+    }
+
+    const langClass = language ? ` class="language-${language}"` : '';
+    return `<pre><code${langClass}>${escapeHtml(displayText)}</code></pre>`;
+}
+
 function formatContractScopeLine(label, value) {
     const safeLabel = window.escapeHtml ? window.escapeHtml(String(label || '').trim()) : String(label || '').trim();
     const rawValue = value === null || value === undefined || value === '' ? '未指定' : String(value);
     const safeValue = window.escapeHtml ? window.escapeHtml(rawValue) : rawValue;
     return `<div class="copilot-contract-line"><span>${safeLabel}</span><strong>${safeValue}</strong></div>`;
+}
+
+function formatPlanDeliverableLabel(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '计划产物';
+    const normalizedPath = raw.replace(/\\/g, '/').toLowerCase();
+    const normalized = normalizedPath.split('/').pop();
+    const labels = {
+        'worldbuilding.json': '世界观设定',
+        'characters.json': '角色档案',
+        'outline.json': '故事大纲',
+        'items.json': '道具物品',
+        'eventlines.json': '事件线',
+        'detail_settings.json': '细纲设定',
+        'chapter_settings.json': '章纲设定',
+        'chapters/*.md': '正文章节',
+        'stage_summaries/*.md': '阶段总结'
+    };
+    if (labels[normalized]) return labels[normalized];
+    if (normalizedPath.startsWith('chapters/') || normalizedPath.includes('/chapters/')) return '正文章节';
+    if (normalizedPath.startsWith('stage_summaries/') || normalizedPath.includes('/stage_summaries/')) return '阶段总结';
+    return translateTechnicalText(raw);
 }
 
 function normalizeTaskPoolSummary(taskPool) {
@@ -2337,10 +2901,11 @@ function renderCreationContractCard(contractPayload) {
     const constraints = contractPayload.constraints && typeof contractPayload.constraints === 'object' ? contractPayload.constraints : {};
     const deliverables = Array.isArray(contractPayload.deliverables) ? contractPayload.deliverables : [];
     const taskGraphDraft = Array.isArray(contractPayload.task_graph) ? contractPayload.task_graph : [];
+    const aiAutonomyRequested = Boolean(scope.ai_autonomy_requested);
     const styleText = Array.isArray(constraints.style) && constraints.style.length ? constraints.style.join('、') : '未指定';
     const qualityText = Array.isArray(constraints.quality_rules) && constraints.quality_rules.length ? constraints.quality_rules.join('、') : '未指定';
     const deliverablesHtml = deliverables.length
-        ? `<ul>${deliverables.slice(0, 8).map(item => `<li>${window.escapeHtml ? window.escapeHtml(String(item)) : String(item)}</li>`).join('')}</ul>`
+        ? `<ul>${deliverables.slice(0, 8).map(item => `<li>${window.escapeHtml ? window.escapeHtml(formatPlanDeliverableLabel(item)) : formatPlanDeliverableLabel(item)}</li>`).join('')}</ul>`
         : '<div class="copilot-contract-empty">暂无计划产物</div>';
     const taskHtml = taskGraphDraft.length
         ? `<ul>${taskGraphDraft.slice(0, 6).map(item => {
@@ -2362,8 +2927,9 @@ function renderCreationContractCard(contractPayload) {
             <div class="copilot-contract-grid">
                 ${formatContractScopeLine('类型', scope.novel_type)}
                 ${formatContractScopeLine('主题', scope.theme)}
-                ${formatContractScopeLine('主角', scope.protagonist)}
-                ${formatContractScopeLine('剧情', scope.plot_idea)}
+                ${formatContractScopeLine('主角', scope.protagonist || (aiAutonomyRequested ? '由助手自主设定' : ''))}
+                ${formatContractScopeLine('剧情', scope.plot_idea || (aiAutonomyRequested ? '由助手自主构思' : ''))}
+                ${formatContractScopeLine('篇幅', scope.target_word_count ? `约${Number(scope.target_word_count).toLocaleString()}字` : '')}
                 ${formatContractScopeLine('卷数', scope.volume_count)}
                 ${formatContractScopeLine('每卷章节', scope.chapters_per_volume)}
                 ${formatContractScopeLine('总章节', scope.total_chapters)}
@@ -2505,6 +3071,28 @@ async function sendCopilotMessage() {
 
     // 创建空的AI消息容器
     const aiDiv = createStreamMessage();
+    const contentEl = aiDiv.querySelector('.msg-content');
+    const streamTextFilter = createCopilotStreamTextFilter();
+    let fullText = '';
+    let pendingChunks = '';
+    let flushTimer = null;
+    const FLUSH_INTERVAL = 50; // 50ms 批量刷新一次
+
+    function flushPendingChunks() {
+        if (!pendingChunks || !contentEl) return;
+        const textNode = document.createTextNode(pendingChunks);
+        contentEl.appendChild(textNode);
+        pendingChunks = '';
+        scrollCopilotToBottom();
+    }
+
+    function scheduleFlush() {
+        if (flushTimer) return;
+        flushTimer = setTimeout(() => {
+            flushTimer = null;
+            flushPendingChunks();
+        }, FLUSH_INTERVAL);
+    }
 
     currentStreamAbort = new AbortController();
     setStreamingButtonState(true);
@@ -2567,29 +3155,6 @@ async function sendCopilotMessage() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let fullText = '';
-        const contentEl = aiDiv.querySelector('.msg-content');
-
-        // 批量缓冲渲染：累积chunk后统一刷新，减少DOM操作次数
-        let pendingChunks = '';
-        let flushTimer = null;
-        const FLUSH_INTERVAL = 50; // 50ms 批量刷新一次
-
-        function flushPendingChunks() {
-            if (!pendingChunks) return;
-            const textNode = document.createTextNode(pendingChunks);
-            contentEl.appendChild(textNode);
-            pendingChunks = '';
-            scrollCopilotToBottom();
-        }
-
-        function scheduleFlush() {
-            if (flushTimer) return;
-            flushTimer = setTimeout(() => {
-                flushTimer = null;
-                flushPendingChunks();
-            }, FLUSH_INTERVAL);
-        }
 
         while (true) {
             const { done, value } = await reader.read();
@@ -2608,13 +3173,17 @@ async function sendCopilotMessage() {
                     const evt = JSON.parse(dataStr);
 
                     if (evt.type === 'chunk') {
+                        const visibleContent = streamTextFilter.push(evt.content || '');
+                        if (!visibleContent) {
+                            continue;
+                        }
                         if (!fullText) {
                             clearInlineStatus(); // 第一个文字块到达时清除思考状态
                             contentEl.innerHTML = ''; // 初始化空容器
                         }
-                        fullText += evt.content;
+                        fullText += visibleContent;
                         // 累积到缓冲区，批量渲染而非逐字渲染
-                        pendingChunks += evt.content;
+                        pendingChunks += visibleContent;
                         scheduleFlush();
                     } else if (evt.type === 'workflow') {
                         updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
@@ -2683,6 +3252,15 @@ async function sendCopilotMessage() {
 
         // 流结束，刷新剩余缓冲并确保移除打字光标
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        const trailingVisibleContent = streamTextFilter.flush();
+        if (trailingVisibleContent) {
+            if (!fullText) {
+                clearInlineStatus();
+                contentEl.innerHTML = '';
+            }
+            fullText += trailingVisibleContent;
+            pendingChunks += trailingVisibleContent;
+        }
         flushPendingChunks();
         aiDiv.classList.remove('streaming');
         if (!fullText) {
@@ -2692,6 +3270,11 @@ async function sendCopilotMessage() {
     } catch (e) {
         clearInlineStatus();
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        const trailingVisibleContent = streamTextFilter.flush();
+        if (trailingVisibleContent) {
+            fullText += trailingVisibleContent;
+            pendingChunks += trailingVisibleContent;
+        }
         flushPendingChunks();
         aiDiv.classList.remove('streaming');
         const contentEl = aiDiv.querySelector('.msg-content');
@@ -2726,8 +3309,9 @@ function createStreamMessage() {
 
 function appendStreamWorkflowProgress(aiDiv, workflow) {
     if (!aiDiv || !workflow || typeof workflow !== 'object') return;
+    if (isInternalStreamEventType(workflow.type)) return;
     const progressText = formatWorkflowProgressText(workflow.last_progress || '');
-    if (!progressText) return;
+    if (!progressText || looksLikeProtocolFragment(progressText)) return;
 
     let traceEl = aiDiv.querySelector('.copilot-progress-trace');
     if (!traceEl) {
@@ -2930,11 +3514,13 @@ function clearInlineStatus() {
 
 function showInlineStatusFromWorkflow(workflow) {
     if (!workflow || typeof workflow !== 'object') return;
+    if (isInternalStreamEventType(workflow.type)) return;
     const agent = String(workflow.current_agent || workflow.target_agent || '').trim();
     const status = String(workflow.status || '').trim().toLowerCase();
     const stage = String(workflow.stage || '').trim();
     const progress = formatWorkflowProgressText(workflow.last_progress || '');
 
+    if (progress && looksLikeProtocolFragment(progress)) return;
     if (!agent && !status && !progress) return;
     // 最终完成时清除（让done事件的消息来代替）
     if (status === 'completed' && stage === 'completed') {
@@ -2985,6 +3571,8 @@ window.NovelAgentApp.core = {
     sendCopilotMessage,
     appendMessage,
     renderMarkdown,
+    createCopilotStreamTextFilter,
+    formatPlanDeliverableLabel,
     renderCreationContractCard,
     renderTaskPoolSummaryCard,
     confirmCreationContract,
@@ -3006,7 +3594,10 @@ window.NovelAgentApp.core = {
     getCurrentCopilotCreativeMode,
     renderCopilotCreativeModeSelector,
     loadCopilotCreativeModePreference,
-    saveCopilotCreativeModePreference
+    saveCopilotCreativeModePreference,
+    loadCopilotModelOptions,
+    renderCopilotModelSelector,
+    applyCopilotModelSelection
 };
 
 // 兼容旧版全局访问，后续模块优先使用 window.NovelAgentApp.core
@@ -3025,6 +3616,8 @@ window.toggleFocusMode = toggleFocusMode;
 window.sendCopilotMessage = sendCopilotMessage;
 window.appendMessage = appendMessage;
 window.renderMarkdown = renderMarkdown;
+window.createCopilotStreamTextFilter = createCopilotStreamTextFilter;
+window.formatPlanDeliverableLabel = formatPlanDeliverableLabel;
 window.renderCreationContractCard = renderCreationContractCard;
 window.renderTaskPoolSummaryCard = renderTaskPoolSummaryCard;
 window.startNovelCollabRuntimePolling = startNovelCollabRuntimePolling;
@@ -3047,5 +3640,8 @@ window.getCurrentCopilotCreativeMode = getCurrentCopilotCreativeMode;
 window.renderCopilotCreativeModeSelector = renderCopilotCreativeModeSelector;
 window.loadCopilotCreativeModePreference = loadCopilotCreativeModePreference;
 window.saveCopilotCreativeModePreference = saveCopilotCreativeModePreference;
+window.loadCopilotModelOptions = loadCopilotModelOptions;
+window.renderCopilotModelSelector = renderCopilotModelSelector;
+window.applyCopilotModelSelection = applyCopilotModelSelection;
 
 console.log('[app-core.js] 核心模块已加载');

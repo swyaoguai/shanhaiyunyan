@@ -30,7 +30,7 @@ from ..constants import RETRY_DEFAULTS
 from ..timeout_settings import get_llm_timeout_settings
 from ..utils.llm_params import normalize_max_tokens
 from ..utils.metrics import get_metrics_collector
-from ..utils.token_stats import record_token_usage
+from ..utils.token_stats import extract_token_usage, estimate_tokens_from_messages, estimate_tokens_from_text, record_token_usage
 from .api_key_rotation import (
     KeyUseResult,
     classify_key_error,
@@ -308,7 +308,8 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         stream: bool = False,
-        enable_retry: bool = True
+        enable_retry: bool = True,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """
         调用LLM
@@ -326,11 +327,11 @@ class LLMClient:
         """
         if enable_retry:
             return await self._call_with_retry(
-                messages, temperature, max_tokens, system_prompt, stream
+                messages, temperature, max_tokens, system_prompt, stream, usage_collector
             )
         else:
             return await self._call_internal(
-                messages, temperature, max_tokens, system_prompt, stream
+                messages, temperature, max_tokens, system_prompt, stream, usage_collector
             )
 
     async def _call_with_retry(
@@ -339,7 +340,8 @@ class LLMClient:
         temperature: Optional[float],
         max_tokens: Optional[int],
         system_prompt: Optional[str],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """带重试的LLM调用"""
         last_error = None
@@ -348,7 +350,7 @@ class LLMClient:
         for attempt in range(self.retry_config.max_retries + 1):
             try:
                 return await self._call_internal(
-                    messages, temperature, max_tokens, system_prompt, stream
+                    messages, temperature, max_tokens, system_prompt, stream, usage_collector
                 )
             except Exception as e:
                 last_error = e
@@ -385,15 +387,16 @@ class LLMClient:
         temperature: Optional[float],
         max_tokens: Optional[int],
         system_prompt: Optional[str],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """内部LLM调用实现 - 根据 api_type 路由到不同的调用方式"""
         if self._api_type == API_TYPE_ANTHROPIC:
-            return await self._call_anthropic(messages, temperature, max_tokens, system_prompt, stream)
+            return await self._call_anthropic(messages, temperature, max_tokens, system_prompt, stream, usage_collector)
         elif self._api_type == API_TYPE_OPENAI_RESPONSES:
-            return await self._call_openai_responses(messages, temperature, max_tokens, system_prompt, stream)
+            return await self._call_openai_responses(messages, temperature, max_tokens, system_prompt, stream, usage_collector)
         else:
-            return await self._call_openai_chat(messages, temperature, max_tokens, system_prompt, stream)
+            return await self._call_openai_chat(messages, temperature, max_tokens, system_prompt, stream, usage_collector)
 
     # ============================================================
     # OpenAI Chat Completions API
@@ -405,7 +408,8 @@ class LLMClient:
         temperature: Optional[float],
         max_tokens: Optional[int],
         system_prompt: Optional[str],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """OpenAI Chat Completions API 调用"""
         start_time = time.time()
@@ -430,6 +434,7 @@ class LLMClient:
 
         # 日志
         total_chars = sum(len(m.get("content", "")) for m in full_messages)
+        estimated_tokens_in = estimate_tokens_from_messages(full_messages)
         logger.info(
             f"[LLMClient:{self.metrics_namespace}] Calling OpenAI Chat - "
             f"Model: {params['model']}, Messages: {len(full_messages)}, "
@@ -438,7 +443,7 @@ class LLMClient:
 
         try:
             if stream:
-                return self._stream_openai_chat(params)
+                return self._stream_openai_chat(params, usage_collector=usage_collector)
             else:
                 response = await self._run_openai_operation_with_rotation(
                     lambda client: client.chat.completions.create(**params)
@@ -447,8 +452,11 @@ class LLMClient:
 
                 # 提取token使用
                 usage = getattr(response, 'usage', None)
-                tokens_in = usage.prompt_tokens if usage else 0
-                tokens_out = usage.completion_tokens if usage else 0
+                tokens_in, tokens_out = extract_token_usage(
+                    usage,
+                    fallback_tokens_in=estimated_tokens_in,
+                    fallback_tokens_out=estimate_tokens_from_text(content),
+                )
 
                 # 记录指标
                 duration = time.time() - start_time
@@ -464,7 +472,7 @@ class LLMClient:
 
         except Exception as e:
             duration = time.time() - start_time
-            self._record_metrics(0, 0, duration, False, str(e))
+            self._record_metrics(estimated_tokens_in, 0, duration, False, str(e))
 
             # 解析错误
             user_msg = self._parse_error(str(e), params['model'])
@@ -476,14 +484,49 @@ class LLMClient:
                 raise Exception(user_msg) from e
             raise
 
-    async def _stream_openai_chat(self, params: dict) -> AsyncGenerator[str, None]:
-        """OpenAI Chat 流式响应生成器"""
-        response = await self._run_openai_operation_with_rotation(
-            lambda client: client.chat.completions.create(**params)
+    @staticmethod
+    def _is_stream_options_unsupported(error: Exception) -> bool:
+        error_lower = str(error or "").lower()
+        return (
+            "stream_options" in error_lower
+            and any(token in error_lower for token in ("unsupported", "unknown", "extra", "unrecognized", "not allowed", "unexpected", "invalid"))
         )
+
+    async def _stream_openai_chat(
+        self,
+        params: dict,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """OpenAI Chat 流式响应生成器"""
+        request_params = dict(params)
+        if request_params.get("stream") and "stream_options" not in request_params:
+            request_params["stream_options"] = {"include_usage": True}
+        try:
+            response = await self._run_openai_operation_with_rotation(
+                lambda client: client.chat.completions.create(**request_params)
+            )
+        except Exception as exc:
+            if "stream_options" in request_params and self._is_stream_options_unsupported(exc):
+                if usage_collector is not None:
+                    usage_collector["usage_unavailable_reason"] = "stream_options_unsupported"
+                request_params.pop("stream_options", None)
+                response = await self._run_openai_operation_with_rotation(
+                    lambda client: client.chat.completions.create(**request_params)
+                )
+            else:
+                raise
         async for chunk in response:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            usage = chunk.get("usage") if isinstance(chunk, dict) else getattr(chunk, "usage", None)
+            if usage is not None and usage_collector is not None:
+                usage_collector["usage"] = usage
+            choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, "delta", None)
+            content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+            if content:
+                yield content
 
     # ============================================================
     # OpenAI Responses API
@@ -495,7 +538,8 @@ class LLMClient:
         temperature: Optional[float],
         max_tokens: Optional[int],
         system_prompt: Optional[str],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """OpenAI Responses API 调用 (/v1/responses)"""
         start_time = time.time()
@@ -524,6 +568,7 @@ class LLMClient:
             params["instructions"] = system_prompt
 
         total_chars = sum(len(item.get("content", "")) for item in input_items)
+        estimated_tokens_in = estimate_tokens_from_messages(input_items) + estimate_tokens_from_text(system_prompt)
         logger.info(
             f"[LLMClient:{self.metrics_namespace}] Calling OpenAI Responses - "
             f"Model: {params['model']}, Input: {len(input_items)}, "
@@ -532,7 +577,7 @@ class LLMClient:
 
         try:
             if stream:
-                return self._stream_openai_responses(params)
+                return self._stream_openai_responses(params, usage_collector=usage_collector)
             else:
                 response = await self._run_openai_operation_with_rotation(
                     lambda client: client.responses.create(**params)
@@ -554,8 +599,11 @@ class LLMClient:
 
                 # 提取token使用
                 usage = getattr(response, 'usage', None)
-                tokens_in = getattr(usage, 'input_tokens', 0) if usage else 0
-                tokens_out = getattr(usage, 'output_tokens', 0) if usage else 0
+                tokens_in, tokens_out = extract_token_usage(
+                    usage,
+                    fallback_tokens_in=estimated_tokens_in,
+                    fallback_tokens_out=estimate_tokens_from_text(content),
+                )
 
                 duration = time.time() - start_time
                 self._record_metrics(tokens_in, tokens_out, duration, True)
@@ -570,7 +618,7 @@ class LLMClient:
 
         except Exception as e:
             duration = time.time() - start_time
-            self._record_metrics(0, 0, duration, False, str(e))
+            self._record_metrics(estimated_tokens_in, 0, duration, False, str(e))
 
             user_msg = self._parse_error(str(e), params['model'])
             logger.error(
@@ -758,20 +806,28 @@ class LLMClient:
         }
         return json.dumps(summary, ensure_ascii=False, default=str)[:2000]
 
-    async def _stream_openai_responses(self, params: dict) -> AsyncGenerator[str, None]:
+    async def _stream_openai_responses(
+        self,
+        params: dict,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
         """OpenAI Responses 流式响应生成器"""
         stream = await self._run_openai_operation_with_rotation(
             lambda client: client.responses.create(stream=True, **params)
         )
         async for event in stream:
+            usage = event.get("usage") if isinstance(event, dict) else getattr(event, "usage", None)
+            if usage is not None and usage_collector is not None:
+                usage_collector["usage"] = usage
             # Responses API 流式事件
-            event_type = getattr(event, 'type', '')
+            event_type = event.get("type", "") if isinstance(event, dict) else getattr(event, 'type', '')
             if event_type == 'response.output_text.delta':
-                delta = getattr(event, 'delta', '')
+                delta = event.get("delta", "") if isinstance(event, dict) else getattr(event, 'delta', '')
                 if delta:
                     yield delta
-            elif hasattr(event, 'delta'):
-                delta_text = getattr(event.delta, 'text', '') if hasattr(event.delta, 'text') else str(event.delta)
+            elif (isinstance(event, dict) and "delta" in event) or hasattr(event, 'delta'):
+                raw_delta = event.get("delta") if isinstance(event, dict) else getattr(event, "delta", None)
+                delta_text = raw_delta.get("text", "") if isinstance(raw_delta, dict) else getattr(raw_delta, 'text', '') if hasattr(raw_delta, 'text') else str(raw_delta)
                 if delta_text:
                     yield delta_text
 
@@ -785,7 +841,8 @@ class LLMClient:
         temperature: Optional[float],
         max_tokens: Optional[int],
         system_prompt: Optional[str],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """Anthropic Messages API 调用。
 
@@ -817,6 +874,10 @@ class LLMClient:
             params["system"] = system_prompt
 
         total_chars = sum(len(self._anthropic_content_to_text(m.get("content", ""))) for m in anthropic_messages)
+        estimated_tokens_in = (
+            sum(estimate_tokens_from_text(self._anthropic_content_to_text(m.get("content", ""))) for m in anthropic_messages)
+            + estimate_tokens_from_text(system_prompt)
+        )
         logger.info(
             f"[LLMClient:{self.metrics_namespace}] Calling Anthropic Messages - "
             f"Model: {params['model']}, Messages: {len(anthropic_messages)}, "
@@ -825,7 +886,7 @@ class LLMClient:
 
         try:
             if stream:
-                return self._stream_anthropic(params)
+                return self._stream_anthropic(params, usage_collector=usage_collector)
             else:
                 response = await self._client.messages.create(**params)
 
@@ -836,8 +897,11 @@ class LLMClient:
                     content = json.dumps({"tool_calls": tool_uses}, ensure_ascii=False)
 
                 # 提取token使用
-                tokens_in = getattr(response.usage, 'input_tokens', 0) if hasattr(response, 'usage') and response.usage else 0
-                tokens_out = getattr(response.usage, 'output_tokens', 0) if hasattr(response, 'usage') and response.usage else 0
+                tokens_in, tokens_out = extract_token_usage(
+                    getattr(response, 'usage', None),
+                    fallback_tokens_in=estimated_tokens_in,
+                    fallback_tokens_out=estimate_tokens_from_text(content),
+                )
 
                 duration = time.time() - start_time
                 self._record_metrics(tokens_in, tokens_out, duration, True)
@@ -852,7 +916,7 @@ class LLMClient:
 
         except Exception as e:
             duration = time.time() - start_time
-            self._record_metrics(0, 0, duration, False, str(e))
+            self._record_metrics(estimated_tokens_in, 0, duration, False, str(e))
 
             user_msg = self._parse_anthropic_error(str(e))
             logger.error(
@@ -1010,7 +1074,11 @@ class LLMClient:
 
         return "".join(text_parts), tool_uses
 
-    async def _stream_anthropic(self, params: dict) -> AsyncGenerator[str, None]:
+    async def _stream_anthropic(
+        self,
+        params: dict,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
         """Anthropic 流式响应生成器。
 
         不使用 SDK 的 text_stream 快捷通道，因为 text_stream 只返回文本，
@@ -1021,6 +1089,9 @@ class LLMClient:
 
         async with self._client.messages.stream(**params) as stream:
             async for event in stream:
+                usage = self._event_value(event, "usage", None)
+                if usage is not None and usage_collector is not None:
+                    usage_collector["usage"] = usage
                 event_type = self._event_value(event, "type", "")
 
                 if event_type == "content_block_start":

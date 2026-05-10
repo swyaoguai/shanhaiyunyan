@@ -27,7 +27,7 @@ class OutlinerAgent(BaseAgent):
             agent_name=self.name,
             capabilities=["story_outlining", "story_planning"],
             accept_task_types=["build_outline"],
-            required_inputs=["world", "protagonist"],
+            required_inputs=["world"],
             produced_outputs=["outline"],
             priority=91,
             max_concurrency=1,

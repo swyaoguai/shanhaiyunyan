@@ -657,6 +657,9 @@ class KnowledgeBase:
         self._embedding_service.close()
         self._fulltext_store.close()
         self._metadata_store.close()
+        close_vector_store = getattr(self._vector_store, "close", None)
+        if callable(close_vector_store):
+            close_vector_store()
         logger.info(f"知识库已关闭: project_id={self.project_id}")
     
     def __enter__(self):

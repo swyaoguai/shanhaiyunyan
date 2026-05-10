@@ -12,6 +12,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set, Tuple
@@ -25,6 +26,7 @@ from ..utils.atomic_write import atomic_write_text
 from ..content_sanitizer import strip_internal_author_markers
 from ..outline_utils import (
     build_outline_overview_row,
+    extract_outline_chapter_rows,
     extract_eventlines_from_outline,
     merge_eventline_rows,
     normalize_outline_payload,
@@ -37,6 +39,33 @@ from ..workflow.workflow_context import AgentHandoff, Artifact, WorkflowContext
 from ..workflow.workflow_planner import BUILTIN_CATEGORY_DEFINITIONS, WorkflowTask, build_workflow_plan, detect_target_categories
 
 logger = logging.getLogger(__name__)
+
+_GENRE_HINTS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("古代", "古言", "宫廷", "宅斗", "甜宠", "言情", "爱情", "恋爱", "姐弟恋", "团宠"), "古代言情"),
+    (("玄幻", "修仙", "仙侠"), "玄幻"),
+    (("都市", "现代"), "都市"),
+    (("科幻", "星际", "未来"), "科幻"),
+    (("悬疑", "推理"), "悬疑"),
+    (("武侠",), "武侠"),
+    (("历史",), "历史"),
+    (("末世",), "末世"),
+)
+
+_THEME_HINTS: Tuple[Tuple[str, str], ...] = (
+    ("古言", "古代"),
+    ("古代", "古代"),
+    ("姐弟恋", "姐弟恋"),
+    ("团宠", "团宠"),
+    ("甜宠", "甜宠"),
+    ("复仇成长", "复仇成长"),
+    ("复仇", "复仇"),
+    ("成长", "成长"),
+    ("权谋", "权谋"),
+    ("宅斗", "宅斗"),
+    ("宫廷", "宫廷"),
+)
+
+_AI_AUTONOMY_REQUIREMENT = "未指定的世界观、角色姓名、人物设定和剧情细节由助手自主创作"
 
 
 _USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
@@ -69,6 +98,38 @@ _USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
 }
 
 
+_USER_VISIBLE_WORKFLOW_ERROR_REPLACEMENTS = {
+    "missing_chapter_number": "缺少章节号：当前任务没有拿到要写第几章",
+    "chapter_not_found": "未找到对应章节：请先生成或检查大纲",
+    "missing_outline": "缺少大纲：需要先有章节大纲才能写正文",
+    "empty_workflow_plan": "没有可执行的工作流计划",
+    "task_failed": "任务执行失败",
+    "unsupported_task_type": "当前任务类型还不支持自动执行",
+    "max_chapter_tasks_reached": "这一轮连续写章达到上限",
+    "max_tasks_reached": "这一轮任务执行达到上限",
+    "fallback_triggered": "系统已触发回退处理",
+    "review_required": "这一步需要先复核确认",
+    "cancelled": "创作已取消",
+}
+
+_USER_VISIBLE_WORKFLOW_TASK_REPLACEMENTS = {
+    "worldbuilding": "世界观设定",
+    "characters": "角色档案",
+    "outline": "大纲",
+    "items": "道具物品",
+    "eventlines": "事件线",
+    "detail_settings": "细纲设定",
+    "chapter_settings": "章纲设定",
+    "chapter_summary": "正文摘要",
+    "chapters": "正文章节",
+    "write_chapter": "章节正文",
+    "build_world": "世界观设定",
+    "build_characters": "角色档案",
+    "build_outline": "大纲",
+    "summary_orchestrate": "阶段总结",
+}
+
+
 def _localize_user_visible_agent_names(text: Any) -> str:
     """将用户可见文本中的内部 Agent 代号替换为自然中文显示。"""
     value = str(text or "")
@@ -85,11 +146,54 @@ def _localize_user_visible_agent_names(text: Any) -> str:
     return value
 
 
+def _localize_workflow_error(text: Any) -> str:
+    value = _localize_user_visible_agent_names(text)
+    if not value:
+        return ""
+    for old, new in sorted(_USER_VISIBLE_WORKFLOW_ERROR_REPLACEMENTS.items(), key=lambda item: len(item[0]), reverse=True):
+        value = value.replace(old, new)
+    return value
+
+
+def _get_user_visible_workflow_task_name(task_type: Any, default: str = "当前任务") -> str:
+    raw = str(task_type or "").strip()
+    if not raw:
+        return default
+    return _USER_VISIBLE_WORKFLOW_TASK_REPLACEMENTS.get(raw, raw) or default
+
+
 def _get_user_visible_agent_name(agent_name: Any, default: str = "创作助手") -> str:
     raw = str(agent_name or "").strip()
     if not raw:
         return default
     return _localize_user_visible_agent_names(raw) or default
+
+
+def _format_plan_deliverable_label(value: Any) -> str:
+    """将内部产物路径转换为用户可读的中文名称。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return "计划产物"
+    normalized_path = raw.replace("\\", "/").lower()
+    normalized = normalized_path.rsplit("/", 1)[-1]
+    mapping = {
+        "worldbuilding.json": "世界观设定",
+        "characters.json": "角色档案",
+        "outline.json": "故事大纲",
+        "items.json": "道具物品",
+        "eventlines.json": "事件线",
+        "detail_settings.json": "细纲设定",
+        "chapter_settings.json": "章纲设定",
+        "chapters/*.md": "正文章节",
+        "stage_summaries/*.md": "阶段总结",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    if normalized_path.startswith("chapters/") or "/chapters/" in normalized_path:
+        return "正文章节"
+    if normalized_path.startswith("stage_summaries/") or "/stage_summaries/" in normalized_path:
+        return "阶段总结"
+    return _get_user_visible_workflow_task_name(raw, raw)
 
 
 class UserIntent(Enum):
@@ -367,7 +471,11 @@ class RouterAgent(BaseAgent):
         message: str,
         context: Optional[Dict[str, Any]],
     ) -> List[IntentAnalysis]:
-        explicit_command = (context or {}).get("explicit_command") if isinstance(context, dict) else None
+        context = context if isinstance(context, dict) else {}
+        if isinstance(context.get("creation_requirements"), dict):
+            return [self._build_intent_analysis(message, UserIntent.CREATE_NOVEL, confidence=1.0)]
+
+        explicit_command = context.get("explicit_command")
         if not isinstance(explicit_command, dict):
             return []
         command_name = str(explicit_command.get("name") or "").strip().lower()
@@ -1805,7 +1913,7 @@ class RouterAgent(BaseAgent):
             explicit_command = (context or {}).get("explicit_command") if isinstance(context, dict) else None
             explicit_name = str((explicit_command or {}).get("name") or "").strip().lower()
             if explicit_name and self.coordinator:
-                if explicit_name == "create":
+                if explicit_name == "create" and bool((context or {}).get("auto_execute")):
                     return await self._execute_create_novel_pipeline(message=message, context=context)
                 serial_categories = self._target_categories_from_explicit_command(message, explicit_command)
                 if explicit_name in {"worldbuild", "outline", "character", "projectdata", "chapter"}:
@@ -1944,7 +2052,7 @@ class RouterAgent(BaseAgent):
                             context=context,
                         )
 
-                    requirements = self._build_creation_requirements(context, message)
+                    requirements = await self._build_creation_requirements_async(context, message)
                     contract_payload = self._persist_creation_contract_payload(
                         self._build_creation_contract_payload(
                             requirements,
@@ -2044,25 +2152,290 @@ class RouterAgent(BaseAgent):
                 "response": f"任务分发遇到问题: {str(e)}"
             }
     
-    def _extract_novel_type(self, message: str) -> str:
-        """从消息中提取小说类型"""
-        type_keywords = {
-            "玄幻": ["玄幻", "修仙", "修真", "仙侠", "奇幻"],
-            "都市": ["都市", "现代", "职场", "商战"],
-            "科幻": ["科幻", "未来", "星际", "机甲", "末日"],
-            "言情": ["言情", "爱情", "甜宠", "虐恋", "总裁"],
-            "历史": ["历史", "穿越", "古代", "架空"],
-            "悬疑": ["悬疑", "推理", "探案", "侦探"],
-            "游戏": ["游戏", "电竞", "网游", "虚拟"],
-            "武侠": ["武侠", "江湖", "门派"]
-        }
-        
-        message_lower = message.lower()
-        for novel_type, keywords in type_keywords.items():
-            if any(kw in message_lower for kw in keywords):
-                return novel_type
-        
-        return ""  # 默认类型
+    def _can_call_model_for_requirement_extraction(self) -> bool:
+        model_name = str(getattr(self.model_config, "model", "") or "").strip().lower()
+        api_base = str(getattr(self.model_config, "api_base", "") or "").strip().lower()
+        if "test-model" in model_name or "example.invalid" in api_base:
+            return False
+        return bool(model_name)
+
+    @staticmethod
+    def _extract_word_count_hint(message: str) -> int:
+        text = str(message or "").strip()
+        if not text:
+            return 0
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:w|W|万)\s*(?:字|词)?", text)
+        if match:
+            return max(0, int(float(match.group(1)) * 10000))
+        match = re.search(r"(\d{4,7})\s*(?:字|词)", text)
+        if match:
+            return max(0, int(match.group(1)))
+        return 0
+
+    @staticmethod
+    def _derive_chapters_for_target_words(target_word_count: int) -> int:
+        if target_word_count <= 0:
+            return 0
+        return max(5, min(80, int(math.ceil(target_word_count / 3000))))
+
+    @staticmethod
+    def _extract_local_creation_requirement_hints(message: str) -> Dict[str, Any]:
+        text = str(message or "").strip()
+        if not text:
+            return {}
+
+        hints: Dict[str, Any] = {}
+        autonomy_patterns = (
+            r"(?:其他|其它|剩下|其余|余下|别的|其他的|其它的|后面|后续).{0,20}(?:随便|你来|你帮我|帮我|你安排|帮我安排|自由发挥|自己安排|自行安排|完善)",
+            r"(?:随便|自由发挥|自己安排|自行安排|你安排|帮我安排|你看着办|你定|你决定|都交给你).{0,20}(?:创作|写|安排|完善|补全|设定|构思)?",
+            r"(?:不用|不想|懒得).{0,12}(?:想|填|设定|补充).{0,20}(?:你来|你帮我|随便|自由发挥|安排)",
+        )
+        autonomous_creation = any(re.search(pattern, text) for pattern in autonomy_patterns)
+        if autonomous_creation:
+            hints["ai_autonomy_requested"] = True
+        for tokens, novel_type in _GENRE_HINTS:
+            if any(token in text for token in tokens):
+                hints["novel_type"] = novel_type
+                break
+
+        theme_parts: List[str] = []
+        for token, label in _THEME_HINTS:
+            if token in text and label not in theme_parts:
+                theme_parts.append(label)
+        if theme_parts:
+            if theme_parts == ["古代", "甜宠"]:
+                hints["theme"] = "古代甜宠"
+            else:
+                hints["theme"] = "、".join(theme_parts[:4])
+
+        protagonist_match = re.search(r"(?<!女)(?:主角|男主角?|男主)(?:叫|是|为)\s*([^。；;，,\n]+)", text)
+        if protagonist_match:
+            protagonist = str(protagonist_match.group(1) or "").strip()
+            if protagonist and not any(marker in protagonist for marker in ("你帮我", "帮我", "随便", "什么的", "安排")):
+                hints["protagonist"] = protagonist[:120]
+
+        plot_match = re.search(r"(?:剧情|故事|主线|走向)(?:是|为|围绕|：|:)\s*([^。；;\n]+)", text)
+        if plot_match:
+            plot_idea = str(plot_match.group(1) or "").strip(" ，,。；;")
+            if plot_idea and plot_idea != text:
+                hints["plot_idea"] = plot_idea[:500]
+
+        target_words = RouterAgent._extract_word_count_hint(text)
+        if target_words:
+            hints["target_word_count"] = target_words
+            hints["chapters_per_volume"] = RouterAgent._derive_chapters_for_target_words(target_words)
+
+        requirement_parts: List[str] = []
+        if target_words:
+            requirement_parts.append(f"篇幅约{target_words}字")
+        if autonomous_creation:
+            requirement_parts.append(_AI_AUTONOMY_REQUIREMENT)
+        if re.search(r"(?:主角名字|主角名|主角姓名|主角设定|人物设定).{0,12}(?:你帮我|帮我|随便|安排|完善|想)", text):
+            requirement_parts.append("主角姓名与人物设定由助手合理安排")
+        if re.search(r"(?:女主角|女主).{0,12}(?:你帮我|帮我|随便|安排|想)", text):
+            requirement_parts.append("女主角由助手构思")
+        if requirement_parts:
+            hints["requirements"] = "；".join(requirement_parts)
+
+        return hints
+
+    @staticmethod
+    def _looks_like_unparsed_creation_request(plot_idea: str, source_message: str) -> bool:
+        plot = str(plot_idea or "").strip()
+        source = str(source_message or "").strip()
+        if not plot:
+            return False
+        if source and plot == source:
+            return True
+        request_markers = ("我想写", "想写", "篇幅", "题材", "小说", "主角名字", "你帮我", "帮我安排")
+        return any(marker in plot for marker in request_markers) and not any(
+            marker in plot for marker in ("剧情", "主线", "故事走向", "围绕", "讲述")
+        )
+
+    @staticmethod
+    def _extract_json_object(response: str) -> Dict[str, Any]:
+        text = str(response or "").strip()
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _normalize_model_requirement_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_text_fields = ("novel_type", "theme", "requirements", "protagonist", "plot_idea")
+        normalized: Dict[str, Any] = {}
+        for key in allowed_text_fields:
+            value = payload.get(key)
+            if isinstance(value, (str, int, float)):
+                text = str(value).strip()
+                if text and text not in {"未指定", "未知", "无", "null", "None"}:
+                    normalized[key] = text[:1200] if key == "requirements" else text[:500]
+
+        for key in ("volume_count", "chapters_per_volume", "target_word_count", "target_words_per_chapter"):
+            try:
+                value = int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                normalized[key] = value
+
+        if payload.get("ai_autonomy_requested") is True:
+            normalized["ai_autonomy_requested"] = True
+
+        return normalized
+
+    async def _extract_creation_requirements_with_model(
+        self,
+        context: Optional[Dict[str, Any]],
+        message: str,
+        base_requirements: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not self._can_call_model_for_requirement_extraction():
+            return {}
+
+        prompt = (
+            "你是小说创作需求解析器。请先判断用户这句话是在提出新小说创作需求、补充创作约束，"
+            "还是普通聊天；只有明确属于创作需求时才提取字段。\n"
+            "不要按固定关键词硬切，要理解中文语义：题材、时代背景、篇幅、主角名、让AI代拟的部分都要保留。\n\n"
+            "返回严格 JSON，不要 Markdown：\n"
+            "{\n"
+            '  "is_creation_request": true,\n'
+            '  "novel_type": "",\n'
+            '  "theme": "",\n'
+            '  "requirements": "",\n'
+            '  "protagonist": "",\n'
+            '  "plot_idea": "",\n'
+            '  "volume_count": 1,\n'
+            '  "chapters_per_volume": 0,\n'
+            '  "target_word_count": 0,\n'
+            '  "target_words_per_chapter": 0,\n'
+            '  "ai_autonomy_requested": false,\n'
+            '  "confidence": 0.0\n'
+            "}\n\n"
+            f"当前基础字段（可能不准，只作参考）：\n{json.dumps(base_requirements, ensure_ascii=False)}\n\n"
+            f"完整讨论上下文：\n{self._build_discussion_context(context, message)}\n\n"
+            f"当前用户消息：\n{message}"
+        )
+        try:
+            response = await self.call_llm(
+                [{"role": "user", "content": prompt}],
+                temperature=AGENT_TEMPERATURE.SUMMARY_STABLE,
+                max_tokens=900,
+            )
+        except Exception as exc:
+            logger.warning(f"[{self.name}] 模型解析创作需求失败，使用本地兜底: {exc}")
+            return {}
+
+        payload = self._extract_json_object(str(response or ""))
+        if not payload or payload.get("is_creation_request") is False:
+            return {}
+        try:
+            confidence = float(payload.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence and confidence < 0.35:
+            return {}
+        return self._normalize_model_requirement_payload(payload)
+
+    def _merge_creation_requirement_hints(
+        self,
+        base: Dict[str, Any],
+        hints: Dict[str, Any],
+        message: str,
+    ) -> Dict[str, Any]:
+        merged = dict(base or {})
+        if not hints:
+            return merged
+
+        raw_message = str(message or "").strip()
+        for key in ("novel_type", "theme", "requirements", "protagonist"):
+            value = hints.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "requirements" and str(merged.get(key) or "").strip():
+                existing_parts = [
+                    part.strip()
+                    for part in re.split(r"[；;\n]+", str(merged.get(key) or ""))
+                    if part.strip()
+                ]
+                for part in re.split(r"[；;\n]+", str(value)):
+                    part = part.strip()
+                    if part and part not in existing_parts:
+                        existing_parts.append(part)
+                merged[key] = "；".join(existing_parts)
+            else:
+                merged[key] = value
+
+        if hints.get("ai_autonomy_requested"):
+            merged["ai_autonomy_requested"] = True
+            existing_requirements = str(merged.get("requirements") or "").strip()
+            if _AI_AUTONOMY_REQUIREMENT not in existing_requirements:
+                merged["requirements"] = (
+                    f"{existing_requirements}；{_AI_AUTONOMY_REQUIREMENT}"
+                    if existing_requirements
+                    else _AI_AUTONOMY_REQUIREMENT
+                )
+
+        plot_hint = str(hints.get("plot_idea") or "").strip()
+        if plot_hint and (
+            not str(merged.get("plot_idea") or "").strip()
+            or str(merged.get("plot_idea") or "").strip() == raw_message
+        ):
+            merged["plot_idea"] = plot_hint
+
+        for key in ("target_word_count", "target_words_per_chapter"):
+            if hints.get(key):
+                merged[key] = self._normalize_positive_int(hints.get(key), 0)
+
+        for key in ("volume_count", "chapters_per_volume"):
+            if not hints.get(key):
+                continue
+            current = self._normalize_positive_int(merged.get(key), 0)
+            should_replace_default = (
+                (key == "volume_count" and current <= 1)
+                or (key == "chapters_per_volume" and (current <= 5 or hints.get("target_word_count")))
+            )
+            if should_replace_default:
+                merged[key] = self._normalize_positive_int(hints.get(key), current or 1)
+
+        target_words = self._normalize_positive_int(merged.get("target_word_count"), 0)
+        total_chapters = (
+            self._normalize_positive_int(merged.get("volume_count"), 1)
+            * self._normalize_positive_int(merged.get("chapters_per_volume"), 5)
+        )
+        if target_words and total_chapters and not merged.get("target_words_per_chapter"):
+            merged["target_words_per_chapter"] = max(500, int(math.ceil(target_words / total_chapters)))
+
+        return merged
+
+    async def _build_creation_requirements_async(
+        self,
+        context: Optional[Dict[str, Any]],
+        message: str,
+    ) -> Dict[str, Any]:
+        base = self._build_creation_requirements(context, message)
+        local_hints = self._extract_local_creation_requirement_hints(message)
+        if local_hints:
+            base = self._merge_creation_requirement_hints(base, local_hints, message)
+
+        model_hints = await self._extract_creation_requirements_with_model(context, message, base)
+        if model_hints:
+            base = self._merge_creation_requirement_hints(base, model_hints, message)
+
+        if self._looks_like_unparsed_creation_request(base.get("plot_idea", ""), str(base.get("source_message") or message)):
+            base["plot_idea"] = str(local_hints.get("plot_idea") or "").strip()
+        return base
 
     @staticmethod
     def _normalize_positive_int(value: Any, default: int) -> int:
@@ -2117,6 +2490,7 @@ class RouterAgent(BaseAgent):
     def _build_worldbuilding_requirements_text(self, requirements: Dict[str, Any]) -> str:
         base_requirements = str(requirements.get("requirements") or "").strip()
         discussion_context = str(requirements.get("discussion_context") or "").strip()
+        ai_autonomy_requested = bool(requirements.get("ai_autonomy_requested", False))
         context_rules = (
             "【上下文继承硬约束】\n"
             "1. 必须优先基于上方聊天讨论中用户已经确认或倾向的设定。\n"
@@ -2124,6 +2498,11 @@ class RouterAgent(BaseAgent):
             "3. 如果聊天讨论缺少关键信息，请明确列为待确认，不要随机补成无关设定。\n"
             "4. 允许补充细节，但补充内容必须服务于已讨论方向。"
         )
+        if ai_autonomy_requested:
+            context_rules += (
+                "\n5. 用户已明确授权“其他/未指定内容由AI安排”，"
+                "这类空白不是缺失信息；请在已给定的题材、篇幅和风格方向内自主补全世界名、核心冲突、地点、势力与剧情钩子。"
+            )
         if not discussion_context:
             return f"{base_requirements}\n\n{context_rules}".strip()
         if base_requirements:
@@ -2138,13 +2517,20 @@ class RouterAgent(BaseAgent):
     def _build_outline_plot_idea_text(self, requirements: Dict[str, Any]) -> str:
         plot_idea = str(requirements.get("plot_idea") or "").strip()
         discussion_context = str(requirements.get("discussion_context") or "").strip()
+        autonomy_note = (
+            "【AI自主创作授权】用户已明确表示未指定内容由助手安排；"
+            "请在已给定的题材、篇幅、主题和角色方向内自主设计主线、角色关系、冲突与阶段爽点。"
+            if bool(requirements.get("ai_autonomy_requested", False))
+            else ""
+        )
+        base_parts = [part for part in (plot_idea, autonomy_note) if part]
         if discussion_context:
             return (
-                f"{plot_idea}\n\n"
+                f"{chr(10).join(base_parts)}\n\n"
                 "【沟通助手完整讨论摘要】\n"
                 f"{discussion_context}"
             ).strip()
-        return plot_idea
+        return "\n\n".join(base_parts)
 
     def _should_resume_existing_project(
         self,
@@ -2181,8 +2567,8 @@ class RouterAgent(BaseAgent):
 
         latest_message = str(message or "").strip()
         source_plot_idea = str(source.get("plot_idea") or "").strip()
-        plot_idea = source_plot_idea or latest_message
-        novel_type = str(source.get("novel_type") or self._extract_novel_type(message) or "").strip()
+        plot_idea = source_plot_idea or ""
+        novel_type = str(source.get("novel_type") or "").strip()
         if not novel_type:
             try:
                 from ..project_manager import get_project_manager
@@ -2200,6 +2586,9 @@ class RouterAgent(BaseAgent):
             "plot_idea": plot_idea,
             "volume_count": self._normalize_positive_int(source.get("volume_count"), 1),
             "chapters_per_volume": self._normalize_positive_int(source.get("chapters_per_volume"), 5),
+            "target_word_count": self._normalize_positive_int(source.get("target_word_count"), 0),
+            "target_words_per_chapter": self._normalize_positive_int(source.get("target_words_per_chapter"), 0),
+            "ai_autonomy_requested": bool(source.get("ai_autonomy_requested", False)),
             "discussion_context": discussion_context,
             "resume_existing": self._should_resume_existing_project(context, message),
             "source_message": latest_message,
@@ -2221,6 +2610,9 @@ class RouterAgent(BaseAgent):
             plot_idea=str(requirements.get("plot_idea") or "").strip(),
             volume_count=self._normalize_positive_int(requirements.get("volume_count"), 1),
             chapters_per_volume=self._normalize_positive_int(requirements.get("chapters_per_volume"), 5),
+            target_word_count=self._normalize_positive_int(requirements.get("target_word_count"), 0),
+            target_words_per_chapter=self._normalize_positive_int(requirements.get("target_words_per_chapter"), 0),
+            ai_autonomy_requested=bool(requirements.get("ai_autonomy_requested", False)),
             source_session_id=str((context or {}).get("session_id") or "").strip(),
             source_message=str(requirements.get("source_message") or "").strip(),
             user_confirmed=user_confirmed,
@@ -2291,6 +2683,18 @@ class RouterAgent(BaseAgent):
         if not isinstance(data, dict):
             return
 
+        event_type = str(data.get("type") or "").strip()
+        # 逐 token 的 LLM 流式增量（以及同类内部事件）不应作为"思考进度"
+        # 冒泡到 chat SSE：否则每个 token 都会被前端 appendStreamWorkflowProgress
+        # 当作一行新的进度文本渲染，造成"逐字成行"的展示效果。
+        if event_type in {
+            "llm_chunk",
+            "tool_call",
+            "tool_result",
+            "agent_task_progress",
+        }:
+            return
+
         stage = str(data.get("stage") or data.get("task_type") or "").strip()
         current_agent = str(data.get("agent") or data.get("current_agent") or "Coordinator").strip() or "Coordinator"
         content = str(data.get("message") or data.get("content") or "").strip()
@@ -2298,7 +2702,6 @@ class RouterAgent(BaseAgent):
             return
 
         status = "running"
-        event_type = str(data.get("type") or "").strip()
         if event_type in {"sub_agent_failed"}:
             status = "failed"
         elif event_type in {"sub_agent_completed"}:
@@ -2451,11 +2854,12 @@ class RouterAgent(BaseAgent):
             chapter_result = self._load_existing_chapter_result(index, row)
             if chapter_result:
                 written_chapters.append(chapter_result)
+        all_chapters_complete = bool(outline_rows) and next_incomplete == 0 and len(written_chapters) >= len(outline_rows)
 
         current_project = pm.get_current_project()
         outline_title = str((current_project.name if current_project else "") or "未命名项目").strip() or "未命名项目"
         compiled_novel_path = ""
-        if written_chapters and next_incomplete == 0:
+        if written_chapters and all_chapters_complete:
             self._ensure_project_metadata(
                 requirements=requirements,
                 outline_rows=outline_rows,
@@ -2510,15 +2914,19 @@ class RouterAgent(BaseAgent):
             preview_titles = executed_titles[:8]
             response_parts.extend(["", "已执行任务："] + [f"- {title}" for title in preview_titles])
         if project_ready_execution.get("stop_reason"):
-            response_parts.extend(["", f"当前停止原因：{project_ready_execution.get('stop_reason')}"])
+            response_parts.extend(["", f"当前停止原因：{_localize_workflow_error(project_ready_execution.get('stop_reason'))}"])
         if outline_rows:
             response_parts.extend(["", f"大纲已就绪，共 {len(outline_rows)} 章。"])
         if written_chapters:
             response_parts.append(f"已完成章节：{len(written_chapters)} 章。")
         if next_incomplete:
             response_parts.append(f"下一待完成章节：第 {next_incomplete} 章。")
-        else:
+        elif all_chapters_complete:
             response_parts.append("当前任务池中的章节任务已全部完成。")
+        elif project_ready_execution.get("stop_reason"):
+            response_parts.append("章节任务尚未完成：上游任务已停止，请先处理当前停止原因。")
+        else:
+            response_parts.append("章节任务尚未开始：尚未生成可执行大纲。")
         if written_chapters and written_chapters[0].get("content"):
             response_parts.extend([
                 "",
@@ -2538,13 +2946,13 @@ class RouterAgent(BaseAgent):
             "agent_name": "Coordinator",
             "action": "create_novel",
             "response": "\n".join(response_parts),
-            "is_complete": next_incomplete == 0,
+            "is_complete": all_chapters_complete,
             "run_id": self._get_run_id(context),
             "created_files": created_files,
             "updated_files": updated_files,
             "output_dir": str(project_dir),
             "focus_module": "write",
-            "focus_chapter": next_incomplete or 0,
+            "focus_chapter": next_incomplete or (0 if all_chapters_complete else 1),
             "params": {
                 **requirements,
                 "persisted_paths": persisted_paths,
@@ -2582,21 +2990,28 @@ class RouterAgent(BaseAgent):
         style_items = constraints.get("style", []) if isinstance(constraints, dict) else []
         style_text = "、".join([str(item).strip() for item in style_items if str(item).strip()]) or "未特别指定"
         quality_text = "、".join([str(item).strip() for item in quality_rules if str(item).strip()]) or "未特别指定"
-        deliverables_text = "\n".join([f"- {item}" for item in deliverables[:8]]) if isinstance(deliverables, list) and deliverables else "- 暂无"
+        deliverables_text = (
+            "\n".join([f"- {_format_plan_deliverable_label(item)}" for item in deliverables[:8]])
+            if isinstance(deliverables, list) and deliverables
+            else "- 暂无"
+        )
         agents_text = "、".join([
             _get_user_visible_agent_name(item)
             for item in agent_candidates[:12]
             if str(item).strip()
         ]) or "待定"
         task_preview_text = "\n".join(preview_tasks) if preview_tasks else "- 暂无任务预览"
+        target_word_count = self._normalize_positive_int(scope.get("target_word_count") or requirements.get("target_word_count"), 0)
+        target_words_line = f"- 预计篇幅：约 {target_word_count} 字\n" if target_word_count else ""
 
         response = (
             "已根据当前讨论内容整理出一份“创作合同草案”，现在不会直接开始创作。\n\n"
             "请先确认以下方案：\n\n"
             f"- 类型：{scope.get('novel_type') or requirements.get('novel_type') or '未指定'}\n"
             f"- 主题：{scope.get('theme') or requirements.get('theme') or '未指定'}\n"
-            f"- 主角：{scope.get('protagonist') or requirements.get('protagonist') or '未指定'}\n"
-            f"- 剧情构思：{scope.get('plot_idea') or requirements.get('plot_idea') or '未指定'}\n"
+            f"- 主角：{scope.get('protagonist') or requirements.get('protagonist') or ('由助手自主设定' if requirements.get('ai_autonomy_requested') else '未指定')}\n"
+            f"- 剧情构思：{scope.get('plot_idea') or requirements.get('plot_idea') or ('由助手自主构思' if requirements.get('ai_autonomy_requested') else '未指定')}\n"
+            f"{target_words_line}"
             f"- 预计卷数：{scope.get('volume_count') or requirements.get('volume_count') or 1}\n"
             f"- 每卷章节数：{scope.get('chapters_per_volume') or requirements.get('chapters_per_volume') or 5}\n"
             f"- 总章节数：{scope.get('total_chapters') or '未计算'}\n"
@@ -2630,8 +3045,97 @@ class RouterAgent(BaseAgent):
 
     def _outline_to_project_rows(self, outline_data: Any) -> List[Dict[str, Any]]:
         timestamp = datetime.now().isoformat()
+        chapter_rows = extract_outline_chapter_rows(outline_data, timestamp=timestamp)
+        if chapter_rows:
+            return chapter_rows
         overview = build_outline_overview_row(outline_data, timestamp=timestamp)
         return [overview] if overview else []
+
+    def _chapter_rows_from_settings(self, settings_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for index, row in enumerate(settings_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            chapter_number = self._normalize_positive_int(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            title = str(row.get("name") or row.get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+            summary = str(
+                row.get("description")
+                or row.get("writing_goal")
+                or row.get("chapter_goal")
+                or row.get("scene_goal")
+                or row.get("key_event")
+                or row.get("event")
+                or ""
+            ).strip()
+            rows.append({
+                "chapter_number": chapter_number,
+                "title": title,
+                "summary": summary,
+                "content": "",
+                "chapter_goal": row.get("chapter_goal") or row.get("writing_goal") or "",
+                "writing_goal": row.get("writing_goal") or row.get("chapter_goal") or "",
+                "scene_goal": row.get("scene_goal", ""),
+                "key_event": row.get("key_event") or row.get("event") or "",
+                "conflict": row.get("conflict", ""),
+                "emotion": row.get("emotion", ""),
+                "ending_hook": row.get("ending_hook") or row.get("hook") or "",
+                "plot_thread": row.get("plot_thread"),
+                "source": "chapter_settings",
+            })
+        return self._sort_chapter_rows(rows)
+
+    def _load_project_executable_chapter_rows(self) -> List[Dict[str, Any]]:
+        from ..project_manager import get_project_manager
+
+        pm = get_project_manager()
+        chapter_rows = pm.load_project_data("chapters")
+        chapter_rows = [row for row in chapter_rows if isinstance(row, dict)] if isinstance(chapter_rows, list) else []
+
+        chapter_settings = pm.load_project_data("chapter_settings")
+        chapter_settings_rows = (
+            self._chapter_rows_from_settings([row for row in chapter_settings if isinstance(row, dict)])
+            if isinstance(chapter_settings, list)
+            else []
+        )
+        if chapter_settings_rows:
+            existing_by_number: Dict[int, Dict[str, Any]] = {}
+            for index, row in enumerate(chapter_rows, start=1):
+                number = self._normalize_positive_int(
+                    row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                    index,
+                )
+                existing_by_number[number] = row
+            merged_rows: List[Dict[str, Any]] = []
+            for row in chapter_settings_rows:
+                number = self._normalize_positive_int(row.get("chapter_number"), len(merged_rows) + 1)
+                merged = dict(row)
+                existing = existing_by_number.get(number)
+                if isinstance(existing, dict):
+                    existing_content = strip_internal_author_markers(existing.get("content"))
+                    if existing_content:
+                        merged["content"] = existing_content
+                    if str(existing.get("title") or "").strip() and not str(merged.get("title") or "").strip():
+                        merged["title"] = str(existing.get("title")).strip()
+                merged_rows.append(merged)
+            return self._sort_chapter_rows(merged_rows)
+
+        if chapter_rows:
+            return self._sort_chapter_rows(chapter_rows)
+
+        if self.coordinator is not None:
+            load_rows = getattr(self.coordinator, "_load_project_chapter_rows", None)
+            if callable(load_rows):
+                try:
+                    coordinator_rows = extract_outline_chapter_rows(load_rows())
+                    if coordinator_rows:
+                        return self._sort_chapter_rows(coordinator_rows)
+                except Exception:
+                    pass
+
+        return self._sort_chapter_rows(extract_outline_chapter_rows(pm.load_project_data("outline")))
 
     def _persist_outline_rows(self, outline_rows: List[Dict[str, Any]]) -> Dict[str, str]:
         from ..project_manager import get_project_manager
@@ -3242,6 +3746,7 @@ class RouterAgent(BaseAgent):
         theme = str(collected_info.get("theme") or "").strip()
         plot_idea = str(collected_info.get("plot_idea") or "").strip()
         novel_type = str(collected_info.get("novel_type") or "").strip() or "未分类"
+        creation_requirements = dict((context or {}).get("creation_requirements") or {})
 
         cleaned_prompt = self._clean_character_request_message(message)
         character_role = self._detect_character_role(message)
@@ -3255,6 +3760,30 @@ class RouterAgent(BaseAgent):
 
         if not plot_idea and cleaned_prompt and cleaned_prompt != protagonist:
             plot_idea = cleaned_prompt
+
+        if not theme:
+            theme = str(creation_requirements.get("theme") or "").strip()
+        if not plot_idea:
+            plot_idea = str(creation_requirements.get("plot_idea") or "").strip()
+        if not protagonist:
+            protagonist = str(creation_requirements.get("protagonist") or "").strip() or protagonist
+        if novel_type == "未分类":
+            novel_type = str(creation_requirements.get("novel_type") or "").strip() or novel_type
+        ai_autonomy_requested = bool(
+            (context or {}).get("ai_autonomy_requested")
+            or creation_requirements.get("ai_autonomy_requested")
+            or collected_info.get("ai_autonomy_requested")
+        )
+        autonomous_brief = str(
+            (context or {}).get("autonomous_brief")
+            or creation_requirements.get("autonomous_brief")
+            or ""
+        ).strip()
+        if ai_autonomy_requested and not autonomous_brief:
+            autonomous_brief = (
+                "用户已授权助手自主安排未指定的角色姓名、身份、人物关系和人物弧线；"
+                "请在已给定题材、主题、篇幅与讨论方向内主动创作。"
+            )
 
         from ..project_manager import get_project_manager
         pm = get_project_manager()
@@ -3272,6 +3801,13 @@ class RouterAgent(BaseAgent):
             except Exception:
                 existing_characters_summary = ""
 
+        request_mode = str(
+            (context or {}).get("character_request_mode")
+            or ("save" if (context or {}).get("chat_auto_save_enabled") else "draft")
+        ).strip() or "draft"
+        if ai_autonomy_requested and request_mode == "draft":
+            request_mode = "autonomous_draft"
+
         return {
             "user_request": message,
             "novel_type": novel_type,
@@ -3279,17 +3815,16 @@ class RouterAgent(BaseAgent):
             "plot_idea": plot_idea,
             "protagonist": protagonist,
             "character_prompt": cleaned_prompt,
-            "character_request": cleaned_prompt or message,
+            "character_request": cleaned_prompt or autonomous_brief or message,
             "character_role": character_role,
             "character_name": character_name,
             "recent_discussion": self._summarize_recent_discussion(context),
             "discussion_context": self._build_discussion_context(context, message),
             "world_summary": world_summary,
             "existing_characters_summary": existing_characters_summary,
-            "request_mode": str(
-                (context or {}).get("character_request_mode")
-                or ("save" if (context or {}).get("chat_auto_save_enabled") else "draft")
-            ).strip() or "draft",
+            "request_mode": request_mode,
+            "ai_autonomy_requested": ai_autonomy_requested,
+            "autonomous_brief": autonomous_brief,
             "pending_character_draft": collected_info.get("pending_character_draft"),
             "requested_knowledge_category": dict((context or {}).get("requested_knowledge_category") or {}),
             "requires_manual_category_selection": bool((context or {}).get("requires_manual_category_selection")),
@@ -3530,6 +4065,15 @@ class RouterAgent(BaseAgent):
         return {"passed": valid_count > 0 and not issues, "issues": issues}
 
     @staticmethod
+    def _build_autonomous_creation_note(requirements: Dict[str, Any]) -> str:
+        if not bool((requirements or {}).get("ai_autonomy_requested", False)):
+            return ""
+        return (
+            "用户已授权助手自主安排未指定内容；主角姓名、人物关系、剧情主线、世界观细节和爽点节奏"
+            "都可由AI在已给定题材、主题、篇幅与讨论方向内主动创作。"
+        )
+
+    @staticmethod
     def _load_workflow_category_definitions() -> List[Dict[str, Any]]:
         categories = [dict(item) for item in BUILTIN_CATEGORY_DEFINITIONS]
         try:
@@ -3617,6 +4161,265 @@ class RouterAgent(BaseAgent):
         if any(token in text for token in ("修改", "改成", "调整", "修订", "重写", "不是", "不对")):
             return "revise"
         return "create"
+
+    @staticmethod
+    def _dedupe_workflow_categories(categories: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for category in categories or []:
+            key = str(category or "").strip()
+            if key and key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    @staticmethod
+    def _workflow_category_allowed_keys(category_definitions: List[Dict[str, Any]]) -> Set[str]:
+        keys = {str(item.get("key") or "").strip() for item in category_definitions or []}
+        keys.update(str(item.get("key") or "").strip() for item in BUILTIN_CATEGORY_DEFINITIONS)
+        return {key for key in keys if key}
+
+    @staticmethod
+    def _normalize_workflow_operation(value: Any, fallback: str = "create") -> str:
+        text = str(value or "").strip().lower()
+        if text in {"revise", "revision", "modify", "rewrite", "update", "edit", "修改", "修订", "重写", "调整"}:
+            return "revise"
+        if text in {"create", "write", "generate", "continue", "生成", "创作", "写", "续写"}:
+            return "create"
+        return "revise" if str(fallback or "").strip() == "revise" else "create"
+
+    @staticmethod
+    def _message_wants_chapter_body_from_settings(message: str) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        if any(token in text for token in ("按章纲写", "根据章纲写", "依照章纲写", "照章纲写")):
+            return True
+        if "正文" in text and any(token in text for token in ("章纲", "每章", "每一章", "章节", "章")):
+            return True
+        return False
+
+    @staticmethod
+    def _message_requests_chapter_settings_generation(message: str) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        direct_terms = (
+            "生成章纲",
+            "创建章纲",
+            "写章纲",
+            "设计章纲",
+            "补全章纲",
+            "完善章纲",
+            "章纲设定",
+            "章节设定",
+            "章节规划",
+        )
+        if any(token in text for token in direct_terms):
+            return True
+        return bool(re.search(r"(先|然后|再).{0,10}(章纲|章节设定|章节规划)", text))
+
+    def _adjust_categories_for_chapter_body_request(
+        self,
+        categories: List[str],
+        message: str,
+        directive_payload: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        adjusted = self._dedupe_workflow_categories(categories)
+        if not self._message_wants_chapter_body_from_settings(message):
+            return adjusted
+
+        payload = directive_payload if isinstance(directive_payload, dict) else {}
+        write_source = str(payload.get("write_source") or payload.get("source") or "").strip()
+        references_chapter_settings = (
+            "chapter_settings" in adjusted
+            or write_source == "chapter_settings"
+            or "章纲" in str(message or "")
+        )
+        if not references_chapter_settings:
+            return adjusted
+
+        should_generate_settings = self._message_requests_chapter_settings_generation(message)
+        if "chapters" not in adjusted:
+            adjusted.append("chapters")
+        if "chapter_settings" in adjusted and not should_generate_settings:
+            adjusted = [category for category in adjusted if category != "chapter_settings"]
+        return adjusted
+
+    @staticmethod
+    def _count_project_data_rows(data: Any) -> int:
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict):
+            if isinstance(data.get("items"), list):
+                return len(data.get("items") or [])
+            if isinstance(data.get("chapters"), list):
+                return len(data.get("chapters") or [])
+            return 1 if data else 0
+        return 0
+
+    def _build_workflow_execution_snapshot(self, category_definitions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        try:
+            from ..project_manager import get_project_manager
+
+            pm = get_project_manager()
+            snapshot["project_id"] = str(getattr(pm, "current_project_id", "") or "")
+            for item in category_definitions or []:
+                key = str(item.get("key") or "").strip()
+                if not key:
+                    continue
+                try:
+                    snapshot[f"{key}_count"] = self._count_project_data_rows(pm.load_project_data(key))
+                except Exception:
+                    snapshot[f"{key}_count"] = 0
+        except Exception as exc:
+            logger.debug(f"[{self.name}] 构建工作流执行快照失败: {exc}")
+        return snapshot
+
+    def _fallback_workflow_execution_directive(
+        self,
+        *,
+        message: str,
+        categories: List[str],
+        operation: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        adjusted_categories = self._adjust_categories_for_chapter_body_request(categories, message)
+        return {
+            "target_categories": adjusted_categories,
+            "operation": self._normalize_workflow_operation(operation),
+            "write_source": "chapter_settings" if "章纲" in str(message or "") else "",
+            "chapter_scope": "all" if any(token in str(message or "") for token in ("每一章", "每章", "全部", "所有")) else "unknown",
+            "chapter_number": self._chapter_number_from_message_or_context(message, None),
+            "requires_confirmation": False,
+            "confidence": 0.0,
+            "reason": reason,
+            "source": "local_rules",
+        }
+
+    def _normalize_workflow_execution_directive(
+        self,
+        payload: Dict[str, Any],
+        *,
+        message: str,
+        fallback_categories: List[str],
+        fallback_operation: str,
+        category_definitions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        allowed_keys = self._workflow_category_allowed_keys(category_definitions)
+        raw_categories = payload.get("target_categories") or payload.get("categories") or []
+        if isinstance(raw_categories, str):
+            raw_categories = re.split(r"[,，、\s]+", raw_categories)
+        model_categories = [
+            str(category or "").strip()
+            for category in raw_categories
+            if str(category or "").strip() in allowed_keys
+        ] if isinstance(raw_categories, list) else []
+
+        categories = self._dedupe_workflow_categories(model_categories or fallback_categories)
+        categories = self._adjust_categories_for_chapter_body_request(categories, message, payload)
+
+        try:
+            confidence = float(payload.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence and confidence < 0.35:
+            fallback = self._fallback_workflow_execution_directive(
+                message=message,
+                categories=fallback_categories,
+                operation=fallback_operation,
+                reason="模型判断置信度过低，已回退到本地规则",
+            )
+            fallback["model_confidence"] = confidence
+            return fallback
+
+        chapter_number = self._normalize_positive_int(
+            payload.get("chapter_number"),
+            self._chapter_number_from_message_or_context(message, None),
+        )
+        return {
+            "target_categories": categories,
+            "operation": self._normalize_workflow_operation(payload.get("operation"), fallback_operation),
+            "write_source": str(payload.get("write_source") or payload.get("source") or "").strip()[:80],
+            "chapter_scope": str(payload.get("chapter_scope") or payload.get("scope") or "unknown").strip()[:40],
+            "chapter_number": chapter_number,
+            "requires_confirmation": bool(payload.get("requires_confirmation", False)),
+            "confidence": confidence,
+            "reason": str(payload.get("reason") or "").strip()[:400],
+            "source": "model",
+        }
+
+    async def _resolve_serial_workflow_execution_directive(
+        self,
+        *,
+        message: str,
+        context: Optional[Dict[str, Any]],
+        target_categories: List[str],
+        operation: str,
+        category_definitions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        fallback = self._fallback_workflow_execution_directive(
+            message=message,
+            categories=target_categories,
+            operation=operation,
+            reason="使用本地规则生成执行指令",
+        )
+        if not self._can_call_model_for_requirement_extraction():
+            return fallback
+
+        category_brief = [
+            {
+                "key": str(item.get("key") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+                "aliases": [str(alias) for alias in item.get("aliases") or [] if str(alias).strip()],
+            }
+            for item in category_definitions or []
+            if str(item.get("key") or "").strip()
+        ]
+        prompt = (
+            "你是本地小说创作执行器的语义判断层。你的任务不是写正文，而是把用户的话解释成可执行指令。\n"
+            "请理解中文语义，尤其区分：\n"
+            "1. “写/生成章纲”是 chapter_settings；\n"
+            "2. “按章纲写正文/写每一章”是 chapters，write_source 应为 chapter_settings；\n"
+            "3. “先写章纲再按章纲写正文”需要 target_categories 同时包含 chapter_settings 和 chapters；\n"
+            "4. 如果用户只是引用已有章纲来写正文，不要把 chapter_settings 当作要重新生成的目标。\n\n"
+            "只能返回严格 JSON，不要 Markdown，不要解释：\n"
+            "{\n"
+            '  "should_execute": true,\n'
+            '  "target_categories": ["chapters"],\n'
+            '  "operation": "create",\n'
+            '  "write_source": "chapter_settings",\n'
+            '  "chapter_scope": "all",\n'
+            '  "chapter_number": 0,\n'
+            '  "requires_confirmation": false,\n'
+            '  "confidence": 0.0,\n'
+            '  "reason": ""\n'
+            "}\n\n"
+            f"允许的 target_categories：\n{json.dumps(category_brief, ensure_ascii=False)}\n\n"
+            f"本地规则初判：\n{json.dumps(fallback, ensure_ascii=False)}\n\n"
+            f"项目现有资料快照：\n{json.dumps(self._build_workflow_execution_snapshot(category_definitions), ensure_ascii=False)}\n\n"
+            f"完整讨论上下文：\n{self._build_discussion_context(context, message)}\n\n"
+            f"当前用户消息：\n{message}"
+        )
+        try:
+            response = await self.call_llm(
+                [{"role": "user", "content": prompt}],
+                temperature=AGENT_TEMPERATURE.SUMMARY_STABLE,
+                max_tokens=700,
+            )
+        except Exception as exc:
+            logger.warning(f"[{self.name}] 模型解析工作流执行意图失败，使用本地兜底: {exc}")
+            return fallback
+
+        payload = self._extract_json_object(str(response or ""))
+        if not payload or payload.get("should_execute") is False:
+            return fallback
+        return self._normalize_workflow_execution_directive(
+            payload,
+            message=message,
+            fallback_categories=fallback.get("target_categories") or target_categories,
+            fallback_operation=fallback.get("operation") or operation,
+            category_definitions=category_definitions,
+        )
 
     @staticmethod
     def _safe_workflow_state_key(run_id: str) -> str:
@@ -3751,6 +4554,18 @@ class RouterAgent(BaseAgent):
                 "is_complete": False,
                 "run_id": self._get_run_id(context),
             }
+
+        pm = get_project_manager()
+        category_definitions = self._load_workflow_category_definitions()
+        execution_directive = await self._resolve_serial_workflow_execution_directive(
+            message=message,
+            context=context,
+            target_categories=categories,
+            operation=operation,
+            category_definitions=category_definitions,
+        )
+        categories = self._dedupe_workflow_categories(execution_directive.get("target_categories") or categories)
+        operation = self._normalize_workflow_operation(execution_directive.get("operation"), operation)
         if not categories:
             return {
                 "agent_name": "Coordinator",
@@ -3759,18 +4574,20 @@ class RouterAgent(BaseAgent):
                 "error": "empty_workflow_plan",
                 "is_complete": False,
                 "run_id": self._get_run_id(context),
+                "params": {
+                    "execution_directive": execution_directive,
+                },
             }
-
-        pm = get_project_manager()
-        category_definitions = self._load_workflow_category_definitions()
         workflow_plan = build_workflow_plan(
             user_request=message,
             operation=operation,
             target_categories=categories,
             knowledge_categories=category_definitions,
         )
-        requirements = self._build_creation_requirements(context, message)
+        categories = workflow_plan.target_categories
+        requirements = await self._build_creation_requirements_async(context, message)
         requirements["operation"] = operation
+        requirements["execution_directive"] = execution_directive
         workflow_run = CreativeWorkflowRun.create(
             project_id=str(getattr(pm, "current_project_id", "") or ""),
             user_request=message,
@@ -3827,6 +4644,7 @@ class RouterAgent(BaseAgent):
                 "target_categories": categories,
                 "data_type": categories[0] if len(categories) == 1 else "",
                 "operation": operation,
+                "execution_directive": execution_directive,
                 "creative_workflow_run": completed_run.to_dict(),
                 "execution_agents": [
                     task.target_agent
@@ -3890,13 +4708,7 @@ class RouterAgent(BaseAgent):
         elif task_type == "chapters":
             chapter_num = self._chapter_number_from_message_or_context(message, context)
             if chapter_num <= 0:
-                result = {
-                    "agent_name": "ChapterWriter",
-                    "action": "write_chapter",
-                    "response": "需要指定章节号，例如“写第3章正文”。",
-                    "error": "missing_chapter_number",
-                    "is_complete": False,
-                }
+                result = await self._execute_project_chapters_write(context=task_context)
             else:
                 result = await self._execute_project_chapter_write(chapter_num=chapter_num, context=task_context) or {
                     "agent_name": "ChapterWriter",
@@ -3936,10 +4748,30 @@ class RouterAgent(BaseAgent):
         elif task_type == "characters":
             artifact = result.get("characters") or params.get("characters")
         elif task_type == "chapters":
-            artifact = {
-                "content": str(result.get("response") or "").strip(),
-                "chapter_number": params.get("chapter_number") or params.get("focus_chapter"),
-            }
+            chapter_payloads = params.get("chapters") if isinstance(params.get("chapters"), list) else []
+            if chapter_payloads:
+                combined_content = "\n\n".join(
+                    str(item.get("content") or "").strip()
+                    for item in chapter_payloads
+                    if isinstance(item, dict) and str(item.get("content") or "").strip()
+                ).strip()
+                first_chapter_number = self._normalize_positive_int(
+                    (chapter_payloads[0] if isinstance(chapter_payloads[0], dict) else {}).get("chapter_number")
+                    or (chapter_payloads[0] if isinstance(chapter_payloads[0], dict) else {}).get("number"),
+                    0,
+                )
+                artifact = {
+                    "content": combined_content,
+                    "chapters": chapter_payloads,
+                    "chapter_number": first_chapter_number,
+                    "chapter_count": len(chapter_payloads),
+                }
+            else:
+                combined_content = str(result.get("chapter_content") or result.get("response") or "").strip()
+                artifact = {
+                    "content": combined_content,
+                    "chapter_number": params.get("chapter_number") or params.get("focus_chapter"),
+                }
             persisted_paths = params.get("persisted_paths") if isinstance(params.get("persisted_paths"), dict) else {}
             target_path = str(persisted_paths.get("chapter_path") or "")
         else:
@@ -4002,7 +4834,7 @@ class RouterAgent(BaseAgent):
     def _last_creative_workflow_error(run: CreativeWorkflowRun) -> str:
         for task in reversed(run.completed_tasks):
             if task.error:
-                return task.error
+                return _localize_workflow_error(task.error)
         return ""
 
     @staticmethod
@@ -4023,7 +4855,9 @@ class RouterAgent(BaseAgent):
             lines.append(f"{index}. {task.title or task.task_type}：{status}")
         lines.append("")
         if failed:
-            lines.append(f"当前停止在：{failed[-1].task_type}。原因：{failed[-1].error or '未通过审查'}")
+            task_name = _get_user_visible_workflow_task_name(failed[-1].task_type)
+            error_text = _localize_workflow_error(failed[-1].error) or "未通过审查"
+            lines.append(f"当前停止在：{task_name}。原因：{error_text}")
         else:
             lines.append(f"已完成 {len(completed)} 个创作任务，并生成 {len(run.reviews)} 条审查记录。")
         return "\n".join(lines)
@@ -4047,7 +4881,7 @@ class RouterAgent(BaseAgent):
         from ..project_manager import get_project_manager
 
         pm = get_project_manager()
-        requirements = self._build_creation_requirements(context, message)
+        requirements = await self._build_creation_requirements_async(context, message)
         workflow_plan = build_workflow_plan(
             user_request=message,
             operation="create",
@@ -4241,8 +5075,17 @@ class RouterAgent(BaseAgent):
         character_task_id = "create_characters"
         workflow_run.mark_task(character_task_id, "running")
         character_context = dict(context or {})
-        character_context["character_request_mode"] = "save"
+        character_context["character_request_mode"] = (
+            "autonomous_draft" if requirements.get("ai_autonomy_requested") else "save"
+        )
         character_context["world"] = world_data
+        autonomous_note = self._build_autonomous_creation_note(requirements)
+        character_context["creation_requirements"] = {
+            **requirements,
+            "autonomous_brief": autonomous_note,
+        }
+        character_context["ai_autonomy_requested"] = bool(requirements.get("ai_autonomy_requested", False))
+        character_context["autonomous_brief"] = autonomous_note
         character_result = await self._execute_character_creation_pipeline(
             message=message,
             context=character_context,
@@ -4471,7 +5314,7 @@ class RouterAgent(BaseAgent):
                 },
             }
 
-        if request_mode != "save":
+        if request_mode not in {"save", "autonomous_draft"}:
             draft_response = self._format_character_draft_response(built_characters, saved=False)
             return {
                 "agent_name": "CharacterBuilder",
@@ -4565,18 +5408,18 @@ class RouterAgent(BaseAgent):
             return
         payload = message
         if isinstance(message, str):
-            text = _localize_user_visible_agent_names(str(message or "").strip())
+            text = _localize_workflow_error(str(message or "").strip())
             if not text:
                 return
             payload = {"content": f"{text}\n\n"}
         elif isinstance(message, dict):
             next_payload = dict(message)
-            content = _localize_user_visible_agent_names(str(next_payload.get("content") or "").strip())
+            content = _localize_workflow_error(str(next_payload.get("content") or "").strip())
             if content:
                 next_payload["content"] = f"{content}\n\n"
             for key in ("message", "details", "error"):
                 if next_payload.get(key):
-                    next_payload[key] = _localize_user_visible_agent_names(next_payload[key])
+                    next_payload[key] = _localize_workflow_error(next_payload[key])
             payload = next_payload
         else:
             return
@@ -4764,7 +5607,7 @@ class RouterAgent(BaseAgent):
             "stage": "worldbuilding",
             "status": "running",
         })
-        requirements = self._build_creation_requirements(context, message)
+        requirements = await self._build_creation_requirements_async(context, message)
         world_data, created_files, updated_files, reused_files = await self._ensure_world_payload(requirements, context)
         missing_info = self._worldbuilding_missing_info(world_data)
         if missing_info:
@@ -4823,7 +5666,7 @@ class RouterAgent(BaseAgent):
             "stage": "outlining",
             "status": "running",
         })
-        requirements = self._build_creation_requirements(context, message)
+        requirements = await self._build_creation_requirements_async(context, message)
         world_data, created_files, updated_files, reused_files = await self._ensure_world_payload(requirements, context)
         missing_info = self._worldbuilding_missing_info(world_data)
         if missing_info:
@@ -5267,7 +6110,7 @@ class RouterAgent(BaseAgent):
         from ..project_manager import get_project_manager
 
         pm = get_project_manager()
-        requirements = self._build_creation_requirements(context, message)
+        requirements = await self._build_creation_requirements_async(context, message)
         contract_payload = self._persist_creation_contract_payload(
             self._build_creation_contract_payload(
                 requirements,
@@ -5687,6 +6530,238 @@ class RouterAgent(BaseAgent):
 
         raise AttributeError("协调器缺少可用的章节写作接口")
 
+    async def _execute_project_chapters_write(
+        self,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        from ..project_manager import get_project_manager
+
+        pm = get_project_manager()
+        outline_rows = self._load_project_executable_chapter_rows()
+        if not outline_rows:
+            return {
+                "agent_name": "ChapterWriter",
+                "action": "write_chapters",
+                "response": "还没有可用的章节大纲，无法判断每一章该写什么。请先生成或确认大纲，然后再开始写正文。",
+                "error": "missing_outline",
+                "is_complete": False,
+                "run_id": self._get_run_id(context),
+                "created_files": [],
+                "updated_files": [],
+                "reused_files": [],
+                "focus_module": "write",
+                "focus_chapter": 1,
+            }
+
+        created_files: List[Dict[str, str]] = []
+        updated_files: List[Dict[str, str]] = []
+        reused_files: List[Dict[str, str]] = []
+        written_chapters: List[Dict[str, Any]] = []
+        generated_chapters: List[Dict[str, Any]] = []
+        chapter_paths: List[str] = []
+        last_persisted_paths: Dict[str, str] = {
+            "outline_path": str(pm.get_project_data_path("outline")),
+        }
+
+        for index, row in enumerate(outline_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            chapter_num = self._normalize_positive_int(row.get("chapter_number"), index)
+            existing_chapter = self._load_existing_chapter_result(chapter_num, row)
+            if existing_chapter:
+                written_chapters.append(existing_chapter)
+                chapter_path = self._find_existing_chapter_file(chapter_num) or ""
+                if chapter_path:
+                    chapter_file = self._build_file_record(
+                        chapter_path,
+                        "chapter",
+                        f"第 {chapter_num} 章",
+                        "reused",
+                    )
+                    chapter_paths.append(chapter_file["path"])
+                    self._append_file_record_by_status(
+                        file_record=chapter_file,
+                        created_files=created_files,
+                        updated_files=updated_files,
+                        reused_files=reused_files,
+                    )
+                await self._emit_progress(
+                    context,
+                    {
+                        "content": f"### 章节阶段\n第 {chapter_num} 章已有正文，已跳过并复用。",
+                        "current_agent": "ChapterWriter",
+                        "stage": f"chapter_{chapter_num}",
+                        "status": "running",
+                        "created_files": created_files,
+                        "updated_files": updated_files,
+                        "reused_files": reused_files,
+                        "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+                    },
+                )
+                continue
+
+            if await self._check_coordinator_pause_cancel():
+                return {
+                    "agent_name": "ChapterWriter",
+                    "action": "write_chapters",
+                    "response": "章节正文写作已取消，已生成内容会保留在当前项目中。",
+                    "error": "cancelled",
+                    "is_complete": False,
+                    "run_id": self._get_run_id(context),
+                    "created_files": created_files,
+                    "updated_files": updated_files,
+                    "reused_files": reused_files,
+                    "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+                    "focus_module": "write",
+                    "focus_chapter": chapter_num,
+                    "params": {
+                        "chapters": written_chapters,
+                        "persisted_paths": {
+                            **last_persisted_paths,
+                            "chapter_paths": chapter_paths,
+                        },
+                    },
+                }
+
+            chapter_title = str(row.get("title") or f"第{chapter_num}章").strip() or f"第{chapter_num}章"
+            chapter_outline = str(row.get("summary") or row.get("content") or chapter_title).strip() or chapter_title
+            await self._emit_progress(
+                context,
+                {
+                    "content": f"### 章节阶段\n正在按大纲创作第 {chapter_num}/{len(outline_rows)} 章：{chapter_title}",
+                    "current_agent": "ChapterWriter",
+                    "stage": f"chapter_{chapter_num}",
+                    "status": "running",
+                    "created_files": created_files,
+                    "updated_files": updated_files,
+                    "reused_files": reused_files,
+                    "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+                },
+            )
+            chapter_result = await self._write_chapter_with_coordinator(
+                chapter_num=chapter_num,
+                chapter_outline={
+                    "title": chapter_title,
+                    "summary": chapter_outline,
+                },
+                previous_chapters=written_chapters,
+            )
+            chapter_result.setdefault("number", chapter_num)
+            chapter_result.setdefault("chapter_number", chapter_num)
+            chapter_result.setdefault("chapter_title", chapter_title)
+            written_chapters.append(chapter_result)
+            generated_chapters.append(chapter_result)
+            last_persisted_paths = await self._persist_chapter_result(chapter_result, outline_rows)
+            chapter_path = str(last_persisted_paths.get("chapter_path") or "")
+            if chapter_path:
+                chapter_file = self._build_file_record(
+                    chapter_path,
+                    "chapter",
+                    f"第 {chapter_num} 章",
+                    str(last_persisted_paths.get("chapter_status") or "created"),
+                )
+                chapter_paths.append(chapter_file["path"])
+                self._append_file_record_by_status(
+                    file_record=chapter_file,
+                    created_files=created_files,
+                    updated_files=updated_files,
+                    reused_files=reused_files,
+                )
+            await self._emit_progress(
+                context,
+                {
+                    "content": f"第 {chapter_num} 章完成，已同步到章节列表。",
+                    "current_agent": "ChapterWriter",
+                    "stage": f"chapter_{chapter_num}",
+                    "status": "running",
+                    "created_files": created_files,
+                    "updated_files": updated_files,
+                    "reused_files": reused_files,
+                    "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+                },
+            )
+
+        total_words = sum(len(re.sub(r"\s+", "", str(chapter.get("content") or ""))) for chapter in written_chapters)
+        current_project = pm.get_current_project()
+        project_title = str((current_project.name if current_project else "") or "未命名项目").strip() or "未命名项目"
+        compiled_novel_path = ""
+        compiled_novel = self._save_compiled_novel(project_title, written_chapters)
+        if compiled_novel:
+            compiled_novel_path = str(compiled_novel.get("path") or "")
+            compiled_file = self._build_file_record(
+                compiled_novel_path,
+                "compiled_novel",
+                "合集",
+                str(compiled_novel.get("status") or "created"),
+            )
+            self._append_file_record_by_status(
+                file_record=compiled_file,
+                created_files=created_files,
+                updated_files=updated_files,
+                reused_files=reused_files,
+            )
+
+        persisted_paths = {
+            **last_persisted_paths,
+            "chapter_paths": chapter_paths,
+        }
+        if chapter_paths:
+            persisted_paths["chapter_path"] = chapter_paths[-1]
+        if compiled_novel_path:
+            persisted_paths["compiled_novel_path"] = compiled_novel_path
+
+        next_incomplete = self._find_next_incomplete_chapter(pm.load_project_data("chapters"), start_at=1)
+        await self._emit_progress(
+            context,
+            {
+                "content": f"### 章节正文完成\n已按章纲/大纲处理 {len(written_chapters)} 章，其中新写 {len(generated_chapters)} 章。",
+                "current_agent": "ChapterWriter",
+                "stage": "chapters",
+                "status": "completed",
+                "created_files": created_files,
+                "updated_files": updated_files,
+                "reused_files": reused_files,
+                "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+            },
+        )
+
+        response_parts = [
+            "已按章纲/大纲逐章执行正文写作。",
+            "",
+            f"- 可执行章节数：{len(outline_rows)}",
+            f"- 本次新写章节：{len(generated_chapters)}",
+            f"- 已有正文复用：{max(0, len(written_chapters) - len(generated_chapters))}",
+            f"- 当前正文总字数约：{total_words} 字",
+        ]
+        if compiled_novel_path:
+            response_parts.append("- 已生成或更新合集文件")
+        if generated_chapters and str(generated_chapters[0].get("content") or "").strip():
+            response_parts.extend([
+                "",
+                "以下是本次新写的第一章正文：",
+                "",
+                str(generated_chapters[0].get("content") or "").strip(),
+            ])
+
+        return {
+            "agent_name": "ChapterWriter",
+            "action": "write_chapters",
+            "response": "\n".join(response_parts),
+            "is_complete": next_incomplete == 0,
+            "run_id": self._get_run_id(context),
+            "created_files": created_files,
+            "updated_files": updated_files,
+            "reused_files": reused_files,
+            "output_dir": str(self.coordinator.project_dir) if self.coordinator else "",
+            "focus_module": "write",
+            "focus_chapter": next_incomplete,
+            "params": {
+                "chapters": written_chapters,
+                "generated_chapter_count": len(generated_chapters),
+                "persisted_paths": persisted_paths,
+            },
+        }
+
     async def _execute_project_chapter_write(
         self,
         chapter_num: int,
@@ -5695,7 +6770,7 @@ class RouterAgent(BaseAgent):
         from ..project_manager import get_project_manager
 
         pm = get_project_manager()
-        outline_rows = pm.load_project_data("outline")
+        outline_rows = self._load_project_executable_chapter_rows()
         if not isinstance(outline_rows, list) or chapter_num <= 0 or chapter_num > len(outline_rows):
             return None
 

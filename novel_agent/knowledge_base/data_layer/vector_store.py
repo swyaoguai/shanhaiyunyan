@@ -309,6 +309,18 @@ class VectorStore:
             "distance_metric": self.config.distance_metric,
         }
 
+    def close(self) -> None:
+        """关闭 ChromaDB 客户端，释放 SQLite 文件句柄。"""
+        self._collection = None
+        if self._client is None:
+            return
+        try:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._client = None
+
 
 class MockVectorStore:
     """
@@ -491,3 +503,7 @@ class MockVectorStore:
             "persist_directory": "memory",
             "distance_metric": "cosine",
         }
+
+    def close(self) -> None:
+        """释放模拟存储资源。"""
+        self._data.clear()

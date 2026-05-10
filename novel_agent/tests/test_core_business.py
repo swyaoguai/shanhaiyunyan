@@ -87,6 +87,191 @@ class TestLLMClient:
             assert result == "Test response"
             mock_create.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_llm_call_estimates_tokens_when_provider_omits_usage(self):
+        """兼容不返回 usage 字段的 OpenAI 兼容 API。"""
+        from novel_agent.agents.llm_client import LLMClient
+        from novel_agent.agent_config import AgentModelConfig
+
+        config = AgentModelConfig(
+            model="compat-model",
+            temperature=0.7,
+            max_tokens=100,
+            api_key="test-key",
+            api_base="https://api.test.com/v1"
+        )
+        client = LLMClient(config, metrics_namespace="test")
+        captured = {}
+
+        def capture_metrics(tokens_in, tokens_out, duration, success, error=None):
+            captured.update({
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "success": success,
+            })
+
+        client._record_metrics = capture_metrics
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "这是一段兼容接口返回的内容"
+        mock_response.usage = None
+
+        with patch.object(client._client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = mock_response
+
+            result = await client.call(
+                [{"role": "user", "content": "请写一段中文内容"}],
+                enable_retry=False
+            )
+
+        assert result == "这是一段兼容接口返回的内容"
+        assert captured["success"] is True
+        assert captured["tokens_in"] > 0
+        assert captured["tokens_out"] > 0
+
+    @pytest.mark.asyncio
+    async def test_llm_call_accepts_dict_usage_payload(self):
+        """兼容以 dict 返回 usage 的 OpenAI 兼容 API。"""
+        from novel_agent.agents.llm_client import LLMClient
+        from novel_agent.agent_config import AgentModelConfig
+
+        config = AgentModelConfig(
+            model="compat-model",
+            temperature=0.7,
+            max_tokens=100,
+            api_key="test-key",
+            api_base="https://api.test.com/v1"
+        )
+        client = LLMClient(config, metrics_namespace="test")
+        captured = {}
+
+        def capture_metrics(tokens_in, tokens_out, duration, success, error=None):
+            captured.update({
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "success": success,
+            })
+
+        client._record_metrics = capture_metrics
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.usage = {"prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48}
+
+        with patch.object(client._client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = mock_response
+
+            result = await client.call(
+                [{"role": "user", "content": "Hello"}],
+                enable_retry=False
+            )
+
+        assert result == "Test response"
+        assert captured == {
+            "tokens_in": 31,
+            "tokens_out": 17,
+            "success": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_openai_responses_usage_payload_is_recorded(self):
+        """Responses API 的 input/output usage 会进入统计。"""
+        from novel_agent.agents.llm_client import LLMClient
+        from novel_agent.agent_config import AgentModelConfig
+
+        config = AgentModelConfig(
+            model="gpt-4.1",
+            temperature=0.7,
+            max_tokens=100,
+            api_key="test-key",
+            api_base="https://api.test.com/v1",
+            api_type="openai_responses",
+        )
+        client = LLMClient(config, metrics_namespace="test")
+        captured = {}
+
+        def capture_metrics(tokens_in, tokens_out, duration, success, error=None):
+            captured.update({
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "success": success,
+            })
+
+        client._record_metrics = capture_metrics
+
+        mock_response = SimpleNamespace(
+            output_text="Responses result",
+            output=[],
+            usage=SimpleNamespace(input_tokens=44, output_tokens=22),
+        )
+
+        with patch.object(client._client.responses, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = mock_response
+
+            result = await client.call(
+                [{"role": "user", "content": "Hello"}],
+                enable_retry=False,
+            )
+
+        assert result == "Responses result"
+        assert captured == {
+            "tokens_in": 44,
+            "tokens_out": 22,
+            "success": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_anthropic_usage_payload_is_recorded(self):
+        """Anthropic API 的 input/output usage 会进入统计。"""
+        from novel_agent.agents.llm_client import LLMClient
+        from novel_agent.agent_config import AgentModelConfig
+
+        async def fake_create(**params):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="Anthropic result")],
+                usage=SimpleNamespace(input_tokens=55, output_tokens=33),
+            )
+
+        client = object.__new__(LLMClient)
+        client.model_config = AgentModelConfig(
+            model="claude-3-5-sonnet",
+            temperature=0.7,
+            max_tokens=100,
+            api_key="test-key",
+            api_base="https://api.anthropic.com",
+            api_type="anthropic",
+        )
+        client.metrics_namespace = "test"
+        client._api_type = "anthropic"
+        client._client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
+        captured = {}
+
+        def capture_metrics(tokens_in, tokens_out, duration, success, error=None):
+            captured.update({
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "success": success,
+            })
+
+        client._record_metrics = capture_metrics
+
+        result = await client._call_anthropic(
+            [{"role": "user", "content": "Hello"}],
+            temperature=None,
+            max_tokens=None,
+            system_prompt=None,
+            stream=False,
+        )
+
+        assert result == "Anthropic result"
+        assert captured == {
+            "tokens_in": 55,
+            "tokens_out": 33,
+            "success": True,
+        }
+
     def test_anthropic_base_url_strips_v1_suffix(self):
         """测试 Anthropic base_url 以根地址传给 SDK，避免 /v1/v1/messages。"""
         from novel_agent.agents.llm_client import LLMClient
@@ -188,11 +373,13 @@ class TestLLMClient:
         client._client = SimpleNamespace(messages=FakeMessages())
         client.metrics_namespace = "test"
 
+        usage_collector = {}
         chunks = []
-        async for chunk in client._stream_anthropic({"model": "claude-test"}):
+        async for chunk in client._stream_anthropic({"model": "claude-test"}, usage_collector=usage_collector):
             chunks.append(chunk)
 
         assert "".join(chunks) == "先查"
+        assert usage_collector["usage"].output_tokens == 12
         assert "Anthropic tool_use parsed" in caplog.text
         assert "search" in caplog.text
 

@@ -422,6 +422,41 @@ def test_set_active_api_config_auto_picks_first_remote_supported_model(monkeypat
     assert manager.get_multi_config().active_model == "gpt-5.4"
 
 
+def test_set_active_api_config_refreshes_runtime_after_model_switch(monkeypatch):
+    app = create_app()
+    manager = _build_manager()
+    config = manager.add_api_config(
+        name="cfg",
+        api_base="https://good.example/v1",
+        api_key="sk-good",
+        models=["gpt-5.4", "deepseek-v3.2"],
+    )
+    refreshed = []
+
+    monkeypatch.setattr("novel_agent.agent_config.get_config_manager", lambda: manager)
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.httpx.AsyncClient",
+        lambda timeout=None: _FakeAsyncClient([
+            _FakeResponse(
+                200,
+                payload={"data": [{"id": "gpt-5.4"}, {"id": "deepseek-v3.2"}]},
+                text='{"data":[{"id":"gpt-5.4"},{"id":"deepseek-v3.2"}]}',
+            ),
+        ]),
+    )
+    monkeypatch.setattr(
+        "novel_agent.web.routes.settings.refresh_runtime_after_config_reload",
+        lambda: refreshed.append(True),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/api-configs/active", json={"config_id": config.id, "model": "deepseek-v3.2"})
+
+    assert response.status_code == 200
+    assert response.json()["active_model"] == "deepseek-v3.2"
+    assert refreshed == [True]
+
+
 def test_test_connection_returns_detailed_quota_error(monkeypatch):
     app = create_app()
     manager = _build_manager()

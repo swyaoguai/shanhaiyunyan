@@ -469,7 +469,7 @@ def get_app_root():
     获取应用根目录，支持PyInstaller打包
     
     开发模式: 返回项目根目录
-    打包模式: 返回exe所在目录的上级目录（便携版结构）
+    打包模式: 返回exe所在目录（便携版结构）
     """
     import sys
     from pathlib import Path
@@ -477,11 +477,49 @@ def get_app_root():
     if getattr(sys, 'frozen', False):
         # PyInstaller打包后运行
         exe_dir = Path(sys.executable).parent
-        # 便携版结构：exe在app目录下，数据在上级目录
-        return exe_dir.parent
+        # 便携版必须与开发环境隔离：数据、配置、日志都以 exe 同级目录为根。
+        return exe_dir
     else:
         # 开发模式：使用当前工作目录
         return Path.cwd()
+
+
+def get_runtime_resource_root():
+    """获取只读内置资源根目录，兼容 PyInstaller 的临时解包目录。"""
+    import sys
+    from pathlib import Path
+
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        resource_root = Path(meipass)
+        if resource_root.exists():
+            return resource_root
+    return get_app_root()
+
+
+def get_bundled_resource_path(*parts: str):
+    """解析应用资源路径，优先使用 PyInstaller 内置资源。"""
+    runtime_path = get_runtime_resource_root().joinpath(*parts)
+    if runtime_path.exists():
+        return runtime_path
+    return get_app_root().joinpath(*parts)
+
+
+def get_skills_dir():
+    """获取 Skills 目录，优先使用便携包外置目录，再回退到内置资源。"""
+    from pathlib import Path
+
+    app_root = get_app_root()
+    runtime_root = get_runtime_resource_root()
+    candidates = [app_root / "skills"]
+    if runtime_root != app_root:
+        candidates.append(runtime_root / "skills")
+    candidates.append(Path.cwd() / "skills")
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return app_root / "skills"
 
 
 def get_data_dir():

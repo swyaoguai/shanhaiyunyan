@@ -200,7 +200,15 @@ def clear_project_runtime(project_id: str) -> int:
     removed = 0
     for key in list(continuous_writers.keys()):
         if key.startswith(prefix):
-            continuous_writers.pop(key, None)
+            writer = continuous_writers.pop(key, None)
+            kb = getattr(writer, "knowledge_base", None)
+            if kb is not None and hasattr(kb, "close"):
+                try:
+                    kb.close()
+                except Exception as exc:
+                    logger.warning(f"[ContinuousWrite] Failed to close knowledge base for {key}: {exc}")
+            if writer is not None and hasattr(writer, "set_knowledge_base"):
+                writer.set_knowledge_base(None)
             removed += 1
 
     for key in list(_continuous_writer_locks.keys()):
@@ -232,6 +240,7 @@ def resolve_continuous_write_model_config(model: str = "", api_config_id: str = 
         temperature = selected_config.temperature
         max_tokens = selected_config.max_tokens
         model_name = requested_model or (selected_config.models[0] if selected_config.models else "")
+        resolved_api_config_id = selected_config.id
         logger.info(f"[ContinuousWrite] 使用指定的API配置: {selected_config.name} ({selected_config.id})")
     else:
         global_config = config_manager.get_global_config()
@@ -240,6 +249,7 @@ def resolve_continuous_write_model_config(model: str = "", api_config_id: str = 
         temperature = global_config.temperature
         max_tokens = global_config.max_tokens
         model_name = requested_model or global_config.model
+        resolved_api_config_id = config_manager.get_multi_config().active_config_id
         logger.info("[ContinuousWrite] 使用激活的全局API配置")
 
     max_tokens = _cap_continuous_write_max_tokens(max_tokens)
@@ -249,6 +259,7 @@ def resolve_continuous_write_model_config(model: str = "", api_config_id: str = 
 
     model_config = AgentModelConfig(
         agent_name="ContinuousWriter",
+        api_config_id=resolved_api_config_id,
         api_base=api_base,
         api_key=api_key,
         model=model_name,
@@ -313,6 +324,9 @@ async def import_novel_to_infinite_write(
         return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
 
     imported_chapters = parsed["chapters"]
+    current_chapter = max(
+        [int(ch.get("chapter_number") or 0) for ch in imported_chapters if isinstance(ch, dict)] or [len(imported_chapters)]
+    )
     story_beginning = imported_chapters[0].get("content", "")[:500] if imported_chapters else ""
 
     session_store = get_session_store()
@@ -324,7 +338,7 @@ async def import_novel_to_infinite_write(
     )
     state.story_beginning = story_beginning
     state.chapters = imported_chapters
-    state.current_chapter = len(imported_chapters)
+    state.current_chapter = current_chapter
     state.is_running = False
     state.inspirations = []
     state.corrections = []
@@ -335,7 +349,7 @@ async def import_novel_to_infinite_write(
     async with lock:
         writer = continuous_writers.get(writer_key)
         if writer is not None:
-            writer._apply_client_sync(imported_chapters, len(imported_chapters), [])
+            writer._apply_client_sync(imported_chapters, current_chapter, [])
 
     memory = service.refresh_infinite_memory(
         project_id=project_id,
@@ -352,7 +366,7 @@ async def import_novel_to_infinite_write(
             "project_id": project_id,
             "filename": parsed["filename"],
             "imported_chapters": len(imported_chapters),
-            "current_chapter": len(imported_chapters),
+            "current_chapter": current_chapter,
             "chapters": imported_chapters,
             "total_words": sum(ch.get("word_count", 0) for ch in imported_chapters),
             "memory_summary": {

@@ -7,13 +7,14 @@
 
 import json
 import logging
-from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..models.requests import TrendSearchRequest, TrendsConfigRequest, TrendsVisibilityRequest
+from ...constants import get_data_dir
 from ...utils.atomic_write import atomic_write_json
+from .skills import _get_skill_path, _load_skill_service
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,9 @@ TRENDS_CONFIG_DEFAULTS = {
     "enabled": True,
     "auto_refresh": False,
     "refresh_interval": 300,
-    "default_platforms": [],
-    "show_in_infinite_write": True
+    "default_platforms": ["toutiao", "douyin"],
+    "show_in_infinite_write": True,
+    "show_in_multi_agent": True
 }
 
 # 平台ID到Skill方法名称的映射
@@ -52,8 +54,7 @@ PLATFORM_METHOD_MAP = {
 def _get_skill_service():
     """获取 Skill 服务实例"""
     try:
-        from skills.trends_search.scripts.trends_service import get_service
-        return get_service()
+        return _load_skill_service("trends_search")
     except Exception as e:
         logger.error(f"Failed to load trends_search skill: {e}")
         return None
@@ -72,7 +73,7 @@ async def get_trends_status():
             })
         
         # 检查 Skill 是否存在
-        skill_path = Path(__file__).parent.parent.parent.parent / "skills" / "trends_search"
+        skill_path = _get_skill_path("trends_search")
         is_available = skill_path.exists() and (skill_path / "SKILL.md").exists()
         
         tools = [{"name": method, "description": f"获取{platform}热点"}
@@ -230,7 +231,7 @@ async def multi_search_trends(platforms: Optional[List[str]] = None):
 @router.get("/trends/config")
 async def get_trends_config():
     """获取热点搜索配置"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "trends_config.json"
+    config_path = get_data_dir() / "trends_config.json"
     
     config_data = TRENDS_CONFIG_DEFAULTS.copy()
     
@@ -247,7 +248,7 @@ async def get_trends_config():
 @router.post("/trends/config")
 async def save_trends_config(request: TrendsConfigRequest):
     """保存热点搜索配置"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "trends_config.json"
+    config_path = get_data_dir() / "trends_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"[TrendsConfig] 收到保存请求: platforms={request.default_platforms}")
@@ -304,7 +305,7 @@ async def save_trends_config(request: TrendsConfigRequest):
 @router.post("/trends/visibility")
 async def save_trends_visibility(request: TrendsVisibilityRequest):
     """保存热点显示开关配置"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "trends_config.json"
+    config_path = get_data_dir() / "trends_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     
     config_data = {}

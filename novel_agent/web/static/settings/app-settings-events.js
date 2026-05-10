@@ -299,6 +299,25 @@ function bindGlobalAPISettingsEvents(timeoutSettings = {}) {
     });
 }
 
+function parseConfigApiKeys(rawValue) {
+    return Array.from(new Set(
+        String(rawValue || '')
+            .split(/[\n,;，；]+/)
+            .map((item) => item.trim())
+            .filter(Boolean)
+    ));
+}
+
+function buildConfigApiKeyEntries(keys) {
+    return keys.map((key, index) => ({
+        id: '',
+        key,
+        remark: `Key ${index + 1}`,
+        is_enabled: true,
+        created_at: ''
+    }));
+}
+
 function showConfigEditModal(configId = null) {
     const modal = document.getElementById('config-edit-modal');
     const contentEl = document.getElementById('config-edit-content');
@@ -308,6 +327,10 @@ function showConfigEditModal(configId = null) {
     const isEdit = !!config;
 
     const currentApiType = config?.api_type || 'openai_chat';
+    const savedKeyCount = Array.isArray(config?.api_keys)
+        ? config.api_keys.filter((entry) => entry?.key_set).length
+        : (config?.api_key_set ? 1 : 0);
+    const savedKeyLabel = savedKeyCount > 1 ? `✓ 已配置 ${savedKeyCount} 个 Key` : '✓ 已配置';
 
     contentEl.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -332,10 +355,13 @@ function showConfigEditModal(configId = null) {
             </div>
             <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Base URL <span style="color: #ef4444;">*</span></label><input type="text" id="config-api-base" value="${safeAttr(config?.api_base || '')}" placeholder="${currentApiType === 'anthropic' ? 'https://api.anthropic.com 或中转地址' : 'https://api.openai.com/v1'}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
             <div>
-                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Key ${config?.api_key_set ? '<span style="color: #10b981; font-size: 12px; margin-left: 8px;">✓ 已配置</span>' : ''}</label>
+                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Key ${config?.api_key_set ? `<span style="color: #10b981; font-size: 12px; margin-left: 8px;">${savedKeyLabel}</span>` : ''}</label>
                 <div style="position: relative;">
-                    <input type="password" id="config-api-key" value="" placeholder="${config?.api_key_set ? '已保存，如需修改请输入新Key' : '请输入API Key'}" data-configured="${config?.api_key_set || false}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px; padding-right: 50px;">
-                    <button id="toggle-config-key" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-secondary); cursor: pointer;"><i class="ri-eye-line"></i></button>
+                    <textarea id="config-api-key" rows="2" placeholder="${config?.api_key_set ? '已保存，留空则不修改；输入新Key会替换当前Key池' : '请输入API Key'}" data-configured="${config?.api_key_set || false}" style="width: 100%; min-height: 72px; resize: vertical; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px; padding-right: 50px; -webkit-text-security: disc;"></textarea>
+                    <button id="toggle-config-key" style="position: absolute; right: 12px; top: 14px; background: none; border: none; color: var(--text-secondary); cursor: pointer;"><i class="ri-eye-line"></i></button>
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.5;">
+                    多个 Key 可一行一个，也可用逗号或分号分隔（中英文标点都可以）；保存后会自动加入同一配置的 Key 池轮询使用，第一个 Key 作为主 Key。
                 </div>
             </div>
             <div>
@@ -406,11 +432,11 @@ function showConfigEditModal(configId = null) {
 
     document.getElementById('toggle-config-key')?.addEventListener('click', () => {
         const keyInput = document.getElementById('config-api-key');
-        if (keyInput.type === 'password') {
-            keyInput.type = 'text';
+        if (keyInput.style.getPropertyValue('-webkit-text-security') === 'disc') {
+            keyInput.style.setProperty('-webkit-text-security', 'none');
             document.getElementById('toggle-config-key').innerHTML = '<i class="ri-eye-off-line"></i>';
         } else {
-            keyInput.type = 'password';
+            keyInput.style.setProperty('-webkit-text-security', 'disc');
             document.getElementById('toggle-config-key').innerHTML = '<i class="ri-eye-line"></i>';
         }
     });
@@ -442,6 +468,7 @@ function showConfigEditModal(configId = null) {
         const button = event.currentTarget;
         const apiBase = document.getElementById('config-api-base')?.value;
         const apiKey = document.getElementById('config-api-key')?.value;
+        const apiKeys = parseConfigApiKeys(apiKey);
         const apiType = document.getElementById('config-api-type')?.value || 'openai_chat';
         if (!apiBase) {
             showToast('请先填写API Base URL', 'error');
@@ -450,7 +477,7 @@ function showConfigEditModal(configId = null) {
         button.disabled = true;
         button.innerHTML = '<i class="ri-loader-4-line"></i>';
         try {
-            const requestData = { api_base: apiBase || '', api_key: apiKey || '', api_type: apiType };
+            const requestData = { api_base: apiBase || '', api_key: apiKeys[0] || '', api_type: apiType };
             if (isEdit && !apiKey && editingConfigId) {
                 requestData.config_id = editingConfigId;
             }
@@ -479,6 +506,8 @@ function showConfigEditModal(configId = null) {
         const name = document.getElementById('config-name')?.value.trim();
         const apiBase = document.getElementById('config-api-base')?.value.trim();
         const apiKey = document.getElementById('config-api-key')?.value.trim();
+        const apiKeys = parseConfigApiKeys(apiKey);
+        const apiKeyEntries = buildConfigApiKeyEntries(apiKeys);
         const apiType = document.getElementById('config-api-type')?.value || 'openai_chat';
         const temperature = parseFloat(document.getElementById('config-temperature')?.value) || 0.7;
         const maxTokens = parseInt(document.getElementById('config-max-tokens')?.value, 10) || 4096;
@@ -497,13 +526,23 @@ function showConfigEditModal(configId = null) {
         try {
             if (isEdit) {
                 const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType };
-                if (apiKey) {
-                    updateData.api_key = apiKey;
+                if (apiKeys.length > 0) {
+                    updateData.api_key = apiKeys[0];
+                    updateData.api_keys = apiKeyEntries;
                 }
                 await updateApiConfig(editingConfigId, updateData);
                 showToast('配置已更新 ✓', 'success');
             } else {
-                await createApiConfig({ name, api_base: apiBase, api_key: apiKey, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType });
+                await createApiConfig({
+                    name,
+                    api_base: apiBase,
+                    api_key: apiKeys[0] || '',
+                    api_keys: apiKeyEntries,
+                    models: currentModels,
+                    temperature,
+                    max_tokens: maxTokens,
+                    api_type: apiType
+                });
                 showToast('配置已创建 ✓', 'success');
             }
             modal.style.display = 'none';
@@ -982,6 +1021,8 @@ function bindSkillsSettingsEvents() {
 
 window.bindThemeSettingsEvents = bindThemeSettingsEvents;
 window.bindGlobalAPISettingsEvents = bindGlobalAPISettingsEvents;
+window.parseConfigApiKeys = parseConfigApiKeys;
+window.buildConfigApiKeyEntries = buildConfigApiKeyEntries;
 window.showConfigEditModal = showConfigEditModal;
 window.bindAgentSettingsEvents = bindAgentSettingsEvents;
 window.bindKnowledgeBaseEvents = bindKnowledgeBaseEvents;

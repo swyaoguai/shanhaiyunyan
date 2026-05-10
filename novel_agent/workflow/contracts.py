@@ -244,12 +244,19 @@ def build_default_creation_contract(
     plot_idea: str = "",
     volume_count: int = 1,
     chapters_per_volume: int = 5,
+    target_word_count: int = 0,
+    target_words_per_chapter: int = 0,
+    ai_autonomy_requested: bool = False,
     source_session_id: str = "",
     source_message: str = "",
     user_confirmed: bool = False,
 ) -> CreationContract:
     """根据现有创作参数构建默认合同。"""
     total_chapters = max(1, int(volume_count or 1)) * max(1, int(chapters_per_volume or 1))
+    normalized_target_words = max(0, int(target_word_count or 0))
+    normalized_words_per_chapter = max(0, int(target_words_per_chapter or 0))
+    if normalized_target_words and total_chapters and not normalized_words_per_chapter:
+        normalized_words_per_chapter = max(500, int((normalized_target_words + total_chapters - 1) / total_chapters))
 
     contract = CreationContract(
         goal="创作一部长篇小说",
@@ -263,6 +270,9 @@ def build_default_creation_contract(
             "volume_count": max(1, int(volume_count or 1)),
             "chapters_per_volume": max(1, int(chapters_per_volume or 1)),
             "total_chapters": total_chapters,
+            "target_word_count": normalized_target_words,
+            "target_words_per_chapter": normalized_words_per_chapter,
+            "ai_autonomy_requested": bool(ai_autonomy_requested),
         },
         constraints={
             "style": [],
@@ -304,6 +314,15 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
     scope = contract.scope or {}
     total_chapters = max(1, int(scope.get("total_chapters") or 1))
     discussion_context = str(scope.get("discussion_context") or "").strip()
+    target_word_count = int(scope.get("target_word_count") or 0)
+    target_words_per_chapter = int(scope.get("target_words_per_chapter") or 0)
+    ai_autonomy_requested = bool(scope.get("ai_autonomy_requested", False))
+    autonomous_brief = (
+        "用户已授权助手自主安排未指定的世界观、角色姓名、人物设定和剧情细节；"
+        "请在已给定题材、主题、篇幅与讨论方向内主动补全，不要因姓名或剧情空白而要求用户继续补充。"
+        if ai_autonomy_requested
+        else ""
+    )
     discussion_inputs = (
         {
             "discussion_context": discussion_context,
@@ -325,6 +344,9 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 "novel_type": scope.get("novel_type", ""),
                 "theme": scope.get("theme", ""),
                 "requirements": scope.get("requirements", ""),
+                "target_word_count": target_word_count,
+                "ai_autonomy_requested": ai_autonomy_requested,
+                **({"autonomous_brief": autonomous_brief} if autonomous_brief else {}),
                 **discussion_inputs,
             },
         ),
@@ -348,8 +370,15 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 "theme": scope.get("theme", ""),
                 "protagonist": scope.get("protagonist", ""),
                 "plot_idea": scope.get("plot_idea", ""),
-                "character_request": scope.get("protagonist", "") or scope.get("plot_idea", ""),
-                "request_mode": "draft",
+                "character_request": (
+                    scope.get("protagonist", "")
+                    or scope.get("plot_idea", "")
+                    or autonomous_brief
+                ),
+                "request_mode": "autonomous_draft" if ai_autonomy_requested else "draft",
+                "target_word_count": target_word_count,
+                "ai_autonomy_requested": ai_autonomy_requested,
+                **({"autonomous_brief": autonomous_brief} if autonomous_brief else {}),
                 **discussion_inputs,
             },
         ),
@@ -378,6 +407,10 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 "plot_idea": scope.get("plot_idea", ""),
                 "volume_count": scope.get("volume_count", 1),
                 "chapters_per_volume": scope.get("chapters_per_volume", 5),
+                "target_word_count": target_word_count,
+                "target_words_per_chapter": target_words_per_chapter,
+                "ai_autonomy_requested": ai_autonomy_requested,
+                **({"autonomous_brief": autonomous_brief} if autonomous_brief else {}),
                 **discussion_inputs,
             },
             review_required=True,
@@ -403,6 +436,7 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 candidate_agents=["ChapterWriter"],
                 inputs={
                     "chapter_number": chapter_number,
+                    **({"word_count": target_words_per_chapter} if target_words_per_chapter else {}),
                     **discussion_inputs,
                 },
             )

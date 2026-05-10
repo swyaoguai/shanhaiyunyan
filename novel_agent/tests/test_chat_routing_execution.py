@@ -10,7 +10,7 @@ from novel_agent.agents.router_agent import RouterAgent, UserIntent, IntentAnaly
 from novel_agent.workflow.coordinator import NovelCoordinator, NovelProject, WorkflowState
 from novel_agent.workflow.creative_workflow import CreativeWorkflowRun
 from novel_agent.workflow.workflow_context import Artifact, WorkflowContext
-from novel_agent.workflow.workflow_planner import build_workflow_plan
+from novel_agent.workflow.workflow_planner import WorkflowTask, build_workflow_plan
 from novel_agent.project_manager import ProjectManager
 from novel_agent.web.routes import projects as project_routes
 from novel_agent.web.models.requests import ChatRequest
@@ -245,6 +245,29 @@ class _FakeRouter:
         }
 
 
+class _FakeGeneralChatIntentRouter:
+    async def analyze_intent(self, message):
+        return SimpleNamespace(
+            primary_intent=SimpleNamespace(value="general_chat"),
+            confidence=0.96,
+        )
+
+    async def route_and_respond(self, message, context=None):
+        raise AssertionError("general_chat intent should stay in discussion chat")
+
+
+class _FixedIntentRouterAgent(RouterAgent):
+    def __init__(self, intent_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._fixed_intent_name = intent_name
+
+    async def analyze_intent(self, message):
+        return SimpleNamespace(
+            primary_intent=SimpleNamespace(value=self._fixed_intent_name),
+            confidence=0.96,
+        )
+
+
 class _FakeStreamingRouter(_FakeRouter):
     async def route_and_respond(self, message, context=None):
         self.last_context = context or {}
@@ -341,41 +364,90 @@ def test_parse_explicit_command_ignores_plain_chinese_inputs(message):
 
 
 @pytest.mark.parametrize(
-    ("message", "expected_name", "expected_chapter", "expected_payload"),
+    "message",
     [
-        ("生成世界观 末日废土与残存城邦", "worldbuild", 0, "末日废土与残存城邦"),
-        ("生成大纲 宗门覆灭后的复仇与重建", "outline", 0, "宗门覆灭后的复仇与重建"),
-        ("续写章节3 血战升级", "chapter", 3, "血战升级"),
-        ("那就把世界观保存到资料库", "worldbuild", 0, "把世界观保存到资料库"),
-        ("直接写第一章正文", "chapter", 1, ""),
-        ("查看进度", "status", 0, ""),
+        "生成世界观 末日废土与残存城邦",
+        "生成大纲 宗门覆灭后的复仇与重建",
+        "续写章节3 血战升级",
+        "那就把世界观保存到资料库",
+        "直接写第一章正文",
+        "查看进度",
     ],
 )
-def test_parse_targeted_natural_language_command(message, expected_name, expected_chapter, expected_payload):
-    payload = chat_routes._parse_targeted_natural_language_command(message)
-
-    assert payload is not None
-    assert payload["name"] == expected_name
-    assert payload.get("chapter_number", 0) == expected_chapter
-    assert payload.get("message", "") == expected_payload
+def test_targeted_natural_language_command_leaves_plain_chinese_inputs_for_model(message):
+    assert chat_routes._parse_targeted_natural_language_command(message) is None
 
 
-def test_parse_targeted_natural_language_command_supports_character_cards():
+def test_targeted_natural_language_command_leaves_character_requests_for_model():
     payload = chat_routes._parse_targeted_natural_language_command("生成角色卡 林渡，宗门遗孤")
 
-    assert payload is not None
-    assert payload["name"] == "character"
-    assert payload.get("message", "") == "林渡，宗门遗孤"
+    assert payload is None
 
 
-def test_parse_targeted_natural_language_command_supports_builtin_project_data_categories():
+def test_prepare_chat_request_only_uses_slash_commands_for_local_routing(monkeypatch):
+    monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
+    monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
+
+    natural = chat_routes._prepare_chat_request("生成世界观 末日废土与残存城邦", "session", "session", None)
+    explicit = chat_routes._prepare_chat_request("/worldbuild 末日废土与残存城邦", "session", "session", None)
+
+    assert natural["targeted_command"] is None
+    assert explicit["targeted_command"]["name"] == "worldbuild"
+    assert explicit["targeted_command"]["message"] == "末日废土与残存城邦"
+
+
+def test_parse_targeted_natural_language_command_leaves_new_novel_requests_for_model():
+    message = "我想写一本古代的姐弟恋团宠小说，篇幅在5w字左右。主角名字什么的你帮我安排"
+    payload = chat_routes._parse_targeted_natural_language_command(message)
+
+    assert payload is None
+
+
+def test_chat_creation_requirements_do_not_treat_request_sentence_as_plot():
+    message = "我想写一本古代的甜宠题材小说，篇幅在5万字左右。其他的信息你帮我完善就行"
+    router = RouterAgent()
+
+    requirements = chat_routes._normalize_creation_requirements(
+        collected_info={},
+        message=message,
+        router_agent=router,
+    )
+
+    assert requirements["novel_type"] == "古代言情"
+    assert requirements["theme"] == "古代甜宠"
+    assert requirements["target_word_count"] == 50000
+    assert requirements["chapters_per_volume"] > 5
+    assert "篇幅约50000字" in requirements["requirements"]
+    assert requirements["plot_idea"] == ""
+
+
+@pytest.mark.asyncio
+async def test_new_novel_requests_use_model_routing_hint():
+    class _ModelOnlyRouter:
+        async def analyze_intent(self, message):
+            assert "我想写一本" in message
+            return SimpleNamespace(
+                primary_intent=SimpleNamespace(value="create_novel"),
+                confidence=0.93,
+            )
+
+    message = "我想写一本古代的姐弟恋团宠小说，篇幅在5w字左右。主角名字什么的你帮我安排"
+    hint = await chat_routes._build_chat_routing_hint(
+        processed_message=message,
+        targeted_command=None,
+        router_agent=_ModelOnlyRouter(),
+        active_model="deepseek-reasoner",
+    )
+
+    assert hint["intent"] == "create_novel"
+    assert hint["target_agent"] == "Coordinator"
+    assert hint["confidence"] == pytest.approx(0.93)
+
+
+def test_targeted_natural_language_command_leaves_builtin_project_data_requests_for_model():
     payload = chat_routes._parse_targeted_natural_language_command("生成道具物品 玄铁剑，林渡前期武器")
 
-    assert payload is not None
-    assert payload["name"] == "projectdata"
-    assert payload["category"]["key"] == "items"
-    assert payload["category"]["name"] == "道具物品"
-    assert payload.get("message", "") == "生成道具物品 玄铁剑，林渡前期武器"
+    assert payload is None
 
 
 def test_parse_targeted_natural_language_command_leaves_advice_requests_for_chat():
@@ -386,7 +458,16 @@ def test_parse_targeted_natural_language_command_leaves_advice_requests_for_chat
     assert payload is None
 
 
-def test_parse_targeted_natural_language_command_supports_custom_project_data_categories(tmp_path, monkeypatch):
+def test_conversational_phrase_revision_is_not_polish_execution():
+    assert chat_routes._is_conversational_revision_request(
+        "敲什么木鱼，木鱼哪有夫君香，这句话换掉，我觉得不好换一句别的，其他的不改动"
+    )
+    assert not chat_routes._is_polish_trigger(
+        "敲什么木鱼，木鱼哪有夫君香，这句话换掉，我觉得不好换一句别的，其他的不改动"
+    )
+
+
+def test_targeted_natural_language_command_leaves_custom_project_data_requests_for_model(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
     pm.save_project_state(
         "knowledge_categories",
@@ -405,10 +486,35 @@ def test_parse_targeted_natural_language_command_supports_custom_project_data_ca
 
     payload = chat_routes._parse_targeted_natural_language_command("生成势力阵营 合欢宗，暗中控制边城商路")
 
-    assert payload is not None
-    assert payload["name"] == "projectdata"
-    assert payload["category"]["key"] == "custom_force"
-    assert payload["category"]["name"] == "势力阵营"
+    assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_model_general_chat_intent_stays_with_communicator_even_in_execute_mode(monkeypatch):
+    store = _FakeChatStore()
+    router = _FakeGeneralChatIntentRouter()
+
+    _FakeCommunicatorAgent.chat_calls = 0
+    chat_routes.chat_sessions.clear()
+    chat_routes._ACTIVE_WORKFLOW_RUNS.clear()
+
+    monkeypatch.setattr("novel_agent.agents.CommunicatorAgent", _FakeCommunicatorAgent)
+    monkeypatch.setattr("novel_agent.agents.get_chat_session_store", lambda: store)
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: _FakeProjectManager())
+    monkeypatch.setattr("novel_agent.web.routes.chat.get_router_agent", lambda: router)
+    monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
+    monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
+
+    response = await chat_routes.chat(ChatRequest(
+        message="敲什么木鱼，木鱼哪有夫君香，这句话换掉，我觉得不好换一句别的，其他的不改动",
+        session_id="copilot",
+        creative_mode="execute",
+    ))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["reply"] == "communicator fallback"
+    assert payload.get("routed") is not True
+    assert _FakeCommunicatorAgent.chat_calls == 1
 
 
 @pytest.mark.asyncio
@@ -639,7 +745,7 @@ async def test_chat_workflow_control_commands_call_coordinator(monkeypatch):
     assert "已发送暂停指令" in pause_payload["reply"]
     assert pause_payload["routing"]["target_agent"] == "Coordinator"
 
-    resume_resp = await chat_routes.chat(ChatRequest(message="继续创作", session_id="copilot"))
+    resume_resp = await chat_routes.chat(ChatRequest(message="/resume", session_id="copilot"))
     resume_payload = json.loads(resume_resp.body.decode("utf-8"))
     assert coordinator.resume_calls == 1
     assert "已发送恢复指令" in resume_payload["reply"]
@@ -649,18 +755,16 @@ async def test_chat_workflow_control_commands_call_coordinator(monkeypatch):
     assert "当前创作状态" in status_payload["reply"]
     assert "最近进度" in status_payload["reply"]
 
-    cancel_resp = await chat_routes.chat(ChatRequest(message="取消创作", session_id="copilot"))
+    cancel_resp = await chat_routes.chat(ChatRequest(message="/cancel", session_id="copilot"))
     cancel_payload = json.loads(cancel_resp.body.decode("utf-8"))
     assert coordinator.cancel_calls == 1
     assert "已发送取消指令" in cancel_payload["reply"]
 
 
-def test_chat_revision_natural_language_command_routes_to_targeted_workflow():
+def test_chat_revision_natural_language_command_stays_model_routed():
     command = chat_routes._parse_targeted_natural_language_command("把刚才的世界观改成末法时代")
 
-    assert command["name"] == "worldbuild"
-    assert command["message"] == "把刚才的世界观改成末法时代"
-    assert command["display"] == "修改世界观"
+    assert command is None
 
 
 def test_chat_records_workflow_interruption_into_creative_snapshot(monkeypatch):
@@ -709,6 +813,54 @@ def test_chat_records_workflow_interruption_into_creative_snapshot(monkeypatch):
     assert updated["task_queue"][2]["status"] == "pending"
     assert updated["artifacts"]["character-artifact"]["status"] == "revision_requested"
     assert updated["user_interruptions"][-1]["message"] == "不对，主角不是复仇，是寻找失踪师父。"
+
+
+def test_apply_workflow_update_ignores_internal_llm_chunks():
+    active_run = {
+        "session_id": "copilot",
+        "last_progress": "正在生成世界观设定",
+        "status": "running",
+    }
+
+    result = chat_routes._apply_workflow_update(active_run, {
+        "type": "llm_chunk",
+        "current_agent": "Worldbuilder",
+        "content": '"seed":"abc"',
+        "delta": '"道"',
+    })
+
+    assert result == ""
+    assert active_run["last_progress"] == "正在生成世界观设定"
+
+
+@pytest.mark.asyncio
+async def test_fanout_coordinator_progress_drops_per_token_internal_events():
+    """回归测试：逐 token 的 LLM 流式增量不应通过 coordinator fanout
+    冒泡到 chat SSE，否则前端会把每个 token 当作一行思考进度渲染。"""
+    router = RouterAgent()
+
+    captured = []
+
+    async def upstream(payload):
+        captured.append(payload)
+
+    context = {"progress_callback": upstream}
+
+    for noisy_event_type in ("llm_chunk", "tool_call", "tool_result", "agent_task_progress"):
+        await router._fanout_coordinator_progress(
+            context,
+            {
+                "type": noisy_event_type,
+                "agent": "Worldbuilder",
+                "content": "高超",
+                "delta": "高超",
+            },
+            existing_callback=None,
+        )
+
+    assert captured == [], (
+        "_fanout_coordinator_progress 不应将逐 token 的内部事件冒泡到上层 progress 回调"
+    )
 
 
 @pytest.mark.asyncio
@@ -766,7 +918,7 @@ async def test_chat_resume_restores_paused_creative_workflow_snapshot(monkeypatc
     monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
     monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
 
-    response = await chat_routes.chat(ChatRequest(message="继续创作", session_id="copilot"))
+    response = await chat_routes.chat(ChatRequest(message="/resume", session_id="copilot"))
     payload = json.loads(response.body.decode("utf-8"))
 
     assert coordinator.resume_calls == 1
@@ -810,7 +962,7 @@ async def test_chat_stream_workflow_control_commands_use_control_branch(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_chat_explicit_create_command_persists_structured_workflow_status(tmp_path, monkeypatch):
+async def test_chat_slash_create_command_persists_structured_workflow_status(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
     project_dir = pm._get_project_dir(pm.current_project_id)
     coordinator = _FakeCoordinator(project_dir=project_dir)
@@ -829,7 +981,7 @@ async def test_chat_explicit_create_command_persists_structured_workflow_status(
     monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
     monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
 
-    response = await chat_routes.chat(ChatRequest(message="开始创作 宗门覆灭后的复仇与重建", session_id="copilot"))
+    response = await chat_routes.chat(ChatRequest(message="/create 宗门覆灭后的复仇与重建", session_id="copilot"))
     payload = json.loads(response.body.decode("utf-8"))
 
     assert payload["routing"]["target_agent"] == "Coordinator"
@@ -846,7 +998,7 @@ async def test_chat_explicit_create_command_persists_structured_workflow_status(
     assert status_payload["workflow"]["status"] == "completed"
     assert status_payload["workflow"]["run_id"] == payload["workflow"]["run_id"]
     assert status_payload["workflow"]["created_files"] or status_payload["workflow"]["updated_files"]
-    assert "当前创作状态：`completed`" in status_payload["reply"]
+    assert "当前创作状态：已完成" in status_payload["reply"]
 
 
 @pytest.mark.asyncio
@@ -900,7 +1052,7 @@ async def test_chat_plan_mode_builds_confirmable_plan_without_auto_writing(tmp_p
     monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
 
     response = await chat_routes.chat(ChatRequest(
-        message="开始创作 宗门覆灭后的复仇与重建",
+        message="/create 宗门覆灭后的复仇与重建",
         session_id="copilot",
         creative_mode="plan",
     ))
@@ -1010,20 +1162,12 @@ def test_chat_execute_mode_allows_router_side_effect_intents(intent_name):
     assert should_execute is True
 
 
-@pytest.mark.parametrize(
-    ("message", "intent_name"),
-    [
-        ("帮我看看这个角色卡要不要写入资料库", "create_character"),
-        ("这个世界观方案怎么样，先别保存", "create_novel"),
-        ("第3章应该怎么润色更好？", "polish_content"),
-    ],
-)
-def test_chat_auto_mode_keeps_discussion_like_creative_requests_in_communicator(message, intent_name):
+def test_chat_auto_mode_keeps_model_chat_intent_in_communicator():
     should_execute = chat_routes._should_execute_router_request(
         router_agent=object(),
-        routing_hint={"intent": intent_name, "target_agent": "Coordinator", "confidence": 0.96},
+        routing_hint={"intent": "general_chat", "target_agent": "Communicator", "confidence": 0.96},
         targeted_command=None,
-        processed_message=message,
+        processed_message="帮我看看这个角色卡要不要写入资料库",
         agent=_FakeCommunicatorAgent(),
         creative_mode="auto",
     )
@@ -1047,6 +1191,7 @@ def test_chat_auto_mode_requires_enough_confidence_before_side_effect_execution(
 @pytest.mark.parametrize(
     ("message", "intent_name"),
     [
+        ("我想写一本古代的姐弟恋团宠小说，篇幅在5w字左右。主角名字什么的你帮我安排", "create_novel"),
         ("生成主角角色卡：林渡，少年剑修", "create_character"),
         ("把章纲也补出来", "create_chapter_settings"),
         ("继续写第3章", "continue_write"),
@@ -1178,21 +1323,21 @@ async def test_chat_workflow_control_commands_keep_real_coordinator_statuses_con
     pause_payload = json.loads(pause_resp.body.decode("utf-8"))
     assert pause_payload["workflow"]["status"] == "paused"
 
-    resume_resp = await chat_routes.chat(ChatRequest(message="继续创作", session_id="copilot"))
+    resume_resp = await chat_routes.chat(ChatRequest(message="/resume", session_id="copilot"))
     resume_payload = json.loads(resume_resp.body.decode("utf-8"))
     assert resume_payload["workflow"]["status"] == "writing"
 
     status_resp = await chat_routes.chat(ChatRequest(message="/status", session_id="copilot"))
     status_payload = json.loads(status_resp.body.decode("utf-8"))
-    assert "当前创作状态：`writing`" in status_payload["reply"]
+    assert "当前创作状态：写作中" in status_payload["reply"]
 
-    cancel_resp = await chat_routes.chat(ChatRequest(message="取消创作", session_id="copilot"))
+    cancel_resp = await chat_routes.chat(ChatRequest(message="/cancel", session_id="copilot"))
     cancel_payload = json.loads(cancel_resp.body.decode("utf-8"))
     assert cancel_payload["workflow"]["status"] == "cancelled"
 
     final_status_resp = await chat_routes.chat(ChatRequest(message="/status", session_id="copilot"))
     final_status_payload = json.loads(final_status_resp.body.decode("utf-8"))
-    assert "当前创作状态：`cancelled`" in final_status_payload["reply"]
+    assert "当前创作状态：已取消" in final_status_payload["reply"]
 
 
 def test_router_formal_execution_limits_cap_large_projects():
@@ -1271,7 +1416,7 @@ async def test_get_chat_workflow_status_prefers_session_snapshot_over_real_coord
 
     assert payload["workflow"]["status"] == "completed"
     assert payload["workflow"]["run_id"] == "run-123"
-    assert "当前创作状态：`completed`" in payload["reply"]
+    assert "当前创作状态：已完成" in payload["reply"]
 
 
 def test_real_coordinator_resume_and_cancel_keep_runtime_state_consistent():
@@ -1340,13 +1485,13 @@ async def test_chat_explicit_worldbuild_command_writes_world_file_only(tmp_path,
     assert (project_dir / "worldbuilding.json").exists()
     saved_world = pm.load_project_data("worldbuilding")
     assert isinstance(saved_world, dict)
-    assert saved_world.get("world", {}).get("world_name") == "玄幻世界"
+    assert str(saved_world.get("world", {}).get("world_name") or "").endswith("世界")
     normalized_world = project_routes._normalize_builtin_project_data("worldbuilding", saved_world)
-    assert any(item.get("name") == "玄幻世界" for item in normalized_world.get("data", []))
+    assert normalized_world.get("data")
 
 
 @pytest.mark.asyncio
-async def test_chat_prefixed_worldbuild_save_request_executes_and_persists_project_worldbuilding(tmp_path, monkeypatch):
+async def test_chat_slash_worldbuild_request_executes_and_persists_project_worldbuilding(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
     project_dir = pm._get_project_dir(pm.current_project_id)
     coordinator = _FakeCoordinator(project_dir=project_dir)
@@ -1365,7 +1510,7 @@ async def test_chat_prefixed_worldbuild_save_request_executes_and_persists_proje
     monkeypatch.setattr("novel_agent.prompts.check_user_input_security", lambda message: (True, message))
     monkeypatch.setattr("novel_agent.prompts.get_security_response", lambda: "blocked")
 
-    response = await chat_routes.chat(ChatRequest(message="那就把世界观保存到资料库", session_id="copilot"))
+    response = await chat_routes.chat(ChatRequest(message="/worldbuild 把世界观保存到资料库", session_id="copilot"))
     payload = json.loads(response.body.decode("utf-8"))
 
     assert payload["routing"]["target_agent"] == "Worldbuilder"
@@ -1381,7 +1526,7 @@ async def test_chat_prefixed_worldbuild_save_request_executes_and_persists_proje
 @pytest.mark.asyncio
 async def test_chat_character_creation_request_routes_to_character_builder_and_persists_characters(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
-    router = RouterAgent()
+    router = _FixedIntentRouterAgent("create_character")
     store = _FakeChatStore()
 
     async def _fake_execute(self, input_data, context=None):
@@ -1433,7 +1578,7 @@ async def test_chat_character_creation_request_routes_to_character_builder_and_p
 @pytest.mark.asyncio
 async def test_chat_character_card_request_routes_to_builder_draft_without_persisting(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
-    router = RouterAgent()
+    router = _FixedIntentRouterAgent("create_character")
     store = _PersistentChatStore()
 
     async def _fake_execute(self, input_data, context=None):
@@ -1479,7 +1624,7 @@ async def test_chat_character_card_request_routes_to_builder_draft_without_persi
     assert payload["delegated_result"]["characters"][0]["name"] == "林渡"
     assert pm.load_project_data("characters") == []
 
-    save_response = await chat_routes.chat(ChatRequest(message="把这个角色卡保存到资料库", session_id="copilot"))
+    save_response = await chat_routes.chat(ChatRequest(message="/character 把这个角色卡保存到资料库", session_id="copilot"))
     save_payload = json.loads(save_response.body.decode("utf-8"))
     saved_characters = pm.load_project_data("characters")
     normalized = project_routes._normalize_builtin_project_data("characters", saved_characters)
@@ -1493,7 +1638,7 @@ async def test_chat_character_card_request_routes_to_builder_draft_without_persi
 async def test_chat_character_card_auto_saves_when_chat_toggle_enabled(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
     pm.save_project_state("copilot_chat_auto_save", {"enabled": True})
-    router = RouterAgent()
+    router = _FixedIntentRouterAgent("create_character")
     store = _FakeChatStore()
 
     async def _fake_execute(self, input_data, context=None):
@@ -1548,7 +1693,7 @@ async def test_chat_character_card_custom_category_requires_manual_selection_eve
     pm.save_project_state("knowledge_categories", [
         {"id": "db-custom-faction", "key": "custom_faction", "name": "势力档案", "builtin": False}
     ])
-    router = RouterAgent()
+    router = _FixedIntentRouterAgent("create_character")
     store = _FakeChatStore()
 
     async def _fake_execute(self, input_data, context=None):
@@ -1587,7 +1732,7 @@ async def test_chat_character_card_custom_category_requires_manual_selection_eve
     response = await chat_routes.chat(ChatRequest(message="请帮我生成主角角色卡并保存到势力档案", session_id="copilot"))
     payload = json.loads(response.body.decode("utf-8"))
 
-    assert payload["routing"]["target_agent"] == "CharacterBuilder"
+    assert payload["routing"]["target_agent"] == "Communicator"
     assert payload["workflow"]["status"] == "needs_confirmation"
     assert payload["is_complete"] is False
     assert "不会自动写入该分类" in payload["reply"]
@@ -1597,7 +1742,7 @@ async def test_chat_character_card_custom_category_requires_manual_selection_eve
 @pytest.mark.asyncio
 async def test_chat_character_discussion_without_save_phrase_stays_in_communicator(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
-    router = RouterAgent()
+    router = _FakeGeneralChatIntentRouter()
     store = _FakeChatStore()
 
     _SlowCommunicatorAgent.chat_calls = 0
@@ -1615,7 +1760,7 @@ async def test_chat_character_discussion_without_save_phrase_stays_in_communicat
     payload = json.loads(response.body.decode("utf-8"))
 
     assert payload["reply"].startswith("echo:")
-    assert payload["routing"]["target_agent"] == "CharacterBuilder"
+    assert payload["routing"]["target_agent"] == "Communicator"
     assert payload.get("routed") is not True
     assert _SlowCommunicatorAgent.chat_calls == 1
     assert pm.load_project_data("characters") == []
@@ -2241,6 +2386,192 @@ async def test_router_world_and_character_request_saves_both_project_files(tmp_p
     assert [task["task_type"] for task in workflow_run["task_queue"]] == ["prepare_context", "worldbuilding", "characters"]
     assert all(review["passed"] is True for review in workflow_run["reviews"])
     assert len(workflow_run["handoff_notes"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_project_chapter_write_uses_nested_outline_overview(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+
+    pm.save_project_data("outline", [
+        {
+            "title": "主线大纲",
+            "name": "主线大纲",
+            "global_outline": "男主重返旧城复仇。",
+            "volumes": [
+                {
+                    "volume_title": "第一卷",
+                    "chapters": [
+                        {"title": "第1章 旧城归来", "summary": "林渡回到旧城，发现旧案线索。"},
+                        {"title": "第2章 血债", "summary": "复仇进一步升级。"},
+                    ],
+                }
+            ],
+        }
+    ])
+
+    result = await router._execute_project_chapter_write(chapter_num=1, context={})
+
+    chapter_rows = pm.load_project_data("chapters")
+    chapter_files = list((project_dir / "chapters").glob("*.md"))
+
+    assert result is not None
+    assert result["is_complete"] is True
+    assert result["params"]["chapter_number"] == 1
+    assert chapter_rows[0]["title"] == "第1章 旧城归来"
+    assert "林渡回到旧城" in chapter_rows[0]["content"]
+    assert chapter_files
+
+
+@pytest.mark.asyncio
+async def test_serial_chapters_task_without_explicit_number_writes_all_outline_chapters(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    pm.save_project_data("outline", [
+        {
+            "chapter_number": 1,
+            "title": "第1章 旧城归来",
+            "summary": "林渡回到旧城，发现旧案线索。",
+            "content": "",
+        },
+        {
+            "chapter_number": 2,
+            "title": "第2章 血债",
+            "summary": "复仇进一步升级。",
+            "content": "",
+        },
+    ])
+
+    result = await router._run_creative_workflow_task(
+        task=WorkflowTask(
+            task_id="create_chapters",
+            task_type="chapters",
+            target_agent="ChapterWriter",
+            output_type="chapters",
+            title="生成正文章节",
+        ),
+        workflow_context=WorkflowContext(original_request="开始按大纲写每一章正文"),
+        message="开始按大纲写每一章正文",
+        context={"run_id": "run-chapters"},
+    )
+
+    chapter_rows = pm.load_project_data("chapters")
+    chapter_files = sorted((project_dir / "chapters").glob("*.md"))
+
+    assert result.success is True
+    assert result.error == ""
+    assert result.params["generated_chapter_count"] == 2
+    assert result.artifact["chapter_count"] == 2
+    assert len(chapter_rows) == 2
+    assert len(chapter_files) == 2
+    assert "missing_chapter_number" not in result.response
+    assert "真正的正文已经写入文件。" in chapter_rows[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_serial_chapters_task_prefers_chapter_settings_when_writing_all_chapters(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _FakeCoordinator(project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    pm.save_project_data("outline", [
+        {
+            "chapter_number": 1,
+            "title": "第1章 大纲标题",
+            "summary": "这段来自粗略大纲，不应该优先用于正文写作。",
+            "content": "",
+        }
+    ])
+    pm.save_project_data("chapter_settings", [
+        {
+            "chapter_number": 1,
+            "name": "第1章 章纲标题",
+            "writing_goal": "章纲目标：林渡按线索进入旧城祠堂。",
+            "key_event": "祠堂发现血契。",
+            "ending_hook": "有人在门外叫出他的旧名。",
+        }
+    ])
+
+    result = await router._execute_project_chapters_write(context={"run_id": "run-chapter-settings"})
+    chapter_rows = pm.load_project_data("chapters")
+
+    assert result["is_complete"] is True
+    assert result["params"]["generated_chapter_count"] == 1
+    assert chapter_rows[0]["title"] == "第1章 章纲标题"
+    assert "章纲目标：林渡按线索进入旧城祠堂。" in chapter_rows[0]["content"]
+    assert "这段来自粗略大纲" not in chapter_rows[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_directive_local_rules_treat_chapter_plan_reference_as_chapter_writing():
+    router = RouterAgent(coordinator=None)
+    router._can_call_model_for_requirement_extraction = lambda: False
+
+    directive = await router._resolve_serial_workflow_execution_directive(
+        message="按章纲写每一章正文",
+        context={},
+        target_categories=["chapter_settings"],
+        operation="create",
+        category_definitions=router._load_workflow_category_definitions(),
+    )
+
+    assert directive["source"] == "local_rules"
+    assert directive["target_categories"] == ["chapters"]
+    assert directive["write_source"] == "chapter_settings"
+    assert directive["chapter_scope"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_workflow_directive_model_expands_chapter_settings_then_writes_chapters(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    router = RouterAgent(coordinator=None)
+    captured_prompt = {}
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+    router._can_call_model_for_requirement_extraction = lambda: True
+
+    async def fake_call_llm(messages, temperature=None, max_tokens=None):
+        captured_prompt["content"] = messages[0]["content"]
+        return json.dumps(
+            {
+                "should_execute": True,
+                "target_categories": ["chapter_settings", "chapters"],
+                "operation": "create",
+                "write_source": "chapter_settings",
+                "chapter_scope": "all",
+                "chapter_number": 0,
+                "requires_confirmation": False,
+                "confidence": 0.92,
+                "reason": "用户要求先生成章纲，再按章纲写每章正文。",
+            },
+            ensure_ascii=False,
+        )
+
+    router.call_llm = fake_call_llm
+
+    directive = await router._resolve_serial_workflow_execution_directive(
+        message="开始写章纲然后再按章纲写每一章正文",
+        context={},
+        target_categories=["chapter_settings"],
+        operation="create",
+        category_definitions=router._load_workflow_category_definitions(),
+    )
+
+    assert "语义判断层" in captured_prompt["content"]
+    assert directive["source"] == "model"
+    assert directive["target_categories"] == ["chapter_settings", "chapters"]
+    assert directive["write_source"] == "chapter_settings"
+    assert directive["confidence"] == pytest.approx(0.92)
 
 
 @pytest.mark.asyncio

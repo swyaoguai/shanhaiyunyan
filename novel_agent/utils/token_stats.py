@@ -19,6 +19,121 @@ from ..constants import PATH_DEFAULTS
 logger = logging.getLogger(__name__)
 
 
+def estimate_tokens_from_text(value: Any) -> int:
+    """Best-effort token estimate for providers that omit usage metadata."""
+    text = str(value or "")
+    if not text.strip():
+        return 0
+
+    cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    other_chars = max(0, len(text) - cjk_chars)
+    estimated = int((cjk_chars * 0.8) + (other_chars / 4))
+    return max(1, estimated)
+
+
+def estimate_tokens_from_messages(messages: Any) -> int:
+    """Estimate token count from OpenAI-style message payloads."""
+    if not isinstance(messages, list):
+        return estimate_tokens_from_text(messages)
+
+    total = 0
+    for message in messages:
+        if isinstance(message, dict):
+            total += estimate_tokens_from_text(message.get("role"))
+            total += estimate_tokens_from_text(message.get("content"))
+            total += 4
+        else:
+            total += estimate_tokens_from_text(message)
+    return total
+
+
+def _coerce_token_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _usage_to_dict(usage: Any) -> Dict[str, Any]:
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        return usage
+    if hasattr(usage, "model_dump"):
+        try:
+            dumped = usage.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    if hasattr(usage, "dict"):
+        try:
+            dumped = usage.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    return {}
+
+
+def _usage_field(usage: Any, *names: str) -> int:
+    usage_dict = _usage_to_dict(usage)
+    for name in names:
+        value = usage_dict.get(name) if usage_dict else None
+        if value is None and usage is not None:
+            value = getattr(usage, name, None)
+        parsed = _coerce_token_int(value)
+        if parsed:
+            return parsed
+    return 0
+
+
+def extract_token_usage(
+    usage: Any,
+    *,
+    fallback_tokens_in: int = 0,
+    fallback_tokens_out: int = 0,
+) -> tuple[int, int]:
+    """
+    Extract provider-reported token usage with a safe estimate fallback.
+
+    OpenAI-compatible providers are inconsistent here: some return SDK objects,
+    some return plain dicts, Chat uses prompt/completion fields, Responses and
+    Anthropic use input/output fields, and a few only expose total_tokens.
+    """
+    fallback_in = _coerce_token_int(fallback_tokens_in)
+    fallback_out = _coerce_token_int(fallback_tokens_out)
+
+    reported_tokens_in = _usage_field(usage, "prompt_tokens", "input_tokens", "input")
+    reported_tokens_out = _usage_field(usage, "completion_tokens", "output_tokens", "output")
+    tokens_in = reported_tokens_in
+    tokens_out = reported_tokens_out
+    total_tokens = _usage_field(usage, "total_tokens", "total")
+
+    if not tokens_in:
+        tokens_in = fallback_in
+    if not tokens_out:
+        tokens_out = fallback_out
+
+    if total_tokens and not (reported_tokens_in and reported_tokens_out):
+        if reported_tokens_in and total_tokens >= reported_tokens_in:
+            tokens_out = total_tokens - reported_tokens_in
+        elif reported_tokens_out and total_tokens >= reported_tokens_out:
+            tokens_in = total_tokens - reported_tokens_out
+        elif fallback_in and total_tokens >= fallback_in:
+            tokens_in = fallback_in
+            tokens_out = total_tokens - fallback_in
+        elif fallback_out and total_tokens >= fallback_out:
+            tokens_in = total_tokens - fallback_out
+            tokens_out = fallback_out
+        else:
+            tokens_in = total_tokens
+            tokens_out = 0
+
+    return tokens_in, tokens_out
+
+
 @dataclass
 class TokenUsageRecord:
     """Token使用记录"""

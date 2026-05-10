@@ -51,26 +51,6 @@ _chat_session_locks = {}
 _chat_locks_guard = asyncio.Lock()
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ACTIVE_WORKFLOW_RUNS: Dict[str, Dict[str, Any]] = {}
-_CREATE_START_PATTERNS = (
-    "开始创作",
-    "开始写",
-    "开始生成",
-    "开始吧",
-    "直接开写",
-    "直接写",
-    "马上开始",
-    "开始第一章",
-    # 世界观创建触发
-    "写世界观", "建世界观", "创建世界观", "构建世界观", "生成世界观",
-    "设定世界观", "建立世界观", "先写世界观", "帮我写世界观",
-    # 大纲创建触发
-    "写大纲", "创建大纲", "生成大纲", "建大纲", "做大纲",
-    "设计大纲", "规划大纲", "先写大纲", "帮我写大纲",
-    # 角色创建触发
-    "创建角色", "设计角色", "写角色", "建角色",
-    # 正文创作触发
-    "写正文", "创作正文", "开始正文", "生成正文",
-)
 _ROUTER_EXECUTION_INTENTS = {
     "create_novel",
     "create_character",
@@ -112,6 +92,8 @@ DISCUSSION_OR_PLANNING_MARKERS = (
     "建议", "觉得", "怎么", "如何", "要不要", "是否", "能不能", "可不可以",
     "可以吗", "行不行", "合适吗", "有必要吗", "方案", "计划", "步骤", "流程",
     "路线", "下一步", "先别保存", "不要保存", "别落库", "不要落库", "别写入",
+    "先别存档", "不要存档", "别存档", "先别入库", "不要入库", "别入库",
+    "这句话", "这句", "换一句", "换掉", "其他不改", "其余不改", "刚才", "上一条",
 )
 CONTINUE_WRITE_ACTION_MARKERS = (
     "续写", "继续写", "接着写", "往下写", "下一章", "继续正文", "继续创作",
@@ -166,94 +148,6 @@ _EXPLICIT_COMMAND_DEFINITIONS = {
         "aliases": ("cancel",),
     },
 }
-
-_NATURAL_LANGUAGE_COMMAND_PATTERNS = {
-    "worldbuild": (
-        "生成世界观",
-        "构建世界观",
-        "补全世界观",
-        "完善世界观",
-        "世界观设定",
-        "保存世界观",
-        "同步世界观",
-        "把世界观保存到资料库",
-        "把世界观同步到资料库",
-        "世界观保存到资料库",
-        "世界观同步到资料库",
-        # 更多自然表达
-        "写世界观",
-        "创建世界观",
-        "建世界观",
-        "建立世界观",
-        "设定世界观",
-        "做世界观",
-    ),
-    "outline": (
-        "生成大纲",
-        "创建大纲",
-        "规划大纲",
-        "补全大纲",
-        "完善大纲",
-        # 更多自然表达
-        "写大纲",
-        "建大纲",
-        "做大纲",
-        "设计大纲",
-    ),
-    "character": (
-        "生成角色卡",
-        "创建角色卡",
-        "设计角色卡",
-        "写角色卡",
-        "生成人设卡",
-        "创建人设卡",
-        "设计人设卡",
-        "写人设卡",
-        "生成角色档案",
-        "创建角色档案",
-        "设计角色档案",
-        "写角色档案",
-        "保存这个角色卡",
-        "把角色卡保存",
-        "确认保存角色卡",
-        "把这个角色卡保存到资料库",
-        "角色卡保存到资料库",
-        "创建角色",
-        "生成角色",
-        "设计角色",
-    ),
-    "pause": (
-        "暂停创作",
-        "先暂停",
-        "暂停一下",
-        "停一下",
-        "暂停写作",
-    ),
-    "resume": (
-        "继续创作",
-        "恢复创作",
-        "继续写作",
-        "恢复写作",
-        "继续生成",
-        "恢复生成",
-    ),
-    "status": (
-        "创作状态",
-        "查看进度",
-        "当前进度",
-        "进度如何",
-        "现在写到哪",
-        "写到哪了",
-    ),
-    "cancel": (
-        "取消创作",
-        "停止创作",
-        "终止创作",
-        "取消写作",
-        "停止写作",
-    ),
-}
-
 
 def _now_iso() -> str:
     return datetime.now().isoformat()
@@ -326,6 +220,20 @@ def _localize_user_visible_agent_names(text: Any) -> str:
 def _strip_visible_technical_markers(text: Any) -> str:
     """移除技术标记，并从JSON格式中提取reply字段"""
     return strip_visible_technical_markers(text, _localize_user_visible_agent_names)
+
+
+def _is_internal_stream_progress(update: Any) -> bool:
+    if not isinstance(update, dict):
+        return False
+    event_type = str(update.get("type") or "").strip()
+    return event_type in {
+        "llm_chunk",
+        "tool_call",
+        "tool_result",
+        "agent_task_progress",
+        "agent_task_completed",
+        "agent_task_failed",
+    }
 
 
 def _sanitize_conversation_history(history):
@@ -516,7 +424,9 @@ def _apply_workflow_update(active_run: Optional[Dict[str, Any]], update: Any) ->
     else:
         return ""
 
-    content = str(update_payload.get("content") or update_payload.get("message") or "").strip()
+    content = ""
+    if not _is_internal_stream_progress(update_payload):
+        content = _strip_visible_technical_markers(update_payload.get("content") or update_payload.get("message") or "")
     if content:
         active_run["last_progress"] = content
     for field in ("status", "target_agent", "current_agent", "stage", "output_dir", "last_error", "command", "run_id", "focus_module", "model", "current_model", "active_model", "model_used", "last_model"):
@@ -883,124 +793,7 @@ def _project_data_target_agent_for_category(category: Optional[Dict[str, Any]]) 
 
 
 def _parse_targeted_natural_language_command(message: str) -> Optional[Dict[str, Any]]:
-    text = str(message or "").strip()
-    if not text or text.startswith("/"):
-        return None
-
-    normalized_text = re.sub(
-        r"^(?:好(?:的|吧)?|那(?:就|先|直接)?|请|帮我|麻烦你|现在|直接|马上|先|先帮我|开始|然后|接着)+",
-        "",
-        text,
-    ).strip()
-    candidate_text = normalized_text or text
-
-    if _is_revision_request(candidate_text):
-        if "世界观" in candidate_text or "世界设定" in candidate_text:
-            return {
-                "name": "worldbuild",
-                "raw_args": candidate_text,
-                "display": "修改世界观",
-                "message": candidate_text,
-            }
-        if any(token in candidate_text for token in ("角色", "人物", "主角", "人设")):
-            return {
-                "name": "character",
-                "raw_args": candidate_text,
-                "display": "修改角色卡",
-                "message": candidate_text,
-            }
-        category = _extract_target_project_data_category(candidate_text)
-        if category:
-            return {
-                "name": "projectdata",
-                "raw_args": candidate_text,
-                "display": f"修改{category.get('name') or '资料库内容'}",
-                "message": candidate_text,
-                "category": category,
-            }
-
-    chapter_match = re.match(
-        r"^(?:续写章节\s*|(?:写|生成|创作)第)([0-9一二三四五六七八九十百千万两零〇]+)(?:章)?(?:正文)?(?:\s+(.*))?$",
-        candidate_text,
-    )
-    if chapter_match:
-        raw_args = str(chapter_match.group(2) or "").strip()
-        chapter_number = 0
-        try:
-            number_text = str(chapter_match.group(1) or "").strip()
-            if number_text.isdigit():
-                chapter_number = int(number_text)
-            else:
-                digit_map = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-                unit_map = {"十": 10, "百": 100, "千": 1000, "万": 10000}
-                total = 0
-                current = 0
-                for char in number_text:
-                    if char in digit_map:
-                        current = digit_map[char]
-                        continue
-                    if char in unit_map:
-                        unit_value = unit_map[char]
-                        if current == 0:
-                            current = 1
-                        if unit_value >= 10000:
-                            total = (total + current) * unit_value
-                        else:
-                            total += current * unit_value
-                        current = 0
-                        continue
-                    current = 0
-                    total = 0
-                    break
-                chapter_number = total + current
-        except Exception:
-            chapter_number = 0
-        return {
-            "name": "chapter",
-            "raw_args": raw_args,
-            "display": "续写章节",
-            "chapter_number": chapter_number,
-            "message": raw_args,
-        }
-
-    for command_name, patterns in _NATURAL_LANGUAGE_COMMAND_PATTERNS.items():
-        matched = next((pattern for pattern in patterns if candidate_text.startswith(pattern)), "")
-        if not matched:
-            continue
-        raw_args = candidate_text[len(matched):].strip()
-        payload_message = raw_args
-        if command_name == "worldbuild" and any(token in candidate_text for token in ("保存", "同步", "资料库")):
-            payload_message = candidate_text
-        if command_name == "character" and _is_explicit_character_save_trigger(candidate_text):
-            payload_message = candidate_text
-        return {
-            "name": command_name,
-            "raw_args": raw_args,
-            "display": str(_EXPLICIT_COMMAND_DEFINITIONS.get(command_name, {}).get("display") or matched),
-            "message": payload_message,
-        }
-
-    if _is_explicit_character_draft_trigger(candidate_text):
-        return {
-            "name": "character",
-            "raw_args": candidate_text,
-            "display": "创建角色卡",
-            "message": candidate_text,
-        }
-
-    if _is_discussion_or_planning_request(candidate_text):
-        return None
-
-    category = _extract_target_project_data_category(candidate_text)
-    if category and _message_has_project_data_action(candidate_text):
-        return {
-            "name": "projectdata",
-            "raw_args": candidate_text,
-            "display": f"生成{category.get('name') or '资料库内容'}",
-            "message": candidate_text,
-            "category": category,
-        }
-
+    """Legacy hook kept for callers; natural language routing is LLM-only."""
     return None
 
 
@@ -1054,13 +847,6 @@ def _routing_hint_from_explicit_command(command: Dict[str, Any], active_model: s
     return hint
 
 
-def _is_explicit_creation_trigger(message: str) -> bool:
-    text = str(message or "").strip().lower()
-    if not text:
-        return False
-    return any(pattern in text for pattern in _CREATE_START_PATTERNS)
-
-
 def _is_discussion_or_planning_request(message: str) -> bool:
     text = str(message or "").strip().lower()
     if not text:
@@ -1068,6 +854,18 @@ def _is_discussion_or_planning_request(message: str) -> bool:
     if any(marker in text for marker in DISCUSSION_OR_PLANNING_MARKERS):
         return True
     return "?" in text or "？" in text
+
+
+def _is_conversational_revision_request(message: str) -> bool:
+    """用户在改聊天里刚讨论过的一句话，不等同于执行正文润色。"""
+    text = str(message or "").strip()
+    if not text:
+        return False
+    revision_markers = ("这句话", "这句", "换一句", "换掉", "其他不改", "其余不改", "上一条", "刚才")
+    if not any(marker in text for marker in revision_markers):
+        return False
+    explicit_artifact_markers = ("第", "章", "正文", "章节正文", "角色档案", "世界观", "大纲", "资料库")
+    return not any(marker in text for marker in explicit_artifact_markers)
 
 
 def _is_explicit_character_save_trigger(message: str) -> bool:
@@ -1116,24 +914,9 @@ def _is_continue_write_trigger(message: str) -> bool:
 
 def _is_polish_trigger(message: str) -> bool:
     text = str(message or "").strip()
-    return bool(text) and any(marker in text for marker in POLISH_ACTION_MARKERS)
-
-
-def _auto_execution_trigger_for_intent(intent_name: str, message: str) -> bool:
-    intent = str(intent_name or "").strip()
-    if intent == "create_novel":
-        return _is_explicit_creation_trigger(message)
-    if intent == "create_character":
-        return _is_explicit_character_save_trigger(message) or _is_explicit_character_draft_trigger(message)
-    if intent in {"create_eventlines", "create_detail_outline", "create_chapter_settings", "create_project_data"}:
-        return _is_project_data_generation_trigger(message)
-    if intent == "continue_write":
-        return _is_continue_write_trigger(message)
-    if intent == "polish_content":
-        return _is_polish_trigger(message)
-    if intent in {"search_web", "search_trends"}:
-        return True
-    return False
+    if not text or _is_conversational_revision_request(text):
+        return False
+    return any(marker in text for marker in POLISH_ACTION_MARKERS)
 
 
 def _normalize_positive_int(value: Any, default: int) -> int:
@@ -1144,18 +927,28 @@ def _normalize_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _fallback_creation_requirement_hints(message: str, router_agent: Any = None) -> Dict[str, Any]:
+    extractor = getattr(router_agent, "_extract_local_creation_requirement_hints", None)
+    if not callable(extractor):
+        return {}
+    try:
+        hints = extractor(message)
+    except Exception:
+        return {}
+    return dict(hints) if isinstance(hints, dict) else {}
+
+
 def _normalize_creation_requirements(
     collected_info: Optional[Dict[str, Any]],
     message: str,
     router_agent: Any = None,
 ) -> Dict[str, Any]:
     info = dict(collected_info or {})
+    hints = _fallback_creation_requirement_hints(message, router_agent)
+
     novel_type = str(info.get("novel_type") or "").strip()
-    if not novel_type and router_agent and hasattr(router_agent, "_extract_novel_type"):
-        try:
-            novel_type = str(router_agent._extract_novel_type(message) or "").strip()
-        except Exception:
-            novel_type = ""
+    if not novel_type:
+        novel_type = str(hints.get("novel_type") or "").strip()
     if not novel_type:
         try:
             from ...project_manager import get_project_manager
@@ -1165,14 +958,23 @@ def _normalize_creation_requirements(
         except Exception:
             novel_type = ""
 
+    target_word_count = _normalize_positive_int(info.get("target_word_count") or hints.get("target_word_count"), 0)
+    chapters_per_volume = _normalize_positive_int(info.get("chapters_per_volume") or hints.get("chapters_per_volume"), 5)
+    if target_word_count and chapters_per_volume <= 5:
+        chapters_per_volume = max(5, min(80, (target_word_count + 2999) // 3000))
+
+    plot_idea = str(info.get("plot_idea") or hints.get("plot_idea") or "").strip()
+
     return {
         "novel_type": novel_type or "",
-        "theme": str(info.get("theme") or "").strip(),
-        "requirements": str(info.get("requirements") or "").strip(),
-        "protagonist": str(info.get("protagonist") or "").strip(),
-        "plot_idea": str(info.get("plot_idea") or message).strip(),
+        "theme": str(info.get("theme") or hints.get("theme") or "").strip(),
+        "requirements": str(info.get("requirements") or hints.get("requirements") or "").strip(),
+        "protagonist": str(info.get("protagonist") or hints.get("protagonist") or "").strip(),
+        "plot_idea": plot_idea,
         "volume_count": _normalize_positive_int(info.get("volume_count"), 1),
-        "chapters_per_volume": _normalize_positive_int(info.get("chapters_per_volume"), 5),
+        "chapters_per_volume": chapters_per_volume,
+        "target_word_count": target_word_count,
+        "target_words_per_chapter": _normalize_positive_int(info.get("target_words_per_chapter") or hints.get("target_words_per_chapter"), 0),
     }
 
 
@@ -1300,9 +1102,17 @@ def _should_execute_via_router(
         return True
     if float(confidence or 0.0) < AUTO_EXECUTION_CONFIDENCE_FLOOR:
         return False
-    if _is_discussion_or_planning_request(message):
-        return False
-    return _auto_execution_trigger_for_intent(intent, message)
+    return True
+
+
+def _downgrade_discussion_routing_hint(
+    routing_hint: Optional[Dict[str, Any]],
+    processed_message: str,
+    targeted_command: Optional[Dict[str, Any]],
+    active_model: str,
+) -> Optional[Dict[str, Any]]:
+    """Preserve model-selected routing; natural language intent is not locally downgraded."""
+    return routing_hint
 
 
 def _infer_communicator_response_mode(
@@ -1360,11 +1170,10 @@ def _build_router_context(
 
     if intent_name == "create_novel":
         should_auto_execute = bool(
-            effective_mode == "execute"
+            effective_mode in {"auto", "execute"}
             or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
-            or _is_explicit_creation_trigger(message)
         )
-        if effective_mode == "plan":
+        if effective_mode in {"discussion", "plan"}:
             should_auto_execute = False
         context["auto_execute"] = should_auto_execute
         context["requires_confirmation"] = not should_auto_execute
@@ -1378,13 +1187,11 @@ def _build_router_context(
         requested_category = _extract_requested_knowledge_category(message)
         requires_manual_category_selection = bool(requested_category and not requested_category.get("builtin"))
         should_auto_execute = bool(
-            effective_mode == "execute"
+            effective_mode in {"auto", "execute"}
             or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
-            or is_save_request
-            or _is_explicit_character_draft_trigger(message)
             or (context.get("chat_auto_save_enabled") and not requires_manual_category_selection)
         )
-        if effective_mode == "plan":
+        if effective_mode in {"discussion", "plan"}:
             should_auto_execute = False
         context["auto_execute"] = should_auto_execute
         context["requires_confirmation"] = False
@@ -1395,9 +1202,7 @@ def _build_router_context(
         else:
             context["character_request_mode"] = "save" if (effective_mode == "execute" or is_save_request or context.get("chat_auto_save_enabled")) else "draft"
     elif intent_name in {"create_eventlines", "create_detail_outline", "create_chapter_settings"}:
-        context["auto_execute"] = effective_mode == "execute" or (
-            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
-        )
+        context["auto_execute"] = effective_mode in {"auto", "execute"}
         context["requires_confirmation"] = False
     elif intent_name == "create_project_data":
         explicit_category = (
@@ -1406,15 +1211,11 @@ def _build_router_context(
             else None
         )
         requested_category = explicit_category or _extract_target_project_data_category(message)
-        context["auto_execute"] = effective_mode == "execute" or (
-            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
-        )
+        context["auto_execute"] = effective_mode in {"auto", "execute"}
         context["requires_confirmation"] = False
         context["requested_knowledge_category"] = requested_category
     elif intent_name == "continue_write":
-        context["auto_execute"] = effective_mode == "execute" or (
-            effective_mode == "auto" and _auto_execution_trigger_for_intent(intent_name, message)
-        )
+        context["auto_execute"] = effective_mode in {"auto", "execute"}
 
     return context
 
@@ -1464,10 +1265,14 @@ def _apply_router_result_to_routing_hint(
         return routing_hint
 
     delegated = router_result.get("delegated_result") if isinstance(router_result.get("delegated_result"), dict) else {}
+    action = str(router_result.get("action") or delegated.get("action") or "").strip()
     routed_to = (
         str(router_result.get("routed_to") or "").strip()
         or str(delegated.get("agent_name") or "").strip()
     )
+    if action == "manual_category_selection_required":
+        routed_to = "Communicator"
+        routing_hint["manual_category_selection_required"] = True
     if routed_to:
         routing_hint["target_agent"] = routed_to
 
@@ -1805,11 +1610,15 @@ async def _build_chat_routing_hint(
             intent_analysis = await router_agent.analyze_intent(processed_message)
             intent_name = _extract_intent_name(intent_analysis)
             confidence = float(getattr(intent_analysis, "confidence", 0.0) or 0.0)
+            fallback_intent = getattr(intent_analysis, "fallback_intent", None)
+            fallback_name = str(getattr(fallback_intent, "value", "") or fallback_intent or "").strip()
             routing_hint = {
                 "intent": intent_name,
                 "target_agent": _target_agent_for_intent(intent_name),
                 "confidence": confidence,
             }
+            if fallback_name and fallback_name.lower() != "none":
+                routing_hint["fallback_intent"] = fallback_name
             if active_model and routing_hint.get("target_agent") == "Communicator":
                 routing_hint["model"] = active_model
         except Exception as analyze_error:
@@ -1853,8 +1662,7 @@ def _prepare_chat_request(
                 "handled_control": interrupted,
             }
 
-    explicit_command = _parse_explicit_command(processed_message)
-    targeted_command = explicit_command or _parse_targeted_natural_language_command(processed_message)
+    targeted_command = _parse_explicit_command(processed_message)
     workflow_control = (
         str(targeted_command.get("name") or "")
         if targeted_command and targeted_command.get("name") in _WORKFLOW_CONTROL_COMMAND_NAMES
@@ -1901,12 +1709,13 @@ def _should_execute_router_request(
     creative_mode: str = "auto",
 ) -> bool:
     mode = _normalize_chat_creative_mode(creative_mode)
+    intent = str((routing_hint or {}).get("intent") or "").strip()
     if mode == "discussion":
         return False
     if mode == "plan":
         return bool(router_agent and routing_hint and str(routing_hint.get("intent") or "").strip() in CHAT_PLAN_ROUTER_INTENTS)
     if mode == "execute":
-        return bool(router_agent and routing_hint and str(routing_hint.get("intent") or "").strip() in _ROUTER_EXECUTION_INTENTS)
+        return bool(router_agent and routing_hint and intent in _ROUTER_EXECUTION_INTENTS)
     return bool(
         router_agent
         and routing_hint
@@ -2022,6 +1831,27 @@ def _process_assistant_auto_save(
     except Exception as exc:
         logger.warning(f"[Chat] 自动同步助手回复失败: {exc}")
         return None
+
+
+def _router_result_allows_assistant_auto_save(
+    router_result: Optional[Dict[str, Any]],
+    delegated_result: Optional[Dict[str, Any]],
+    workflow_snapshot: Optional[Dict[str, Any]],
+) -> bool:
+    """失败或取消的路由执行结果不应触发资料库自动同步。"""
+    if isinstance(router_result, dict) and not router_result.get("success", True):
+        return False
+    if isinstance(delegated_result, dict):
+        if delegated_result.get("error"):
+            return False
+        status = str(delegated_result.get("status") or "").strip().lower()
+        if status in {"failed", "cancelled"}:
+            return False
+    if isinstance(workflow_snapshot, dict):
+        status = str(workflow_snapshot.get("status") or workflow_snapshot.get("stage") or "").strip().lower()
+        if status in {"failed", "cancelled"}:
+            return False
+    return True
 
 
 def _merge_creative_decision_result(result: Dict[str, Any], decision_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2554,6 +2384,12 @@ async def chat(request: ChatRequest):
                 active_model=active_model,
                 creative_mode=creative_mode,
             )
+            routing_hint = _downgrade_discussion_routing_hint(
+                routing_hint,
+                processed_message,
+                targeted_command,
+                active_model,
+            )
             communicator_response_mode = _infer_communicator_response_mode(
                 processed_message=processed_message,
                 routing_hint=routing_hint,
@@ -2678,12 +2514,14 @@ async def chat(request: ChatRequest):
             if str(delegated_result.get("action") or "") != "manual_category_selection_required":
                 decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
                 _merge_creative_decision_result(result, decision_result)
-            auto_save_result = _process_assistant_auto_save(
-                pm,
-                str(result.get("reply") or ""),
-                creative_mode,
-                session_id,
-            )
+            auto_save_result = None
+            if _router_result_allows_assistant_auto_save(router_result or {}, delegated_result, workflow_snapshot):
+                auto_save_result = _process_assistant_auto_save(
+                    pm,
+                    str(result.get("reply") or ""),
+                    creative_mode,
+                    session_id,
+                )
             _merge_assistant_auto_save_result(result, auto_save_result)
             if session_key in chat_sessions:
                 _persist_chat_session(store, session_id, project_id, active_agent)
@@ -2768,6 +2606,12 @@ async def chat_stream(request: ChatRequest):
             router_agent=router_agent,
             active_model=active_model,
             creative_mode=creative_mode,
+        )
+        routing_hint = _downgrade_discussion_routing_hint(
+            routing_hint,
+            processed_message,
+            targeted_command,
+            active_model,
         )
         communicator_response_mode = _infer_communicator_response_mode(
             processed_message=processed_message,
@@ -2886,12 +2730,14 @@ async def chat_stream(request: ChatRequest):
                         }
                         decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
                         _merge_creative_decision_result(done_payload, decision_result)
-                        auto_save_result = _process_assistant_auto_save(
-                            pm,
-                            str(done_payload.get("reply") or full_text or reply_text or ""),
-                            creative_mode,
-                            session_id,
-                        )
+                        auto_save_result = None
+                        if _router_result_allows_assistant_auto_save(router_result, delegated_result, workflow_snapshot):
+                            auto_save_result = _process_assistant_auto_save(
+                                pm,
+                                str(done_payload.get("reply") or full_text or reply_text or ""),
+                                creative_mode,
+                                session_id,
+                            )
                         _merge_assistant_auto_save_result(done_payload, auto_save_result)
                         yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 

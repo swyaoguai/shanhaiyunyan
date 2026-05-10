@@ -422,7 +422,7 @@ function showCreateProjectDialog() {
     
     // 自动聚焦
     setTimeout(() => {
-        document.getElementById('new-project-name').focus();
+        document.getElementById('new-project-name')?.focus();
     }, 100);
 
     bindProjectGenreControls();

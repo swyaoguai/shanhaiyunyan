@@ -10,6 +10,17 @@ Localizer = Optional[Callable[[str], str]]
 _VISIBLE_TEXT_FIELDS = ("reply", "response", "content", "message", "text", "summary", "result_summary")
 _PREFERRED_TEXT_FIELDS = ("reply", "response")
 _NESTED_PAYLOAD_FIELDS = ("delegated_result", "result", "data", "payload", "output")
+_TECHNICAL_FRAGMENT_KEYS = (
+    "_id",
+    "id",
+    "source",
+    "source_preview",
+    "source_type",
+    "created_at",
+    "updated_at",
+    "revision_notes",
+    "metadata",
+)
 
 
 def _apply_localizer(text: str, localizer: Localizer = None) -> str:
@@ -103,6 +114,8 @@ def strip_visible_technical_markers(text: Any, localizer: Localizer = None) -> s
     if not value:
         return ""
 
+    if looks_like_metadata_fragment(value):
+        return ""
     visible = extract_visible_text_from_jsonish(value)
     if visible:
         return _apply_localizer(visible, localizer)
@@ -126,11 +139,29 @@ def looks_like_jsonish_prefix(text: Any) -> bool:
     return value.startswith("{") or value.startswith("[")
 
 
+def looks_like_metadata_fragment(text: Any) -> bool:
+    value = _strip_basic_markers(text)
+    if not value:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", value):
+        return False
+
+    lines = [line.strip().strip(",;") for line in value.splitlines() if line.strip()]
+    if not lines or len(lines) > 16:
+        return False
+    lower_text = value.lower()
+    if not any(key in lower_text for key in _TECHNICAL_FRAGMENT_KEYS):
+        return False
+    return all(len(line) <= 80 for line in lines)
+
+
 def stream_visible_text(text: Any, localizer: Localizer = None) -> Optional[str]:
     value = _strip_basic_markers(text)
     if not value:
         return ""
 
+    if looks_like_metadata_fragment(value):
+        return ""
     visible = extract_visible_text_from_jsonish(value)
     if visible:
         return _apply_localizer(visible, localizer)

@@ -80,6 +80,59 @@ class CharacterManager:
         
         self._save_characters()
         return True
+
+    def sync_development_from_text(self, content: str, chapter_number: int = 0) -> Dict[str, List[str]]:
+        """从章节正文中同步明确写出的角色成长事件。"""
+        text = str(content or "").strip()
+        if not text or not self.characters:
+            return {}
+
+        updates: Dict[str, List[str]] = {}
+        sentences = [item.strip() for item in re.split(r"(?<=[。！？!?])", text) if item.strip()]
+        names = sorted(self.characters.keys(), key=len, reverse=True)
+        trigger_pattern = re.compile(r"(学会了?|习得了?|掌握了?|领悟了?|练成了?|觉醒了?|获得了?|参透了?|突破了?)")
+
+        for sentence in sentences:
+            if not trigger_pattern.search(sentence):
+                continue
+            matched_names = [name for name in names if name and name in sentence]
+            if not matched_names:
+                continue
+            ability = self._extract_ability_name_from_sentence(sentence)
+            if not ability:
+                continue
+            for name in matched_names:
+                character = self.characters.get(name)
+                if not character:
+                    continue
+                if ability not in character.abilities:
+                    character.abilities.append(ability)
+                    updates.setdefault(name, []).append(ability)
+                note = f"第{chapter_number}章获得/掌握：{ability}" if chapter_number else f"获得/掌握：{ability}"
+                if note not in character.notes:
+                    character.notes = (character.notes + "\n" + note).strip() if character.notes else note
+
+        if updates:
+            self._save_characters()
+        return updates
+
+    @staticmethod
+    def _extract_ability_name_from_sentence(sentence: str) -> str:
+        text = str(sentence or "")
+        trigger = re.search(r"(?:学会了?|习得了?|掌握了?|领悟了?|练成了?|觉醒了?|获得了?|参透了?|突破了?)", text)
+        if not trigger:
+            return ""
+        tail = text[trigger.end():]
+        tail = re.sub(r"^[的了一门一种一招新的\s，,：:]+", "", tail)
+        suffix_pattern = (
+            r"([\u4e00-\u9fa5A-Za-z0-9·]{2,16}?"
+            r"(?:剑法|刀法|枪法|拳法|掌法|心法|功法|身法|步法|阵法|符法|术法|法术|秘术|神通|天赋|能力|技能|术|诀|法|剑|刀|拳|掌|步|咒|符))"
+        )
+        match = re.search(suffix_pattern, tail)
+        if match:
+            return match.group(1).strip("，,。；;、 的了")
+        fallback = re.split(r"[，,。；;、\s]", tail, maxsplit=1)[0].strip("的了")
+        return fallback[:16] if len(fallback) >= 2 else ""
     
     def get_all_characters(self) -> List[Character]:
         """获取所有角色"""

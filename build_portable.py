@@ -2,7 +2,7 @@
 """
 便携版打包脚本
 使用PyInstaller打包项目，创建单一exe文件
-自动清理数据、添加哈希校验
+使用干净发布数据副本、添加哈希校验
 """
 
 import os
@@ -25,6 +25,9 @@ ROOT_DIR = Path(__file__).parent
 BUILD_DIR = ROOT_DIR / "build"
 DIST_DIR = ROOT_DIR / "dist"
 PORTABLE_DIR = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable"
+RELEASE_DATA_DIR = BUILD_DIR / "release_data" / "novel_agent_data"
+SOURCE_ONNX_MODEL_DIR = ROOT_DIR / "novel_agent" / "models" / "embedding" / "default"
+SOURCE_SKILLS_DIR = ROOT_DIR / "skills"
 
 # Node.js Portable版本下载地址（Windows x64）
 NODEJS_URL = "https://nodejs.org/dist/v20.10.0/node-v20.10.0-win-x64.zip"
@@ -40,32 +43,77 @@ def calculate_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
     return hash_obj.hexdigest()
 
 
-def clean_before_build():
-    """打包前清理所有个人数据"""
-    print("\n[清理] 打包前清理个人数据...")
-    
-    clean_script = ROOT_DIR / "clean_for_release.py"
-    if clean_script.exists():
-        # 调用清理脚本，使用-y参数跳过确认
-        result = subprocess.run(
-            [sys.executable, str(clean_script), "-y"],
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("[OK] 数据清理完成")
-            if result.stdout:
-                # 显示清理脚本的输出（可选）
-                for line in result.stdout.strip().split('\n')[-5:]:
-                    print(f"     {line}")
-            return True
-        else:
-            print(f"[X] 清理失败: {result.stderr}")
-            return False
-    else:
-        print("[Warning] 清理脚本不存在，跳过清理步骤")
-        return True
+def _default_trends_config() -> dict:
+    return {
+        "enabled": True,
+        "auto_refresh": False,
+        "refresh_interval": 300,
+        "default_platforms": ["toutiao", "douyin"],
+        "show_in_infinite_write": True,
+        "show_in_multi_agent": True
+    }
+
+
+def _default_timeout_settings() -> dict:
+    return {
+        "llm": {
+            "connect": 60,
+            "read": 600,
+            "write": 120,
+            "pool": 60
+        },
+        "short_story": {
+            "input_analysis": 120,
+            "fusion": 180,
+            "synopsis": 120,
+            "outline": 180,
+            "chapter": 300,
+            "quality": 1800,
+            "coherence": 1800,
+            "title": 120,
+            "tags": 120
+        }
+    }
+
+
+def _default_skills_config() -> dict:
+    return {
+        "enabled_skills": {
+            "trends_search": True,
+            "agent_reach": True
+        }
+    }
+
+
+def prepare_release_data():
+    """准备不含个人信息的发布数据副本，不修改开发环境数据。"""
+    print("\n[准备] 创建干净发布数据副本...")
+
+    if RELEASE_DATA_DIR.exists():
+        shutil.rmtree(RELEASE_DATA_DIR)
+    RELEASE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    for dirname in ("projects", "stats", "sessions"):
+        path = RELEASE_DATA_DIR / dirname
+        path.mkdir(parents=True, exist_ok=True)
+        (path / ".gitkeep").touch()
+
+    (RELEASE_DATA_DIR / "trends_config.json").write_text(
+        json.dumps(_default_trends_config(), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    (RELEASE_DATA_DIR / "timeout_settings.json").write_text(
+        json.dumps(_default_timeout_settings(), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    (RELEASE_DATA_DIR / "skills_config.json").write_text(
+        json.dumps(_default_skills_config(), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+    print(f"[OK] 发布数据副本: {RELEASE_DATA_DIR.relative_to(ROOT_DIR)}")
+    print("[OK] 未修改 .env、data/、novel_agent/data/ 中的开发数据")
+    return True
 
 
 def clean_build_artifacts():
@@ -103,11 +151,6 @@ def clean_build_artifacts():
                     item.unlink()
                 print(f"[OK] 删除 {item.name}")
     
-    # 清理spec文件
-    for spec in ROOT_DIR.glob("*.spec"):
-        spec.unlink()
-        print(f"[OK] 删除 {spec.name}")
-    
     return True
 
 
@@ -132,26 +175,26 @@ def run_pyinstaller():
     static_dir = ROOT_DIR / "novel_agent" / "web" / "static"
     templates_dir = ROOT_DIR / "novel_agent" / "web" / "templates"
     prompts_dir = ROOT_DIR / "novel_agent" / "prompts"
-    data_dir = ROOT_DIR / "novel_agent" / "data"
+    data_dir = RELEASE_DATA_DIR
+    skills_dir = SOURCE_SKILLS_DIR
     
-    # 确保data目录存在并有基本配置
+    # 确保发布数据目录存在并有基本配置
     if not data_dir.exists():
-        data_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[创建] data目录: {data_dir}")
+        prepare_release_data()
     
     # 确保trends_config.json存在
     trends_config_file = data_dir / "trends_config.json"
     if not trends_config_file.exists():
-        default_config = {
-            "enabled": True,
-            "auto_refresh": False,
-            "refresh_interval": 300,
-            "default_platforms": ["toutiao", "douyin"],
-            "show_in_infinite_write": True,
-            "show_in_multi_agent": True
-        }
+        default_config = _default_trends_config()
         trends_config_file.write_text(json.dumps(default_config, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[创建] trends_config.json")
+    skills_config_file = data_dir / "skills_config.json"
+    if not skills_config_file.exists():
+        skills_config_file.write_text(
+            json.dumps(_default_skills_config(), ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        print(f"[创建] skills_config.json")
     
     # 创建dist目录
     DIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -162,6 +205,7 @@ def run_pyinstaller():
         "--name", DISPLAY_NAME,
         "--noconfirm",
         "--clean",
+        "--specpath", str(BUILD_DIR),
         # 使用单文件模式
         "--onefile",
         # 无控制台窗口 - 生产环境使用
@@ -188,6 +232,10 @@ def run_pyinstaller():
         "--collect-all", "pydantic",
         # 图标（如果存在）
     ]
+    if skills_dir.exists():
+        cmd.extend(["--add-data", f"{skills_dir};skills"])
+    else:
+        print("[警告] 未找到 skills 目录，便携包将不内置技能")
     
     # 检查是否有图标文件
     ico_path = ROOT_DIR / "logo.ico"
@@ -235,6 +283,8 @@ def create_portable_structure():
     if exe_src.exists():
         shutil.copy2(exe_src, exe_dst)
         print(f"[OK] 复制 {APP_NAME}.exe")
+        exe_src.unlink()
+        print(f"[OK] 删除 dist 根目录临时 exe，避免误启动到开发数据")
     
     # 复制配置文件和文档
     resources = [
@@ -259,19 +309,42 @@ def create_portable_structure():
     (data_dir / "stats").mkdir(parents=True, exist_ok=True)
     
     # 创建默认配置
-    trends_config = {
-        "enabled": True,
-        "auto_refresh": False,
-        "refresh_interval": 300,
-        "default_platforms": ["toutiao", "douyin"],
-        "show_in_infinite_write": True,
-        "show_in_multi_agent": True
-    }
+    trends_config = _default_trends_config()
     (data_dir / "trends_config.json").write_text(
         json.dumps(trends_config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    (data_dir / "timeout_settings.json").write_text(
+        json.dumps(_default_timeout_settings(), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (data_dir / "skills_config.json").write_text(
+        json.dumps(_default_skills_config(), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     
     print("[OK] 创建默认配置")
+
+    if SOURCE_SKILLS_DIR.exists():
+        skills_dst = PORTABLE_DIR / "skills"
+        if skills_dst.exists():
+            shutil.rmtree(skills_dst)
+        shutil.copytree(
+            SOURCE_SKILLS_DIR,
+            skills_dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+        print(f"[OK] 复制 Skills: {SOURCE_SKILLS_DIR.relative_to(ROOT_DIR)}")
+    else:
+        print("[警告] 未找到 skills 目录，便携包无法使用技能")
+
+    # 复制本地 ONNX 向量模型到便携目录外置路径，避免运行时依赖开发目录或 PyInstaller 临时目录。
+    if SOURCE_ONNX_MODEL_DIR.exists():
+        model_dst = PORTABLE_DIR / "novel_agent" / "models" / "embedding" / "default"
+        if model_dst.exists():
+            shutil.rmtree(model_dst)
+        shutil.copytree(SOURCE_ONNX_MODEL_DIR, model_dst)
+        print(f"[OK] 复制本地向量模型: {SOURCE_ONNX_MODEL_DIR.relative_to(ROOT_DIR)}")
+    else:
+        print("[提示] 未找到本地向量模型，便携包将不内置 local_onnx 模型")
+
     return True
 
 
@@ -625,8 +698,8 @@ def main():
     print("=" * 60)
     print()
     print("本脚本将执行以下操作:")
-    print("  1. 清理所有个人数据")
-    print("  2. 清理旧的构建产物")
+    print("  1. 清理旧的构建产物")
+    print("  2. 创建干净发布数据副本（不修改开发数据）")
     print("  3. 使用PyInstaller打包为单一exe")
     print("  4. 创建便携版目录结构")
     print("  5. 下载Node.js便携版")
@@ -649,8 +722,8 @@ def main():
     
     # 构建步骤
     steps = [
-        ("清理个人数据", clean_before_build),
         ("清理构建产物", clean_build_artifacts),
+        ("准备发布数据", prepare_release_data),
         ("PyInstaller打包", run_pyinstaller),
         ("创建目录结构", create_portable_structure),
         ("下载Node.js", download_nodejs),

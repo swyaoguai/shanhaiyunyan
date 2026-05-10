@@ -22,7 +22,7 @@ from ..config import config
 from ..agent_config import AgentModelConfig, get_config_manager
 from ..utils.retry import async_retry, RetryConfig
 from ..utils.metrics import get_metrics_collector, MetricsContext
-from ..utils.token_stats import record_token_usage
+from ..utils.token_stats import extract_token_usage, estimate_tokens_from_messages, estimate_tokens_from_text, record_token_usage
 from ..utils.llm_params import normalize_max_tokens
 from ..constants import TIMEOUTS, RETRY_DEFAULTS
 from ..timeout_settings import get_llm_timeout_settings
@@ -649,6 +649,7 @@ class BaseAgent(ABC):
         max_tokens: Optional[int],
     ) -> AsyncGenerator[str, None]:
         """对流式响应在建立阶段和传输阶段都提供重试与续传兜底。"""
+        start_time = time.time()
         last_error: Optional[Exception] = None
         current_delay = self.retry_config.delay
         max_retries = max(int(self.retry_config.max_retries or 0), 1)
@@ -658,11 +659,13 @@ class BaseAgent(ABC):
         for attempt in range(max_retries + 1):
             try:
                 attempt_base_text = visible_text
+                usage_collector: Dict[str, Any] = {}
                 stream = await self._call_llm_internal(
                     base_messages if not visible_text else self._build_stream_resume_messages(base_messages, visible_text),
                     temperature,
                     max_tokens,
                     True,
+                    usage_collector=usage_collector,
                 )
 
                 continuation_raw = ""
@@ -686,10 +689,61 @@ class BaseAgent(ABC):
                     visible_text = attempt_base_text + continuation_visible
                     yield delta
 
+                duration = time.time() - start_time
+                metric_messages = [{"role": "system", "content": self.system_prompt}] + base_messages
+                tokens_in, tokens_out = extract_token_usage(
+                    usage_collector.get("usage"),
+                    fallback_tokens_in=estimate_tokens_from_messages(metric_messages),
+                    fallback_tokens_out=estimate_tokens_from_text(visible_text),
+                )
+                self.metrics.record_call(
+                    agent_name=self.name,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    duration=duration,
+                    success=True,
+                    method="call_llm_stream",
+                )
+                try:
+                    record_token_usage(
+                        agent_name=self.name,
+                        model=self._get_model_name(),
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        success=True,
+                        method="call_llm_stream",
+                        duration=duration,
+                    )
+                except Exception as sqlite_err:
+                    logger.warning(f"[{self.name}] Failed to record token usage to SQLite: {sqlite_err}")
                 return
             except Exception as e:
                 last_error = e
                 if attempt >= max_retries or not self._is_retryable_stream_error(e):
+                    duration = time.time() - start_time
+                    metric_messages = [{"role": "system", "content": self.system_prompt}] + base_messages
+                    tokens_in = estimate_tokens_from_messages(metric_messages)
+                    self.metrics.record_call(
+                        agent_name=self.name,
+                        tokens_in=tokens_in,
+                        tokens_out=estimate_tokens_from_text(visible_text),
+                        duration=duration,
+                        success=False,
+                        error=str(e),
+                        method="call_llm_stream",
+                    )
+                    try:
+                        record_token_usage(
+                            agent_name=self.name,
+                            model=self._get_model_name(),
+                            tokens_in=tokens_in,
+                            tokens_out=estimate_tokens_from_text(visible_text),
+                            success=False,
+                            method="call_llm_stream",
+                            duration=duration,
+                        )
+                    except Exception as sqlite_err:
+                        logger.warning(f"[{self.name}] Failed to record token usage to SQLite: {sqlite_err}")
                     logger.error(
                         f"[{self.name}] Stream failed after {attempt + 1}/{max_retries + 1} attempts: {e}"
                     )
@@ -716,7 +770,8 @@ class BaseAgent(ABC):
         messages: List[Dict[str, str]],
         temperature: Optional[float],
         max_tokens: Optional[int],
-        stream: bool
+        stream: bool,
+        usage_collector: Optional[Dict[str, Any]] = None,
     ) -> Union[str, AsyncGenerator[str, None]]:
         """内部LLM调用实现"""
         # 对于非 openai_chat 类型，委托给 LLMClient 处理
@@ -728,7 +783,8 @@ class BaseAgent(ABC):
                 max_tokens=max_tokens,
                 system_prompt=self.system_prompt,
                 stream=stream,
-                enable_retry=False  # BaseAgent 自己处理重试
+                enable_retry=False,  # BaseAgent 自己处理重试
+                usage_collector=usage_collector,
             )
         
         start_time = time.time()
@@ -760,18 +816,25 @@ class BaseAgent(ABC):
         
         try:
             if stream:
-                return self._stream_response(params)
+                return self._stream_response(params, usage_collector=usage_collector)
             else:
                 if self._should_prefer_streaming_requests():
+                    usage_collector = {}
                     content = await self._collect_stream_response_text(
                         params,
                         emit_callback=True,
+                        usage_collector=usage_collector,
                     )
                     duration = time.time() - start_time
+                    tokens_in, tokens_out = extract_token_usage(
+                        usage_collector.get("usage"),
+                        fallback_tokens_in=estimate_tokens_from_messages(params.get("messages", [])),
+                        fallback_tokens_out=estimate_tokens_from_text(content),
+                    )
                     self.metrics.record_call(
                         agent_name=self.name,
-                        tokens_in=0,
-                        tokens_out=0,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
                         duration=duration,
                         success=True,
                         method="call_llm_stream_aggregated"
@@ -780,8 +843,8 @@ class BaseAgent(ABC):
                         record_token_usage(
                             agent_name=self.name,
                             model=params['model'],
-                            tokens_in=0,
-                            tokens_out=0,
+                            tokens_in=tokens_in,
+                            tokens_out=tokens_out,
                             success=True,
                             method="call_llm_stream_aggregated",
                             duration=duration
@@ -800,12 +863,18 @@ class BaseAgent(ABC):
                         logger.warning(
                             f"[{self.name}] Non-stream request rejected by provider, retrying with streaming fallback"
                         )
-                        content = await self._collect_stream_response_text(params)
+                        usage_collector = {}
+                        content = await self._collect_stream_response_text(params, usage_collector=usage_collector)
                         duration = time.time() - start_time
+                        tokens_in, tokens_out = extract_token_usage(
+                            usage_collector.get("usage"),
+                            fallback_tokens_in=estimate_tokens_from_messages(params.get("messages", [])),
+                            fallback_tokens_out=estimate_tokens_from_text(content),
+                        )
                         self.metrics.record_call(
                             agent_name=self.name,
-                            tokens_in=0,
-                            tokens_out=0,
+                            tokens_in=tokens_in,
+                            tokens_out=tokens_out,
                             duration=duration,
                             success=True,
                             method="call_llm_stream_fallback"
@@ -814,8 +883,8 @@ class BaseAgent(ABC):
                             record_token_usage(
                                 agent_name=self.name,
                                 model=params['model'],
-                                tokens_in=0,
-                                tokens_out=0,
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
                                 success=True,
                                 method="call_llm_stream_fallback",
                                 duration=duration
@@ -855,8 +924,11 @@ class BaseAgent(ABC):
                 
                 # 计算token使用
                 usage = getattr(response, 'usage', None)
-                tokens_in = usage.prompt_tokens if usage else 0
-                tokens_out = usage.completion_tokens if usage else 0
+                tokens_in, tokens_out = extract_token_usage(
+                    usage,
+                    fallback_tokens_in=estimate_tokens_from_messages(full_messages),
+                    fallback_tokens_out=estimate_tokens_from_text(content),
+                )
                 
                 # 记录指标（内存）
                 duration = time.time() - start_time
@@ -905,7 +977,7 @@ class BaseAgent(ABC):
                 record_token_usage(
                     agent_name=self.name,
                     model=params.get('model', ''),
-                    tokens_in=0,
+                    tokens_in=estimate_tokens_from_messages(params.get("messages", [])),
                     tokens_out=0,
                     success=False,
                     method="call_llm",
@@ -958,6 +1030,15 @@ class BaseAgent(ABC):
     _is_retryable_stream_error = _is_retryable_error
 
     @staticmethod
+    def _is_stream_options_unsupported(error: Exception) -> bool:
+        """识别不支持 stream_options.include_usage 的 OpenAI 兼容接口。"""
+        error_lower = str(error or "").lower()
+        return (
+            "stream_options" in error_lower
+            and any(token in error_lower for token in ("unsupported", "unknown", "extra", "unrecognized", "not allowed", "unexpected", "invalid"))
+        )
+
+    @staticmethod
     def _strip_stream_overlap(existing_text: str, incoming_text: str, max_overlap: int = 256) -> str:
         """去掉续传内容与已输出尾部的重叠前缀，避免重复显示。"""
         if not existing_text or not incoming_text:
@@ -988,12 +1069,17 @@ class BaseAgent(ABC):
         resumed_messages.append({"role": "user", "content": resume_instruction})
         return resumed_messages
 
-    async def _collect_stream_response_text(self, params: Dict[str, Any], emit_callback: bool = False) -> str:
+    async def _collect_stream_response_text(
+        self,
+        params: Dict[str, Any],
+        emit_callback: bool = False,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """将流式响应聚合成普通文本，供非流式调用兜底使用。"""
         stream_params = dict(params)
         stream_params["stream"] = True
         chunks: List[str] = []
-        async for chunk in self._stream_response(stream_params):
+        async for chunk in self._stream_response(stream_params, usage_collector=usage_collector):
             if chunk:
                 chunks.append(chunk)
                 if emit_callback:
@@ -1171,11 +1257,30 @@ class BaseAgent(ABC):
         
         return None
     
-    async def _stream_response(self, params: dict) -> AsyncGenerator[str, None]:
+    async def _stream_response(
+        self,
+        params: dict,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
         """流式响应生成器"""
         try:
-            response = await self._create_chat_completion_with_rotation(params)
-            
+            request_params = dict(params)
+            if request_params.get("stream") and "stream_options" not in request_params:
+                request_params["stream_options"] = {"include_usage": True}
+            try:
+                response = await self._create_chat_completion_with_rotation(request_params)
+            except Exception as exc:
+                if "stream_options" in request_params and self._is_stream_options_unsupported(exc):
+                    logger.info(
+                        f"[{self.name}] 当前模型接口不支持 stream_options.include_usage，退回流式估算统计"
+                    )
+                    if usage_collector is not None:
+                        usage_collector["usage_unavailable_reason"] = "stream_options_unsupported"
+                    request_params.pop("stream_options", None)
+                    response = await self._create_chat_completion_with_rotation(request_params)
+                else:
+                    raise
+
             # 验证响应是否是流式生成器
             if isinstance(response, str):
                 logger.error(f"[{self.name}] 流式API返回了字符串: {response[:200]}")
@@ -1189,19 +1294,24 @@ class BaseAgent(ABC):
                     yield chunk
                     continue
 
-                if not hasattr(chunk, 'choices') or not chunk.choices:
+                usage = chunk.get("usage") if isinstance(chunk, dict) else getattr(chunk, "usage", None)
+                if usage is not None and usage_collector is not None:
+                    usage_collector["usage"] = usage
+
+                choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+                if not choices:
                     continue
 
-                choice = chunk.choices[0]
-                delta = getattr(choice, 'delta', None)
-                content = getattr(delta, 'content', None) if delta is not None else None
+                choice = choices[0]
+                delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, 'delta', None)
+                content = delta.get("content") if isinstance(delta, dict) else getattr(delta, 'content', None) if delta is not None else None
                 if content:
                     yield content
                     continue
 
                 # 部分 OpenAI 兼容中转会发送 delta=None 或仅含 finish_reason 的收尾 chunk。
                 # 这类 chunk 不应中断整个流式回复。
-                finish_reason = getattr(choice, 'finish_reason', None)
+                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else getattr(choice, 'finish_reason', None)
                 if finish_reason:
                     logger.debug(f"[{self.name}] Stream choice finished: {finish_reason}")
                     continue
@@ -1597,8 +1707,10 @@ class BaseAgent(ABC):
             {"success": bool, "data": Any, "error": str}
         """
         try:
+            from ..constants import get_data_dir, get_skills_dir
+
             # 检查Skill是否启用
-            config_path = Path(__file__).parent.parent / "data" / "skills_config.json"
+            config_path = get_data_dir() / "skills_config.json"
             if config_path.exists():
                 import json
                 try:
@@ -1613,7 +1725,7 @@ class BaseAgent(ABC):
             # 动态导入 Skill
             # 将 skill_name 中的 "-" 转换为 "_" 用于目录名
             skill_dir_name = skill_name.replace("-", "_")
-            skill_path = Path(__file__).parent.parent.parent / "skills" / skill_dir_name / "scripts"
+            skill_path = get_skills_dir() / skill_dir_name / "scripts"
             
             if not skill_path.exists():
                 logger.error(f"[{self.name}] Skill directory not found: {skill_path}")

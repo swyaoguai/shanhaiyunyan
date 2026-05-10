@@ -157,6 +157,54 @@ describe('settings DOM regressions', () => {
     expect(document.getElementById('cs-status-badge')?.textContent).toBe('未启用');
   });
 
+  it('shows local ONNX knowledge base provider as configured without an API key', async () => {
+    document.body.innerHTML = '<div id="settings-content"></div>';
+    window.store.currentProjectId = 'project-1';
+    window.apiCall.mockImplementation(async (url) => {
+      if (url === '/api/knowledge-base/config') {
+        return {
+          embedding_provider: 'local_onnx',
+          siliconflow_api_key: '',
+          siliconflow_api_key_set: false,
+          siliconflow_base_url: 'https://api.siliconflow.cn/v1',
+          siliconflow_model: 'BAAI/bge-m3',
+          siliconflow_embedding_dim: 1024,
+          onnx_model_installed: true,
+          onnx_model_metadata: {
+            model_id: 'Xenova/bge-small-zh-v1.5',
+            embedding_dim: 512
+          },
+          onnx_model_dir: 'novel_agent/models/embedding/default',
+          onnx_model_file: 'model.onnx',
+          onnx_pooling: 'cls',
+          onnx_max_length: 512,
+          is_configured: true,
+          default_top_k: 5,
+          vector_weight: 0.7,
+          fulltext_weight: 0.3,
+          chunk_size: 500,
+          chunk_overlap: 50
+        };
+      }
+      if (url === '/api/knowledge-base/stats') {
+        return { chapter_count: 0, chunk_count: 0, vector_count: 0, storage_size_mb: 0, chapters: [] };
+      }
+      if (url === '/api/chapter-summary-config') {
+        return { auto_summary_enabled: false };
+      }
+      throw new Error(`Unexpected API call: ${url}`);
+    });
+
+    await window.loadWritingSettings();
+
+    const vectorConfigTitle = Array.from(document.querySelectorAll('.settings-section-title'))
+      .find((element) => element.textContent.includes('向量化服务配置'));
+    expect(vectorConfigTitle?.textContent).toContain('已配置');
+    expect(vectorConfigTitle?.textContent).not.toContain('未配置');
+    expect(document.body.textContent).toContain('当前使用：本地模型包');
+    expect(document.body.textContent).toContain('已安装：Xenova/bge-small-zh-v1.5 · 512维');
+  });
+
   it('uses semantic buttons for primary shell controls in the main template', () => {
     const html = readFileSync(path.join(ROOT, 'novel_agent/web/templates/index.html'), 'utf8');
 
@@ -210,6 +258,104 @@ describe('settings DOM regressions', () => {
     expect(document.querySelector('#active-config-select')).not.toBeNull();
     expect(document.body.textContent).toContain('::::not-a-valid-url');
     expect(document.querySelector('#active-model-select').value).toBe('demo-model');
+  });
+
+  it('renders multiple API key guidance and key count in API settings', () => {
+    document.body.innerHTML = window.renderGlobalApiSettingsView({
+      configs: [
+        {
+          id: 'cfg-keys',
+          name: '多Key配置',
+          api_base: 'https://api.example.com/v1',
+          models: ['gpt-5.4'],
+          api_key_set: true,
+          api_keys: [
+            { id: 'a', key_set: true, key_preview: 'sk-a****', is_enabled: true },
+            { id: 'b', key_set: true, key_preview: 'sk-b****', is_enabled: true }
+          ]
+        }
+      ],
+      activeConfig: null,
+      activeConfigId: '',
+      activeModel: '',
+      hasConfigs: true,
+      llmTimeouts: {},
+      shortStoryTimeouts: {},
+      llmRanges: {},
+      shortStoryRange: { min: 30, max: 600 }
+    });
+
+    window.currentApiConfigs = [
+      {
+        id: 'cfg-keys',
+        name: '多Key配置',
+        api_base: 'https://api.example.com/v1',
+        models: ['gpt-5.4'],
+        api_key_set: true,
+        api_keys: [
+          { id: 'a', key_set: true, key_preview: 'sk-a****', is_enabled: true },
+          { id: 'b', key_set: true, key_preview: 'sk-b****', is_enabled: true }
+        ]
+      }
+    ];
+    window.eval(`currentApiConfigs = ${JSON.stringify(window.currentApiConfigs)}; editingConfigId = null;`);
+    window.bindGlobalAPISettingsEvents({});
+    document.querySelector('.edit-config-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(document.body.textContent).toContain('已配置 2 个Key');
+    expect(document.body.textContent).toContain('多个 Key 可一行一个');
+    expect(document.body.textContent).toContain('逗号或分号分隔（中英文标点都可以）');
+    expect(document.body.textContent).toContain('第一个 Key 作为主 Key');
+  });
+
+  it('splits multiple API keys when saving a config', async () => {
+    document.body.innerHTML = window.renderGlobalApiSettingsView({
+      configs: [],
+      activeConfig: null,
+      activeConfigId: '',
+      activeModel: '',
+      hasConfigs: false,
+      llmTimeouts: {},
+      shortStoryTimeouts: {},
+      llmRanges: {},
+      shortStoryRange: { min: 30, max: 600 }
+    });
+
+    window.apiCall = vi.fn(async (url, method, body) => {
+      if (url === '/api/api-configs' && method === 'POST') {
+        return { success: true, config: body };
+      }
+      if (url === '/api/api-configs') {
+        return { configs: [], active_config_id: '', active_model: '' };
+      }
+      if (url === '/api/timeout-settings') {
+        return { data: {} };
+      }
+      throw new Error(`Unexpected API call: ${url}`);
+    });
+    window.showToast = vi.fn();
+    window.eval('currentApiConfigs = []; editingConfigId = null;');
+
+    window.bindGlobalAPISettingsEvents({});
+    document.getElementById('add-new-config')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    document.getElementById('config-name').value = '多Key配置';
+    document.getElementById('config-api-base').value = 'https://api.example.com/v1';
+    document.getElementById('config-api-key').value = 'sk-one, sk-two；sk-three\nsk-one';
+    document.getElementById('save-config-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(window.apiCall).toHaveBeenCalledWith('/api/api-configs', 'POST', expect.objectContaining({
+        name: '多Key配置',
+        api_base: 'https://api.example.com/v1',
+        api_key: 'sk-one',
+        api_keys: [
+          { id: '', key: 'sk-one', remark: 'Key 1', is_enabled: true, created_at: '' },
+          { id: '', key: 'sk-two', remark: 'Key 2', is_enabled: true, created_at: '' },
+          { id: '', key: 'sk-three', remark: 'Key 3', is_enabled: true, created_at: '' }
+        ]
+      }));
+    });
   });
 
   it('renders colloquial test-result entry in API settings', () => {
@@ -430,6 +576,12 @@ describe('short-story DOM regressions', () => {
     expect(document.querySelector('.short-story-nav-entry')).toBeInstanceOf(HTMLButtonElement);
     expect(document.querySelector('.short-story-nav-entry--secondary')).toBeInstanceOf(HTMLButtonElement);
     expect(document.querySelector('.short-story-nav-chapter')).toBeInstanceOf(HTMLButtonElement);
+
+    const settingsEntry = document.querySelector('.short-story-nav-settings');
+    expect(settingsEntry).toBeInstanceOf(HTMLButtonElement);
+    settingsEntry.click();
+    expect(window.switchModule).toHaveBeenCalledWith('settings');
+    expect(window.loadSettingsTab).toHaveBeenCalledWith('api');
   });
 
   it('keeps chapter blueprint metadata visible in the final view', () => {
@@ -457,6 +609,27 @@ describe('short-story DOM regressions', () => {
     expect(document.body.textContent).toContain('核心事件：她在站台重启调查。');
     expect(document.body.textContent).toContain('叙事功能：铺垫');
     expect(document.body.textContent).toContain('情绪节点：【虐点】她意识到对方再次失约。');
+  });
+
+  it('keeps final return action separate from export actions', () => {
+    document.body.innerHTML = window.renderShortStoryFinalView({
+      selected_title: '雨夜站台',
+      selected_synopsis: '她回到旧地。',
+      final_output: '成稿正文',
+      story_tags: { main_category: '悬疑', all_tags: ['旧案'] },
+      chapters: [{ chapter_number: 1, title: '雨夜站台', content: '正文内容。' }]
+    });
+
+    const side = document.querySelector('.short-story-hero-side');
+    const returnRow = document.querySelector('.short-story-final-return-row');
+    const returnButton = document.getElementById('short-story-back-to-panel');
+    const exportRow = document.getElementById('short-story-final-copy')?.closest('.short-story-action-row');
+
+    expect(side).not.toBeNull();
+    expect(returnRow).not.toBeNull();
+    expect(returnButton?.textContent).toContain('返回创作');
+    expect(exportRow).not.toBe(returnRow);
+    expect(exportRow?.textContent).toContain('导出 TXT');
   });
 
   it('renders visible short-story scroll shortcut buttons', () => {

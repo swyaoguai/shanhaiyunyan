@@ -52,9 +52,9 @@ def client_with_project(tmp_path):
 
 def test_novel_to_script_import_supports_txt(client_with_project: TestClient):
     content = (
-        "第1章 雨夜\n"
+        "第123章 雨夜\n"
         "夜色压着城墙，主角听见巷子尽头有人呼救。\n"
-        "第2章 追踪\n"
+        "第124章 追踪\n"
         "他追入旧巷，发现地上有未干的血迹。"
     )
 
@@ -69,6 +69,7 @@ def test_novel_to_script_import_supports_txt(client_with_project: TestClient):
     assert payload["data"]["source_type"] == "file"
     assert payload["data"]["chapter_count"] >= 2
     assert payload["data"]["source_filename"] == "sample.txt"
+    assert [chapter["chapter_number"] for chapter in payload["data"]["source_chapters"]] == [123, 124]
     assert payload["data"]["analysis"]["recommended_mode"] in {"full_text", "chapterwise", "batchwise"}
 
 

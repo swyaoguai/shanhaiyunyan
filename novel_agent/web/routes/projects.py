@@ -863,8 +863,10 @@ async def update_project(project_id: str, request: ProjectUpdateRequest):
 @router.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
     from ...project_manager import get_project_manager
+    from ..runtime_refresh import release_runtime_for_project_delete
 
     pm = get_project_manager()
+    release_runtime_for_project_delete(project_id)
     if pm.delete_project(project_id):
         return JSONResponse({"success": True})
     raise HTTPException(status_code=400, detail="Cannot delete project")
@@ -1144,12 +1146,41 @@ async def import_novel_to_collab_mode(
     if not isinstance(chapters, list):
         chapters = []
 
+    def _positive_chapter_number(value) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return number if number > 0 else 0
+
+    existing_numbers = {
+        number
+        for item in chapters
+        if isinstance(item, dict)
+        for number in [_positive_chapter_number(item.get("chapter_number"))]
+        if number > 0
+    }
+    existing_max = max(existing_numbers or {len(chapters)})
+    parsed_numbers = [
+        _positive_chapter_number(chapter.get("chapter_number"))
+        for chapter in parsed["chapters"]
+        if _positive_chapter_number(chapter.get("chapter_number")) > 0
+    ]
+    number_offset = 0
+    if normalized_merge_mode == "append" and parsed_numbers and existing_max > 0:
+        imported_min = min(parsed_numbers)
+        has_collision = bool(existing_numbers.intersection(parsed_numbers))
+        if has_collision or imported_min <= existing_max:
+            number_offset = existing_max - imported_min + 1
+
     imported_items = []
     for chapter in parsed["chapters"]:
+        source_number = _positive_chapter_number(chapter.get("chapter_number"))
+        chapter_number = source_number + number_offset if source_number > 0 else existing_max + len(imported_items) + 1
         imported_items.append(
             {
-                "title": chapter.get("title") or f"第{chapter.get('chapter_number', len(chapters) + len(imported_items) + 1)}章",
-                "chapter_number": chapter.get("chapter_number") or (len(chapters) + len(imported_items) + 1),
+                "title": chapter.get("title") or f"第{chapter_number}章",
+                "chapter_number": chapter_number,
                 "summary": chapter.get("summary", ""),
                 "content": chapter.get("content", ""),
                 "word_count": chapter.get("word_count", 0),

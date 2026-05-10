@@ -139,6 +139,9 @@ class SessionState:
                     fragments.append(f"状态：{item.get('status')}")
                 if item.get("location"):
                     fragments.append(f"位置：{item.get('location')}")
+                abilities = item.get("learned_abilities") or item.get("abilities") or []
+                if isinstance(abilities, list) and abilities:
+                    fragments.append("能力：" + "、".join(str(ability) for ability in abilities[-4:] if str(ability).strip()))
                 notes = item.get("notes") or []
                 if isinstance(notes, list) and notes:
                     fragments.append(f"最近表现：{str(notes[-1])[:80]}")

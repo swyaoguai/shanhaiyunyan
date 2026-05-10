@@ -70,7 +70,7 @@ class RateLimitSettings(BaseSettings):
 
 class KnowledgeBaseSettings(BaseSettings):
     """知识库配置"""
-    model_config = SettingsConfigDict(env_prefix="KB_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="KB_", env_file=".env", extra="ignore", env_ignore_empty=True)
 
     enabled: bool = True
     embedding_provider: str = "api"
@@ -84,6 +84,14 @@ class KnowledgeBaseSettings(BaseSettings):
     onnx_pooling: str = "cls"
     chunk_size: int = 500
     chunk_overlap: int = 50
+
+    @field_validator("onnx_threads", mode="before")
+    @classmethod
+    def validate_onnx_threads(cls, v):
+        """Treat blank env values as auto thread selection."""
+        if v == "":
+            return None
+        return v
 
 
 class LoggingSettings(BaseSettings):
@@ -131,10 +139,8 @@ class PathsSettings(BaseSettings):
     @staticmethod
     def _get_app_root() -> Path:
         """获取应用根目录"""
-        import sys
-        if getattr(sys, 'frozen', False):
-            return Path(sys.executable).parent.parent
-        return Path.cwd()
+        from .constants import get_app_root
+        return get_app_root()
 
     @staticmethod
     def _get_default_data_dir() -> Path:

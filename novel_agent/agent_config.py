@@ -11,11 +11,21 @@ from pathlib import Path
 from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, asdict, field
 
-from .constants import LLM_DEFAULTS
+from .constants import LLM_DEFAULTS, get_app_root, get_data_dir
 from .utils.llm_params import normalize_max_tokens
 from .utils.atomic_write import atomic_write_json, atomic_write_text
 
 logger = logging.getLogger(__name__)
+
+
+def _default_agent_config_dir() -> Path:
+    """Return writable config dir, using portable external data when frozen."""
+    return get_data_dir()
+
+
+def _legacy_agent_config_dir() -> Path:
+    """Legacy in-package data dir used by older development builds."""
+    return Path(__file__).parent / "data"
 
 
 @dataclass
@@ -370,15 +380,35 @@ class AgentConfigManager:
         Args:
             config_dir: 配置文件存储目录
         """
-        self.config_dir = config_dir or Path(__file__).parent / "data"
+        should_migrate_legacy = config_dir is None
+        self.config_dir = Path(config_dir) if config_dir is not None else _default_agent_config_dir()
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.config_dir / "agent_configs.json"
         self.global_config_file = self.config_dir / "global_api_config.json"
+        if should_migrate_legacy:
+            self._migrate_legacy_config_files()
         self.configs: Dict[str, AgentModelConfig] = {}
         self.global_config: GlobalAPIConfig = GlobalAPIConfig()
         self.multi_config: MultiAPIConfig = MultiAPIConfig()
         self._load_configs()
         self._load_global_config()
+
+    def _migrate_legacy_config_files(self) -> None:
+        """Copy existing config files from the old package data dir when needed."""
+        legacy_dir = _legacy_agent_config_dir()
+        if legacy_dir.resolve() == self.config_dir.resolve():
+            return
+
+        for filename in ("agent_configs.json", "global_api_config.json"):
+            target = self.config_dir / filename
+            source = legacy_dir / filename
+            if target.exists() or not source.exists():
+                continue
+            try:
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info("Migrated legacy agent config file to writable data dir: %s", target)
+            except Exception as exc:
+                logger.warning("Failed to migrate legacy agent config file %s: %s", source, exc)
 
     @staticmethod
     def _normalize_config_max_tokens(max_tokens: Any, *, source: str) -> int:
@@ -544,7 +574,7 @@ class AgentConfigManager:
                 return
             
             # 获取.env文件路径
-            env_path = Path(__file__).parent.parent / ".env"
+            env_path = get_app_root() / ".env"
             
             # 读取现有.env内容
             env_content = {}

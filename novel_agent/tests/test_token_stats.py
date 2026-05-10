@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from novel_agent.utils.token_stats import TokenStatsStore, TokenUsageRecord
+from novel_agent.utils.token_stats import TokenStatsStore, TokenUsageRecord, extract_token_usage
 
 
 class TestTokenStatsStore:
@@ -298,6 +298,21 @@ class TestTokenUsageRecord:
         assert data["tokens_in"] == 100
         assert data["tokens_out"] == 200
         assert data["success"] is True
+
+
+class TestTokenUsageExtraction:
+    """Token usage payload extraction tests."""
+
+    def test_extract_token_usage_supports_total_only_payload(self):
+        """测试仅返回 total_tokens 的兼容接口会按估算输入拆分输出。"""
+        tokens_in, tokens_out = extract_token_usage(
+            {"total_tokens": 120},
+            fallback_tokens_in=80,
+            fallback_tokens_out=20,
+        )
+
+        assert tokens_in == 80
+        assert tokens_out == 40
 
 
 if __name__ == "__main__":

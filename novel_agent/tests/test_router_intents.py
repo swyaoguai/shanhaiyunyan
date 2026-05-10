@@ -55,6 +55,68 @@ async def test_intent_create_novel():
 
 
 @pytest.mark.asyncio
+async def test_creation_requirement_extraction_uses_model_for_ancient_romance_request(monkeypatch):
+    async def fake_call_llm(self, messages, temperature=None, **kwargs):
+        return json.dumps({
+            "is_creation_request": True,
+            "novel_type": "古代言情",
+            "theme": "古代、姐弟恋、团宠",
+            "requirements": "篇幅约50000字；主角姓名与人物设定由助手合理安排",
+            "protagonist": "",
+            "plot_idea": "",
+            "volume_count": 1,
+            "chapters_per_volume": 17,
+            "target_word_count": 50000,
+            "confidence": 0.9,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(RouterAgent, "call_llm", fake_call_llm)
+
+    ra = RouterAgent()
+    message = "我想写一本古代的姐弟恋团宠小说，篇幅在5w字左右。主角名字什么的你帮我安排"
+
+    info = await ra._build_creation_requirements_async({}, message)
+
+    assert info["novel_type"] == "古代言情"
+    assert info["theme"] == "古代、姐弟恋、团宠"
+    assert info["target_word_count"] == 50000
+    assert info["chapters_per_volume"] > 5
+    assert info.get("protagonist", "") == ""
+    assert info["plot_idea"] == ""
+    assert "主角姓名与人物设定由助手合理安排" in info["requirements"]
+    assert info["ai_autonomy_requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_creation_requirement_extraction_marks_freeform_ai_autonomy(monkeypatch):
+    async def fake_call_llm(self, messages, temperature=None, **kwargs):
+        return json.dumps({
+            "is_creation_request": True,
+            "novel_type": "古代言情",
+            "theme": "古代甜宠",
+            "requirements": "篇幅约50000字",
+            "protagonist": "",
+            "plot_idea": "",
+            "volume_count": 1,
+            "chapters_per_volume": 17,
+            "target_word_count": 50000,
+            "ai_autonomy_requested": True,
+            "confidence": 0.9,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(RouterAgent, "call_llm", fake_call_llm)
+
+    ra = RouterAgent()
+    message = "我想写一本古代的甜宠题材小说，篇幅5W字，其他的你随便帮我安排"
+
+    info = await ra._build_creation_requirements_async({}, message)
+
+    assert info["ai_autonomy_requested"] is True
+    assert "未指定的世界观、角色姓名、人物设定和剧情细节由助手自主创作" in info["requirements"]
+    assert info["plot_idea"] == ""
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
     [

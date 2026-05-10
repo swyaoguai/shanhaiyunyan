@@ -98,8 +98,10 @@ class Config:
             True
         """
         try:
-            # 优先使用项目根目录下的.env（与Web路由写入路径保持一致）
-            env_file = Path(__file__).resolve().parent.parent / ".env"
+            from .constants import get_app_root
+
+            # 优先使用运行根目录下的 .env；便携版中为 exe 同级目录。
+            env_file = get_app_root() / ".env"
 
             # 兼容：若项目根目录不存在，则回退到当前工作目录
             if not env_file.exists():
@@ -114,8 +116,21 @@ class Config:
             # 使用encoding='utf-8'避免Windows GBK编码问题
             load_dotenv(dotenv_path=env_file, override=True, encoding='utf-8')
 
-            # 重新创建LLMConfig实例以捕获更新的环境变量
-            cls.llm = LLMConfig()
+            # 重新创建配置实例以捕获更新的环境变量。
+            # LLMConfig/ServerConfig 的字段默认值在模块导入时已求值，
+            # 因此热重载时必须显式传入 os.environ 中的新值。
+            cls.llm = LLMConfig(
+                api_key=os.getenv("OPENAI_API_KEY", ""),
+                api_base=os.getenv("OPENAI_API_BASE", API_ENDPOINTS.OPENAI_BASE_URL),
+                model=os.getenv("OPENAI_MODEL", LLM_DEFAULTS.DEFAULT_MODEL),
+                max_tokens=int(os.getenv("MAX_TOKENS", str(LLM_DEFAULTS.MAX_TOKENS))),
+                temperature=float(os.getenv("TEMPERATURE", str(LLM_DEFAULTS.TEMPERATURE))),
+            )
+            cls.server = ServerConfig(
+                host=os.getenv("HOST", SERVER_DEFAULTS.HOST),
+                port=int(os.getenv("PORT", str(SERVER_DEFAULTS.PORT))),
+                debug=os.getenv("DEBUG", "false").lower() == "true",
+            )
 
             logger.info("Configuration reloaded successfully")
             return True

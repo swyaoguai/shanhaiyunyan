@@ -1671,6 +1671,73 @@ class TestCommunicatorMessageBusFallback:
 
 class TestRouterContractDraft:
     @pytest.mark.asyncio
+    async def test_router_creation_requirements_semantic_fallback_handles_mixed_chinese_request(self, mock_model_config):
+        with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:
+            mock_manager.return_value.get_effective_config.return_value = mock_model_config
+
+            from novel_agent.agents.router_agent import RouterAgent
+
+            router = RouterAgent()
+            message = "我想写古代甜宠题材的小说，篇幅5w字左右，主角叫天齐，女主角你随便帮我想个吧"
+            requirements = await router._build_creation_requirements_async(
+                {"creation_requirements": {"novel_type": "言情", "plot_idea": message}},
+                message,
+            )
+
+        assert requirements["novel_type"] == "古代言情"
+        assert requirements["theme"] == "古代甜宠"
+        assert requirements["protagonist"] == "天齐"
+        assert requirements["target_word_count"] == 50000
+        assert requirements["chapters_per_volume"] >= 10
+        assert "女主角由助手构思" in requirements["requirements"]
+        assert requirements["ai_autonomy_requested"] is True
+        assert requirements["plot_idea"] != requirements["source_message"]
+
+    @pytest.mark.asyncio
+    async def test_router_contract_draft_keeps_unspecified_plot_empty_for_broad_brief(self, mock_model_config):
+        with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:
+            mock_manager.return_value.get_effective_config.return_value = mock_model_config
+
+            from novel_agent.agents.router_agent import RouterAgent
+
+            router = RouterAgent()
+            message = "我想写一本古代的甜宠题材小说，篇幅在5万字左右。其他的信息你帮我完善就行"
+            requirements = await router._build_creation_requirements_async({}, message)
+
+        assert requirements["novel_type"] == "古代言情"
+        assert requirements["theme"] == "古代甜宠"
+        assert requirements["target_word_count"] == 50000
+        assert requirements["chapters_per_volume"] >= 10
+        assert "篇幅约50000字" in requirements["requirements"]
+        assert requirements["ai_autonomy_requested"] is True
+        assert requirements["plot_idea"] == ""
+
+    @pytest.mark.asyncio
+    async def test_creation_contract_passes_ai_autonomy_to_character_task(self, mock_model_config):
+        with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:
+            mock_manager.return_value.get_effective_config.return_value = mock_model_config
+
+            from novel_agent.agents.router_agent import RouterAgent
+
+            router = RouterAgent()
+            message = "我想写一本古代甜宠小说，篇幅5w字，其他的你随便帮我安排"
+            requirements = await router._build_creation_requirements_async({}, message)
+            contract_payload = router._build_creation_contract_payload(
+                requirements,
+                context={"session_id": "copilot"},
+                user_confirmed=False,
+            )
+
+        assert contract_payload["scope"]["ai_autonomy_requested"] is True
+        character_task = next(
+            task for task in contract_payload["task_graph"]
+            if task["task_type"] == "build_characters"
+        )
+        assert character_task["inputs"]["ai_autonomy_requested"] is True
+        assert character_task["inputs"]["request_mode"] == "autonomous_draft"
+        assert "用户已授权助手自主安排" in character_task["inputs"]["character_request"]
+
+    @pytest.mark.asyncio
     async def test_router_create_novel_returns_draft_contract_confirmation_payload(self, mock_model_config):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:

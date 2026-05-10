@@ -79,3 +79,54 @@ def refresh_runtime_after_project_switch(previous_project_id: str, current_proje
         "continuous_writer_cache_cleared": continuous_writer_cache_cleared,
         "coordinator_switched": coordinator_switched,
     }
+
+
+def release_runtime_for_project_delete(project_id: str) -> Dict[str, Any]:
+    """删除项目前释放持有项目知识库文件句柄的运行态对象。"""
+    project_id = str(project_id or "").strip()
+    result: Dict[str, Any] = {
+        "project_id": project_id,
+        "knowledge_base_closed": False,
+        "continuous_writer_cache_cleared": 0,
+    }
+    if not project_id:
+        return result
+
+    router_agent = get_router_agent()
+    coordinator = get_coordinator()
+
+    runtime_kbs = []
+    for owner in (router_agent, coordinator):
+        kb = getattr(owner, "knowledge_base", None) if owner is not None else None
+        if kb is not None and getattr(kb, "project_id", "") == project_id and kb not in runtime_kbs:
+            runtime_kbs.append(kb)
+
+    if router_agent is not None and getattr(getattr(router_agent, "knowledge_base", None), "project_id", "") == project_id:
+        try:
+            router_agent.set_knowledge_base(None)
+        except Exception as exc:
+            logger.warning(f"[RuntimeRefresh] 清空路由智能体知识库失败: {exc}")
+
+    if coordinator is not None and getattr(getattr(coordinator, "knowledge_base", None), "project_id", "") == project_id:
+        try:
+            coordinator.set_knowledge_base(None)
+        except Exception as exc:
+            logger.warning(f"[RuntimeRefresh] 清空协调器知识库失败: {exc}")
+
+    for kb in runtime_kbs:
+        close = getattr(kb, "close", None)
+        if callable(close):
+            try:
+                close()
+                result["knowledge_base_closed"] = True
+            except Exception as exc:
+                logger.warning(f"[RuntimeRefresh] 关闭项目知识库失败 project_id={project_id}: {exc}")
+
+    try:
+        from .routes.continuous_write import clear_project_runtime
+
+        result["continuous_writer_cache_cleared"] = clear_project_runtime(project_id)
+    except Exception as exc:
+        logger.warning(f"[RuntimeRefresh] 清理删除项目运行态失败: {exc}")
+
+    return result

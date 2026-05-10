@@ -22,6 +22,8 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from ...constants import SERVER_DEFAULTS
+from ...constants import get_app_root
+from ...knowledge_base.logic_layer.chapter_marker import ChapterMarker
 from ...utils.atomic_write import atomic_write_text
 from ..models.requests import (
     KnowledgeBaseConfigRequest,
@@ -64,7 +66,7 @@ def _atomic_write_text(path: Path, content: str, old_content: str = None) -> Non
 
 
 def _repo_default_onnx_model_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "models" / "embedding" / "default"
+    return get_app_root() / "novel_agent" / "models" / "embedding" / "default"
 
 
 def _public_default_onnx_model_dir() -> str:
@@ -76,8 +78,7 @@ def _resolve_onnx_model_dir(model_dir: str) -> Path:
     path = Path(raw)
     if path.is_absolute():
         return path
-    repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / path
+    return get_app_root() / path
 
 
 def _inspect_local_onnx_model(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -508,7 +509,32 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                 "message": f"已解析 {len(items)} 个段落"
             })
         elif request.split_mode == "chapter":
-            chapter_pattern = r'(?:^|\n)(#{1,3}\s+.+|第[一二三四五六七八九十百千万\d]+章.*)(?:\n|$)'
+            marker = ChapterMarker()
+            detected_chapters = marker.detect_chapters(content)
+
+            if detected_chapters:
+                items = []
+                for chapter in detected_chapters:
+                    chapter_content = (chapter.content or "").strip()
+                    if not chapter_content:
+                        continue
+                    items.append({
+                        "id": f"{int(time.time() * 1000)}_{len(items)}",
+                        "name": chapter.title or f"第{chapter.chapter_number or len(items) + 1}章",
+                        "description": chapter_content[:100] + "..." if len(chapter_content) > 100 else chapter_content,
+                        "details": chapter_content,
+                        "source_file": filename,
+                        "created_at": datetime.datetime.now().isoformat()
+                    })
+
+                return JSONResponse({
+                    "success": True,
+                    "items": items,
+                    "count": len(items),
+                    "message": f"已解析 {len(items)} 个章节"
+                })
+
+            chapter_pattern = r'(?:^|\n)(#{1,3}\s+.+|第[一二三四五六七八九十百千万\d]+章(?:[\s\.:：].*|$))(?:\n|$)'
             parts = re.split(chapter_pattern, content)
             
             items = []

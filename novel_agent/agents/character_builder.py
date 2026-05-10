@@ -42,6 +42,8 @@ class CharacterBuilderAgent(BaseAgent):
             "7. 如果当前请求包含“那、这个、刚才、按上面”等上下文指代，必须以 discussion_context / recent_discussion 为准。\n"
             "8. 不得擅自更换主角名、题材、核心能力、门派/世界背景；信息不足则 missing_info，不要随机补成无关设定。\n"
             "9. 输出中的 confidence 必须是 0~1 的数字。\n"
+            "10. 如果请求模式是 autonomous_draft，或输入声明 ai_autonomy_requested=true，表示用户已经授权助手自主安排未指定内容；"
+            "此时姓名、身份、关系、动机等空白不是缺失信息，必须在既有题材与讨论方向内主动创作可用角色卡。\n"
             "\n"
             "输出格式必须为：\n"
             "{\n"
@@ -68,7 +70,7 @@ class CharacterBuilderAgent(BaseAgent):
             agent_name=self.name,
             capabilities=["character_planning", "story_planning"],
             accept_task_types=["build_characters"],
-            required_inputs=["protagonist"],
+            required_inputs=[],
             produced_outputs=["characters", "missing_info", "confidence"],
             priority=90,
             max_concurrency=1,
@@ -167,9 +169,18 @@ class CharacterBuilderAgent(BaseAgent):
     @staticmethod
     def _build_user_prompt(input_data: Dict[str, Any]) -> str:
         request_mode = str(input_data.get("request_mode") or "draft").strip() or "draft"
+        ai_autonomy_requested = bool(input_data.get("ai_autonomy_requested")) or request_mode == "autonomous_draft"
+        autonomy_note = (
+            "用户已明确表示未指定内容由AI自由发挥或助手安排；请你主动命名、设计身份、关系和人物弧线，"
+            "不要因为姓名/身份/剧情细节未给出而返回 missing_info。"
+            if ai_autonomy_requested
+            else "未授权，缺少关键角色信息时应返回 missing_info。"
+        )
         return (
             "请基于以下信息生成角色卡草稿：\n\n"
             f"## 当前请求模式\n{request_mode}\n\n"
+            f"## AI自主创作授权\n{autonomy_note}\n\n"
+            f"## 自主创作说明\n{str(input_data.get('autonomous_brief') or '').strip() or '无'}\n\n"
             f"## 当前用户请求\n{str(input_data.get('user_request') or '').strip() or '无'}\n\n"
             f"## 角色需求摘要\n{str(input_data.get('character_request') or '').strip() or '无'}\n\n"
             f"## 角色类型提示\n{str(input_data.get('character_role') or '').strip() or '未指定'}\n\n"
@@ -189,6 +200,8 @@ class CharacterBuilderAgent(BaseAgent):
             "3. 关系字段使用对象映射，如 {\"角色A\": \"师徒\"}。\n"
             "4. 必须沿用完整讨论上下文基准中的已确认设定；缺失则 missing_info，不得随机换题。\n"
             "5. 不要输出任何 JSON 以外的内容。\n"
+            "6. 当 AI自主创作授权 为已授权时，第2条和第4条中的“信息不足”只指题材/篇幅/风格完全缺失；"
+            "角色姓名、身份、人物关系和剧情细节未指定时，应由你主动补全。\n"
         )
 
     async def _generate_once(self, input_data: Dict[str, Any], feedback: str = "") -> Tuple[Optional[Dict[str, Any]], str, List[str]]:
@@ -237,11 +250,14 @@ class CharacterBuilderAgent(BaseAgent):
                     part for part in [f"世界名：{world_name}" if world_name else "", f"类型：{world_type}" if world_type else ""]
                     if part
                 )
+        ai_autonomy_requested = bool(request.get("ai_autonomy_requested")) or str(request.get("request_mode") or "").strip() == "autonomous_draft"
         if not str(request.get("character_request") or "").strip():
             request["character_request"] = str(request.get("protagonist") or request.get("plot_idea") or request.get("user_request") or "").strip()
+        if ai_autonomy_requested and not str(request.get("character_request") or "").strip():
+            request["character_request"] = "用户已授权助手自主安排角色姓名、身份、人物关系和人物弧线。"
         minimum_signal = any(
             str(request.get(key) or "").strip()
-            for key in ("character_request", "recent_discussion", "protagonist", "plot_idea", "world_summary")
+            for key in ("character_request", "recent_discussion", "protagonist", "plot_idea", "world_summary", "autonomous_brief")
         )
         if not minimum_signal:
             return {

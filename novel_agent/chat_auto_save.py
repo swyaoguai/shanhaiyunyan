@@ -108,6 +108,30 @@ _NUMBERED_HEADING_RE = re.compile(
 _SHORT_COLON_HEADING_RE = re.compile(r"^\s*([^：:\n]{2,36})[：:]\s*$")
 _CHAPTER_RE = re.compile(r"第\s*([0-9一二三四五六七八九十百千万两零〇]+)\s*章")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.、]\s*)")
+_FAILED_SECTION_TITLE_MARKERS = ("失败", "错误", "异常", "取消", "中止", "未能", "无法")
+_FAILED_SECTION_BODY_MARKERS = (
+    "生成失败",
+    "执行失败",
+    "创建失败",
+    "保存失败",
+    "构建失败",
+    "角色构建结果为空",
+    "未能创建",
+    "未能生成",
+    "无法创建",
+    "无法生成",
+    "当前请求失败",
+    "当前信息不足",
+)
+_CHAT_TRANSCRIPT_TITLE_MARKERS = (
+    "聊天生成",
+    "聊天修正记录",
+    "我帮你",
+    "好啦",
+    "好的",
+    "已根据这轮讨论",
+    "已自动同步",
+)
 
 
 @dataclass
@@ -208,6 +232,8 @@ def extract_chat_artifacts(
         section_title = _clean_title(title) or "聊天生成资料"
         if not section_text:
             continue
+        if _is_failed_artifact_section(section_title, section_text):
+            continue
 
         category = _classify_section(section_title, section_text, category_defs)
         if not category:
@@ -215,6 +241,8 @@ def extract_chat_artifacts(
 
         data_type = str(category.get("key") or "").strip()
         if not data_type:
+            continue
+        if not _is_saveable_artifact_section(data_type, section_title, section_text, category):
             continue
         rows = _rows_for_category(data_type, section_title, section_text)
         if not rows:
@@ -464,6 +492,66 @@ def _is_chapter_section(title: str, content: str) -> bool:
     if any(token in title_text for token in ("章节正文", "正文章节", "小说正文")):
         return len(content_text) >= 120
     return False
+
+
+def _is_failed_artifact_section(title: str, content: str) -> bool:
+    title_text = _normalize_match_text(title)
+    if title_text and any(marker in title_text for marker in _FAILED_SECTION_TITLE_MARKERS):
+        return True
+
+    body_text = _normalize_match_text(str(content or "")[:300])
+    return any(marker in body_text for marker in _FAILED_SECTION_BODY_MARKERS)
+
+
+def _category_matches_title(category: Dict[str, Any], title: str) -> bool:
+    title_text = _normalize_match_text(title)
+    if not title_text:
+        return False
+    return any(
+        _normalize_match_text(alias) in title_text
+        for alias in _category_aliases(category)
+        if _normalize_match_text(alias)
+    )
+
+
+def _has_labeled_field(content: str, labels: Iterable[str]) -> bool:
+    for label in labels:
+        if re.search(rf"(?:^|\n)\s*(?:[-*]\s*)?{re.escape(label)}\s*[：:]", content):
+            return True
+    return False
+
+
+def _is_chat_transcript_section(title: str) -> bool:
+    normalized_title = _normalize_match_text(title)
+    return any(_normalize_match_text(marker) in normalized_title for marker in _CHAT_TRANSCRIPT_TITLE_MARKERS)
+
+
+def _is_saveable_artifact_section(
+    data_type: str,
+    title: str,
+    content: str,
+    category: Dict[str, Any],
+) -> bool:
+    clean_content = _clean_content(content)
+    if not clean_content or _is_chat_transcript_section(title):
+        return False
+    title_matches_category = _category_matches_title(category, title)
+
+    if data_type == "chapters":
+        return _is_chapter_section(title, clean_content)
+    if data_type == "characters":
+        return bool(
+            _extract_named_value(clean_content, ("姓名", "角色名", "名字", "主角", "男主", "女主", "配角", "反派"))
+            or (
+                title_matches_category
+                and _has_labeled_field(clean_content, ("身份", "性格", "动机", "目标", "关系", "外貌", "能力", "背景"))
+            )
+        )
+    if data_type in {"worldbuilding", "outline", "detail_settings", "chapter_settings", "eventlines", "items", "chapter_summary"}:
+        return title_matches_category and len(clean_content) >= 8
+    if not bool(category.get("builtin", True)):
+        return title_matches_category and len(clean_content) >= 2
+    return title_matches_category and len(clean_content) >= 8
 
 
 def _rows_for_category(data_type: str, title: str, content: str) -> List[Dict[str, Any]]:

@@ -39,6 +39,7 @@ from ..utils.atomic_write import atomic_write_text, atomic_write_json
 from ..content_sanitizer import strip_internal_author_markers
 from ..outline_utils import (
     build_outline_overview_row,
+    extract_outline_chapter_rows,
     extract_eventlines_from_outline,
     merge_eventline_rows,
     normalize_outline_payload,
@@ -825,6 +826,7 @@ class NovelCoordinator:
         chapters_per_volume: int,
         session_context: Optional[Dict[str, Any]] = None,
         user_confirmed: bool = True,
+        ai_autonomy_requested: bool = False,
     ) -> Dict[str, Any]:
         """保存当前项目的创作合同与任务图草案。"""
         session_context = dict(session_context or {})
@@ -836,6 +838,7 @@ class NovelCoordinator:
             plot_idea=plot_idea,
             volume_count=volume_count,
             chapters_per_volume=chapters_per_volume,
+            ai_autonomy_requested=ai_autonomy_requested,
             source_session_id=str(session_context.get("session_id") or "").strip(),
             source_message=str(plot_idea or "").strip(),
             user_confirmed=user_confirmed,
@@ -1094,10 +1097,7 @@ class NovelCoordinator:
             return self._chapter_rows_from_settings([row for row in chapter_settings if isinstance(row, dict)])
 
         outline_rows = self._load_project_outline_rows()
-        legacy_rows = [
-            row for row in outline_rows
-            if isinstance(row, dict) and not self._is_global_outline_overview_row(row)
-        ]
+        legacy_rows = extract_outline_chapter_rows(outline_rows)
         return self._sort_chapter_rows(legacy_rows)
 
     def _load_project_previous_chapters(self, chapter_number: int, outline_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1722,6 +1722,7 @@ class NovelCoordinator:
             chapters_per_volume=effective_chapters_per_volume,
             session_context=session_context,
             user_confirmed=True,
+            ai_autonomy_requested=bool(collected_info.get("ai_autonomy_requested", False)),
         )
 
         # 初始化检查点
@@ -1849,6 +1850,9 @@ class NovelCoordinator:
 
     def _outline_to_project_rows(self, outline_data: Any) -> List[Dict[str, Any]]:
         timestamp = datetime.now().isoformat()
+        chapter_rows = extract_outline_chapter_rows(outline_data, timestamp=timestamp)
+        if chapter_rows:
+            return chapter_rows
         overview = build_outline_overview_row(outline_data, timestamp=timestamp)
         return [overview] if overview else []
 
@@ -2107,6 +2111,15 @@ class NovelCoordinator:
             chapter_content,
             self._summarize_chapter(chapter_content)
         )
+        try:
+            synced_development = self.character_manager.sync_development_from_text(
+                chapter_content,
+                chapter_number=chapter_num,
+            )
+            if synced_development:
+                chapter_data["character_development_sync"] = synced_development
+        except Exception as e:
+            logger.warning(f"[Coordinator] Character development sync failed: {e}")
 
         # 自动生成章节摘要（问题1修复：使用 await 替代 asyncio.run）
         try:

@@ -213,6 +213,165 @@ def get_outline_volumes(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _normalize_outline_chapter_number(value: Any, fallback: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        match = None
+        if value is not None:
+            import re
+
+            match = re.search(r"\d+", str(value))
+        number = int(match.group(0)) if match else int(fallback or 1)
+    return number if number > 0 else int(fallback or 1)
+
+
+def _is_outline_overview_row(row: Dict[str, Any]) -> bool:
+    title = str(row.get("title") or row.get("name") or "").strip()
+    return (
+        title == "主线大纲"
+        or bool(row.get("global_outline"))
+        or bool(row.get("volume_plan"))
+        or bool(row.get("volumes"))
+    )
+
+
+def _chapter_summary_from_outline_entry(entry: Dict[str, Any]) -> str:
+    direct = (
+        entry.get("summary")
+        or entry.get("description")
+        or entry.get("synopsis")
+        or entry.get("chapter_goal")
+        or entry.get("scene_goal")
+        or entry.get("goal")
+        or entry.get("key_event")
+        or entry.get("core_event")
+        or entry.get("content")
+    )
+    text = humanize_structured_value(direct).strip()
+    if text and not is_pending_text(text):
+        return text
+
+    parts: List[str] = []
+    for label, key in (
+        ("章节目标", "chapter_goal"),
+        ("关键事件", "key_event"),
+        ("核心事件", "core_event"),
+        ("冲突", "conflict"),
+        ("情绪点", "emotion_point"),
+        ("章末钩子", "ending_hook"),
+    ):
+        value = humanize_structured_value(entry.get(key)).strip()
+        if value and not is_pending_text(value):
+            parts.append(f"{label}：{value}")
+    return "\n".join(parts).strip()
+
+
+def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Extract executable per-chapter rows from raw, overview, or legacy outlines."""
+    data = normalize_outline_payload(payload)
+    now = timestamp or datetime.now().isoformat()
+    rows: List[Dict[str, Any]] = []
+
+    def append_chapter(entry: Any, fallback_number: int, volume_title: str = "") -> None:
+        if isinstance(entry, dict):
+            number = _normalize_outline_chapter_number(
+                entry.get("chapter_number") or entry.get("chapter") or entry.get("number"),
+                fallback_number,
+            )
+            title = str(
+                entry.get("title")
+                or entry.get("name")
+                or entry.get("chapter_title")
+                or f"第{number}章"
+            ).strip() or f"第{number}章"
+            summary = _chapter_summary_from_outline_entry(entry)
+            row = dict(entry)
+            row.update({
+                "chapter_number": number,
+                "title": title,
+                "summary": summary,
+                "content": strip_internal_author_markers(entry.get("content")),
+                "created_at": entry.get("created_at") or now,
+                "updated_at": entry.get("updated_at") or now,
+            })
+            if volume_title and not row.get("volume_title"):
+                row["volume_title"] = volume_title
+        else:
+            number = int(fallback_number or 1)
+            summary = humanize_structured_value(entry).strip()
+            row = {
+                "chapter_number": number,
+                "title": f"第{number}章",
+                "summary": summary,
+                "content": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+        rows.append(row)
+
+    if isinstance(data, dict):
+        next_number = 1
+        for volume_index, volume in enumerate(get_outline_volumes(data), start=1):
+            chapters = volume.get("chapters")
+            if not isinstance(chapters, list):
+                continue
+            volume_title = str(
+                volume.get("volume_title")
+                or volume.get("title")
+                or volume.get("name")
+                or f"第{volume_index}卷"
+            ).strip()
+            for chapter in chapters:
+                append_chapter(chapter, next_number, volume_title=volume_title)
+                next_number += 1
+
+        direct_chapters = data.get("chapters")
+        if isinstance(direct_chapters, list):
+            for chapter in direct_chapters:
+                append_chapter(chapter, next_number)
+                next_number += 1
+
+    elif isinstance(data, list):
+        next_number = 1
+        for row in data:
+            if not isinstance(row, dict):
+                append_chapter(row, next_number)
+                next_number += 1
+                continue
+
+            nested_rows = []
+            if row.get("volumes") or row.get("chapters"):
+                nested_rows = extract_outline_chapter_rows(row, timestamp=now)
+            if nested_rows:
+                rows.extend(nested_rows)
+                next_number = max(
+                    next_number,
+                    max(int(item.get("chapter_number") or 0) for item in nested_rows) + 1,
+                )
+                continue
+
+            if _is_outline_overview_row(row):
+                continue
+            append_chapter(row, next_number)
+            next_number += 1
+
+    deduped: Dict[int, Dict[str, Any]] = {}
+    overflow: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        number = _normalize_outline_chapter_number(row.get("chapter_number"), index)
+        row["chapter_number"] = number
+        if number not in deduped:
+            deduped[number] = row
+        else:
+            overflow.append(row)
+
+    ordered = [deduped[number] for number in sorted(deduped)]
+    if overflow:
+        ordered.extend(overflow)
+    return ordered
+
+
 def build_global_outline_text(payload: Any) -> str:
     data = normalize_outline_payload(payload)
 

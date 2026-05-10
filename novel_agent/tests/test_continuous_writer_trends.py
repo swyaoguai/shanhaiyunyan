@@ -5,6 +5,7 @@ import json
 
 from novel_agent.agents.continuous_writer import CharacterState, ContinuousWriteConfig, ContinuousWriter
 from novel_agent.agents.base_agent import BaseAgent
+from novel_agent.context.character_manager import Character, CharacterManager
 
 
 class _FakeText:
@@ -102,6 +103,23 @@ def test_continuous_writer_prompt_includes_character_and_setting_anchors():
     assert "[续写前快速自检]" in prompt
     assert "本章重点盯住这些角色：周岚。" in prompt
     assert "本章必须顺着上一章《桥头》的结尾往下写。" in prompt
+
+
+def test_continuous_writer_syncs_learned_abilities_to_character_profile(tmp_path):
+    manager = CharacterManager(tmp_path)
+    manager.add_character(Character(name="天齐", role="主角", description="少年主角"))
+
+    writer = ContinuousWriter(write_config=ContinuousWriteConfig())
+    writer.set_character_manager(manager)
+    writer._update_character_states({
+        "chapter_number": 3,
+        "content": "天齐在雨夜里终于领悟了御风术，第一次带着女主越过宫墙。",
+    })
+
+    reloaded = CharacterManager(tmp_path)
+    assert "御风术" in reloaded.get_character("天齐").abilities
+    assert "御风术" in writer._characters["天齐"].learned_abilities
+    assert "能力：御风术" in writer._build_character_memory_block()
 
 
 def test_continuous_writer_uses_five_recent_chapters_by_default():

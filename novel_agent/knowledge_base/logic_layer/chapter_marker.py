@@ -102,7 +102,7 @@ class ChapterMarker:
                     matched_pattern = pattern
                     break
             
-            if matched_pattern:
+            if matched_pattern and self._is_plausible_chapter_title(stripped_line):
                 # 提取章节号和标题
                 chapter_number, title = self._parse_chapter_title(stripped_line)
                 
@@ -253,6 +253,37 @@ class ChapterMarker:
                 result.append(pos)
         
         return result
+
+    def _is_plausible_chapter_title(self, title_line: str) -> bool:
+        """
+        判断匹配到的行是否真像章节标题。
+
+        一些正文行会以“第X章正文……”开头，旧正则会把它误判为标题，
+        导致导入章节数量翻倍。
+        """
+        stripped = (title_line or "").strip()
+        match = re.match(
+            r'^第([一二三四五六七八九十百千万\d]+)([章回节卷])(?P<sep>[\s\.:：]*)(?P<title>.*?)$',
+            stripped,
+        )
+        if not match:
+            return True
+
+        separator = match.group("sep") or ""
+        title = (match.group("title") or "").strip()
+        if not title:
+            return True
+
+        if not separator and title.startswith(("正文", "内容")):
+            return False
+
+        if len(title) > 40:
+            return False
+
+        if re.search(r"[，,。！？!?；;]", title) and len(title) > 8:
+            return False
+
+        return True
     
     def _is_better_chapter_title(self, title1: str, title2: str) -> bool:
         """判断title1是否比title2更像章节标题"""

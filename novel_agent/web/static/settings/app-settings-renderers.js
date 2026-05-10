@@ -446,6 +446,12 @@ function renderConfigCard(cfg) {
     const isActive = cfg.id === currentActiveConfigId;
     const modelCount = cfg.models ? cfg.models.length : 0;
     const apiType = cfg.api_type || 'openai_chat';
+    const keyCount = Array.isArray(cfg.api_keys)
+        ? cfg.api_keys.filter((entry) => entry?.key_set).length
+        : (cfg.api_key_set ? 1 : 0);
+    const keyStatusChip = keyCount > 0
+        ? `<span class="settings-chip settings-chip--success"><i class="ri-key-line"></i> 已配置${keyCount > 1 ? ` ${keyCount} 个` : ''}Key</span>`
+        : '<span class="settings-chip settings-chip--warning"><i class="ri-key-line"></i> 未配置Key</span>';
 
     return `
         <div class="config-card ${isActive ? 'is-active' : ''}" data-config-id="${safeAttr(cfg.id)}">
@@ -455,7 +461,7 @@ function renderConfigCard(cfg) {
                         <span class="settings-card-title">${safeText(cfg.name)}</span>
                         ${isActive ? '<span class="settings-badge settings-badge--success">当前使用</span>' : ''}
                         <span class="settings-chip ${_apiTypeBadgeClass(apiType)}"><i class="ri-plug-line"></i> ${_apiTypeLabel(apiType)}</span>
-                        ${cfg.api_key_set ? '<span class="settings-chip settings-chip--success"><i class="ri-key-line"></i> 已配置Key</span>' : '<span class="settings-chip settings-chip--warning"><i class="ri-key-line"></i> 未配置Key</span>'}
+                        ${keyStatusChip}
                     </div>
                     <div class="settings-card-copy">
                         <i class="ri-link" style="margin-right: 4px;"></i>
@@ -690,9 +696,9 @@ async function loadKnowledgeBaseSettings() {
         const { config, stats, chapterSummaryConfig } = await fetchKnowledgeBaseSettingsData();
         const embeddingProvider = String(config.embedding_provider || 'api').toLowerCase();
         const isLocalProvider = embeddingProvider === 'local_onnx' || embeddingProvider === 'local';
-        const hasApiKey = config.siliconflow_api_key && config.siliconflow_api_key.length > 10;
+        const hasApiKey = Boolean(config.siliconflow_api_key_set || (config.siliconflow_api_key && config.siliconflow_api_key.length > 10));
         const hasLocalModel = Boolean(config.onnx_model_installed);
-        const activeEmbeddingReady = isLocalProvider ? hasLocalModel : hasApiKey;
+        const activeEmbeddingReady = Boolean(config.is_configured ?? (isLocalProvider ? hasLocalModel : hasApiKey));
         const kbStatusClass = activeEmbeddingReady ? 'settings-section-panel--accent' : 'settings-section-panel--danger';
         const kbBadgeClass = activeEmbeddingReady ? 'settings-badge--success' : 'settings-badge--danger';
         const kbIconColor = activeEmbeddingReady ? '#10b981' : '#ef4444';
@@ -724,7 +730,7 @@ async function loadKnowledgeBaseSettings() {
                         <h3 class="settings-section-title">
                             <i class="ri-cpu-line" style="color: ${kbIconColor};"></i>
                             向量化服务配置
-                            <span class="settings-badge ${kbBadgeClass}" style="margin-left: 8px;">${hasApiKey ? '已配置 ✓' : '未配置'}</span>
+                            <span class="settings-badge ${kbBadgeClass}" style="margin-left: 8px;">${activeEmbeddingReady ? '已配置 ✓' : '未配置'}</span>
                         </h3>
                         <button id="test-embedding-btn" class="settings-button settings-button--sm">
                             <i class="ri-wifi-line"></i> 测试连接

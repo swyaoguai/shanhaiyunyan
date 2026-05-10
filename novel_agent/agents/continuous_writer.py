@@ -80,6 +80,7 @@ class CharacterState:
     location: str = ""
     last_chapter: int = 0
     notes: List[str] = field(default_factory=list)
+    learned_abilities: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -348,6 +349,7 @@ class ContinuousWriter(BaseAgent):
                 "location": state.location,
                 "last_chapter": state.last_chapter,
                 "notes": list(state.notes[-5:]),
+                "learned_abilities": list(state.learned_abilities[-12:]),
             }
             for name, state in self._characters.items()
         }
@@ -1013,8 +1015,52 @@ class ContinuousWriter(BaseAgent):
                         pass
             self._characters[name] = state
 
+        for name, abilities in self._extract_character_ability_events(content).items():
+            state = self._characters.get(name) or CharacterState(name=name)
+            state.last_chapter = max(state.last_chapter, chapter_number)
+            new_abilities = [
+                ability
+                for ability in abilities
+                if ability and ability not in state.learned_abilities
+            ]
+            if not new_abilities:
+                self._characters[name] = state
+                continue
+            state.learned_abilities.extend(new_abilities)
+            state.learned_abilities = state.learned_abilities[-12:]
+            state.notes.append(f"第{chapter_number}章获得/掌握：" + "、".join(new_abilities))
+            state.notes = state.notes[-5:]
+            self._sync_character_abilities_to_manager(name, new_abilities)
+            self._characters[name] = state
+
         self._plot_points.extend(self._extract_plot_points(content, chapter_number))
         self._plot_points = self._plot_points[-20:]
+
+    def _known_character_names(self) -> List[str]:
+        names = set(self._characters.keys())
+        manager = self._character_manager
+        manager_chars = getattr(manager, "characters", None)
+        if isinstance(manager_chars, dict):
+            names.update(str(name).strip() for name in manager_chars.keys() if str(name).strip())
+        return sorted(names, key=len, reverse=True)
+
+    def _sync_character_abilities_to_manager(self, name: str, abilities: List[str]) -> None:
+        if not self._character_manager or not name or not abilities:
+            return
+        try:
+            character = self._character_manager.get_character(name)
+            if not character:
+                return
+            merged = list(getattr(character, "abilities", []) or [])
+            changed = False
+            for ability in abilities:
+                if ability and ability not in merged:
+                    merged.append(ability)
+                    changed = True
+            if changed:
+                self._character_manager.update_character(name, {"abilities": merged})
+        except Exception as exc:
+            logger.warning(f"[{self.name}] 同步角色能力到CharacterManager失败: {exc}")
 
     def _get_library_context(self) -> str:
         try:
@@ -1624,6 +1670,48 @@ class ContinuousWriter(BaseAgent):
                     notes[name] = cleaned[:80]
         return notes
 
+    def _extract_character_ability_events(self, content: str) -> Dict[str, List[str]]:
+        """从章节正文中抽取“角色学会/觉醒/掌握能力”的明确事件。"""
+        known_names = self._known_character_names()
+        if not known_names:
+            return {}
+
+        events: Dict[str, List[str]] = {}
+        sentences = [item.strip() for item in re.split(r"(?<=[。！？!?])", str(content or "")) if item.strip()]
+        trigger_pattern = re.compile(r"(学会了?|习得了?|掌握了?|领悟了?|练成了?|觉醒了?|获得了?|参透了?|突破了?)")
+        for sentence in sentences:
+            if not trigger_pattern.search(sentence):
+                continue
+            matched_names = [name for name in known_names if name and name in sentence]
+            if not matched_names:
+                continue
+            ability = self._extract_ability_name_from_sentence(sentence)
+            if not ability:
+                continue
+            for name in matched_names:
+                events.setdefault(name, [])
+                if ability not in events[name]:
+                    events[name].append(ability)
+        return events
+
+    @staticmethod
+    def _extract_ability_name_from_sentence(sentence: str) -> str:
+        text = str(sentence or "")
+        trigger = re.search(r"(?:学会了?|习得了?|掌握了?|领悟了?|练成了?|觉醒了?|获得了?|参透了?|突破了?)", text)
+        if not trigger:
+            return ""
+        tail = text[trigger.end():]
+        tail = re.sub(r"^[的了一门一种一招新的\s，,：:]+", "", tail)
+        suffix_pattern = (
+            r"([\u4e00-\u9fa5A-Za-z0-9·]{2,16}?"
+            r"(?:剑法|刀法|枪法|拳法|掌法|心法|功法|身法|步法|阵法|符法|术法|法术|秘术|神通|天赋|能力|技能|术|诀|法|剑|刀|拳|掌|步|咒|符))"
+        )
+        match = re.search(suffix_pattern, tail)
+        if match:
+            return match.group(1).strip("，,。；;、 的了")
+        fallback = re.split(r"[，,。；;、\s]", tail, maxsplit=1)[0].strip("的了")
+        return fallback[:16] if len(fallback) >= 2 else ""
+
     @staticmethod
     def _infer_character_location(note: str) -> str:
         match = re.search(r"(?:在|回到|来到|走进|站在|留在)([\u4e00-\u9fa5]{2,8}(?:城|镇|村|宫|殿|阁|楼|院|府|山|峰|谷|林|海|岛|桥|巷|街|房|室|厅|门|营|塔))", note or "")
@@ -1664,6 +1752,8 @@ class ContinuousWriter(BaseAgent):
                 fragments.append(f"状态：{state.status}")
             if state.location:
                 fragments.append(f"位置：{state.location}")
+            if state.learned_abilities:
+                fragments.append(f"能力：{'、'.join(state.learned_abilities[-4:])}")
             if state.notes:
                 fragments.append(f"最近表现：{state.notes[-1]}")
             lines.append("；".join(fragments))

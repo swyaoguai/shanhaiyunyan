@@ -15,6 +15,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ...constants import get_data_dir, get_skills_dir
 from ...utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,12 @@ class SkillInvokeRequest(BaseModel):
 
 def _get_skills_config_path() -> Path:
     """获取Skills配置文件路径"""
-    return Path(__file__).parent.parent.parent / "data" / "skills_config.json"
+    return get_data_dir() / "skills_config.json"
+
+
+def _get_skill_path(skill_name: str) -> Path:
+    """获取指定 Skill 目录，兼容开发环境与便携包。"""
+    return get_skills_dir() / skill_name.replace("-", "_")
 
 
 def _load_skills_config() -> Dict[str, Any]:
@@ -92,8 +98,8 @@ def _get_skill_trigger_hint(skill_name: str) -> str:
 
 def _load_skill_service(skill_name: str) -> Any:
     """动态加载 Skill 服务实例。"""
-    skill_dir_name = skill_name.replace("-", "_")
-    skill_path = Path(__file__).parent.parent.parent.parent / "skills" / skill_dir_name / "scripts"
+    skill_path = _get_skill_path(skill_name) / "scripts"
+    skill_dir_name = _get_skill_path(skill_name).name
 
     if not skill_path.exists():
         raise FileNotFoundError(f"Skill '{skill_name}' not found")
@@ -149,7 +155,7 @@ def _invoke_skill_method(skill_name: str, method: str, args: Optional[Dict[str, 
 
 def _discover_skills() -> List[Dict[str, Any]]:
     """自动发现可用的Skills"""
-    skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
+    skills_dir = get_skills_dir()
     discovered_skills = []
     
     if not skills_dir.exists():
@@ -232,8 +238,7 @@ async def list_skills():
 async def get_skill_info(skill_name: str):
     """获取指定Skill的详细信息"""
     try:
-        skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
-        skill_path = skills_dir / skill_name
+        skill_path = _get_skill_path(skill_name)
         
         if not skill_path.exists():
             return JSONResponse({
@@ -368,7 +373,7 @@ async def batch_toggle_skills(request: SkillsConfigRequest):
 async def get_skills_status():
     """获取Skills系统状态"""
     try:
-        skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
+        skills_dir = get_skills_dir()
         
         if not skills_dir.exists():
             return JSONResponse({
@@ -401,8 +406,7 @@ async def get_skills_status():
 async def delete_skill(skill_name: str):
     """删除指定的Skill"""
     try:
-        skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
-        skill_path = skills_dir / skill_name
+        skill_path = _get_skill_path(skill_name)
         
         if not skill_path.exists():
             return JSONResponse({

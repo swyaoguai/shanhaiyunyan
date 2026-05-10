@@ -522,6 +522,9 @@ function getCollabTraceStageMeta(event) {
     if (taskType === 'build_world') {
         return { key: 'build_world', label: '世界观构建' };
     }
+    if (taskType === 'build_characters') {
+        return { key: 'build_characters', label: '角色档案' };
+    }
     if (taskType === 'build_outline') {
         return { key: 'build_outline', label: '大纲生成' };
     }
@@ -1078,11 +1081,22 @@ function getProjectReadyTaskTypeLabel(taskType) {
         build_outline: '大纲规划',
         write_chapter: '章节写作',
         summary_orchestrate: '阶段总结',
+        build_characters: '角色档案',
         build_character: '角色设定',
         detail_outlining: '细纲补全',
         chapter_settings: '章纲设定'
     };
     return labels[key] || (key || '未记录');
+}
+
+function getCollabResultDisplayLabel(resultRef, taskType = '', resultKind = '') {
+    if (typeof window.formatPlanDeliverableLabel === 'function') {
+        const label = window.formatPlanDeliverableLabel(resultRef || resultKind || taskType);
+        if (label && label !== resultRef) return label;
+    }
+    const taskLabel = getProjectReadyTaskTypeLabel(taskType);
+    if (taskLabel && taskLabel !== '未记录') return taskLabel;
+    return resultRef || '暂无';
 }
 
 function buildCollabAgentOutputSummaries(tasks) {
@@ -1169,9 +1183,11 @@ function showCollabTaskDetail(task) {
         ? (typeof getAgentDisplayName === 'function' ? getAgentDisplayName(assignedAgent) : assignedAgent)
         : '系统还没分配';
     const taskGoal = title || getProjectReadyTaskTypeLabel(taskType) || '未命名任务';
-    const dependencyText = dependsOn.length ? dependsOn.join('、') : '没有前置任务';
-    const candidateText = candidateAgents.length ? candidateAgents.join('、') : '系统会自动分配';
-    const resultText = resultRef || '这一步暂时还没产出文件';
+    const dependencyText = dependsOn.length ? `${dependsOn.length} 个前置任务` : '没有前置任务';
+    const candidateText = candidateAgents.length
+        ? candidateAgents.map((agent) => (typeof getAgentDisplayName === 'function' ? getAgentDisplayName(agent) : agent)).join('、')
+        : '系统会自动分配';
+    const resultText = resultRef ? getCollabResultDisplayLabel(resultRef, taskType, metadata.result_kind) : '这一步暂时还没产出文件';
     const summaryHints = [];
     if (typeof inputs.chapter_number === 'number') {
         summaryHints.push(`目标章节：第${inputs.chapter_number}章`);
@@ -1180,7 +1196,7 @@ function showCollabTaskDetail(task) {
         summaryHints.push(`涉及范围：第${metadata.summary_range[0]}-${metadata.summary_range[1]}章`);
     }
     if (metadata.result_kind) {
-        summaryHints.push(`产物类型：${metadata.result_kind}`);
+        summaryHints.push(`产物类型：${getCollabResultDisplayLabel('', taskType, metadata.result_kind)}`);
     }
     const summaryText = summaryHints.length ? summaryHints.join('；') : '这一步主要围绕当前任务素材继续往下推进。';
 
@@ -1298,7 +1314,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                         </span>
                     </div>
                     <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
-                        <div>类型：${escapeHtml(taskType)}</div>
+                        <div>类型：${escapeHtml(getProjectReadyTaskTypeLabel(taskType))}</div>
                         <div>执行智能体：${escapeHtml(assignedAgent || '待认领')}</div>
                     </div>
                     <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;">
@@ -1341,8 +1357,8 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                 <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 6px;">${escapeHtml(getAgentDisplayName(item.agent) || item.agent)}</div>
                 <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
                     <div>刚完成：${escapeHtml(item.title)}</div>
-                    <div>产物类型：${escapeHtml(item.resultKind || getProjectReadyTaskTypeLabel(item.taskType) || '未标记')}</div>
-                    <div>产物位置：${escapeHtml(item.resultRef || '暂无')}</div>
+                    <div>产物类型：${escapeHtml(getCollabResultDisplayLabel('', item.taskType, item.resultKind) || '未标记')}</div>
+                    <div>产物位置：${escapeHtml(getCollabResultDisplayLabel(item.resultRef, item.taskType, item.resultKind))}</div>
                 </div>
             </div>
         `).join('')
@@ -1755,9 +1771,12 @@ function renderMultiAgentWriteNavPanel() {
         chapters.forEach((ch, index) => {
             const chapterItem = document.createElement('div');
             chapterItem.className = 'nav-chapter-item';
+            const chapterNumber = typeof getChapterDisplayNumber === 'function'
+                ? getChapterDisplayNumber(ch, index + 1)
+                : (Number(ch?.chapter_number || index + 1) || (index + 1));
             chapterItem.innerHTML = `
                 <i class="ri-file-text-line chapter-icon"></i>
-                <span class="chapter-title">${formatChapterDisplay(index + 1, ch.title)}</span>
+                <span class="chapter-title">${formatChapterDisplay(chapterNumber, ch.title)}</span>
                 <div class="chapter-actions">
                     <button class="edit-btn" title="编辑"><i class="ri-edit-line"></i></button>
                     <button class="delete-btn" title="删除"><i class="ri-delete-bin-line"></i></button>

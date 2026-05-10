@@ -859,6 +859,7 @@ body.has-bg-image .copilot-panel {
 
 .copilot-title-group {
     min-width: 0;
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -871,8 +872,10 @@ body.has-bg-image .copilot-panel {
 
 .copilot-session-meta {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 1px;
+    gap: 4px 6px;
+    min-width: 0;
 }
 
 .copilot-session-meta span {
@@ -883,6 +886,61 @@ body.has-bg-image .copilot-panel {
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 210px;
+}
+
+.copilot-model-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.copilot-model-select {
+    width: min(190px, 48vw);
+    max-width: 100%;
+    min-width: 128px;
+    height: 24px;
+    padding: 2px 24px 2px 8px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.42);
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1;
+    outline: none;
+    cursor: pointer;
+}
+
+.copilot-model-select:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 99, 102, 241), 0.18);
+}
+
+.copilot-model-select:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.copilot-model-status {
+    min-width: 0;
+    color: var(--text-secondary);
+}
+
+.copilot-model-status:empty {
+    display: none;
+}
+
+.copilot-model-status.is-success {
+    color: #34d399;
+}
+
+.copilot-model-status.is-error {
+    color: #f87171;
+}
+
+.copilot-model-status.is-loading {
+    color: var(--accent-color);
 }
 
 /* Copilot 头部按钮样式 */
@@ -1052,6 +1110,7 @@ body.has-bg-image .copilot-panel {
 
 .msg .msg-content {
     word-break: break-word;
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
 }
 
@@ -1126,6 +1185,7 @@ body.has-bg-image .copilot-panel {
     background: rgba(15, 23, 42, 0.6);
     border: 1px solid rgba(148, 163, 184, 0.25);
     overflow-x: auto;
+    max-width: 100%;
 }
 
 .msg-content pre code {
@@ -1133,7 +1193,8 @@ body.has-bg-image .copilot-panel {
     padding: 0;
     border-radius: 0;
     display: block;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .msg-code-lang {
@@ -1164,6 +1225,8 @@ body.has-bg-image .copilot-panel {
     background: rgba(255, 255, 255, 0.05);
     align-self: flex-start;
     border-bottom-left-radius: 2px;
+    box-sizing: border-box;
+    min-width: min(260px, 90%);
 }
 
 .copilot-route-status {
@@ -4003,6 +4066,19 @@ select optgroup {
     border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.short-story-hero-side .short-story-action-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.short-story-hero-side .short-story-btn {
+    width: 100%;
+}
+
+.short-story-final-return-row {
+    margin-bottom: 2px;
+}
+
 .short-story-side-label {
     font-size: 12px;
     color: rgba(255, 255, 255, 0.58);
@@ -4250,6 +4326,7 @@ select optgroup {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    min-width: 0;
 }
 
 .short-story-btn {
@@ -4266,6 +4343,8 @@ select optgroup {
     cursor: pointer;
     font-size: 13px;
     font-weight: 600;
+    box-sizing: border-box;
+    white-space: nowrap;
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 

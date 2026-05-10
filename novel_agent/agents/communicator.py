@@ -599,18 +599,23 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             return {}
 
         extracted: Dict[str, Any] = {}
+        if any(token in text for token in ("古代", "古言", "宫廷", "宅斗")) and any(
+            token in text for token in ("甜宠", "言情", "爱情", "恋爱")
+        ):
+            extracted.setdefault("novel_type", "古代言情")
+
         novel_types = (
             "玄幻", "仙侠", "都市", "科幻", "悬疑", "言情", "历史", "武侠",
             "奇幻", "末世", "赛博", "现实", "校园", "游戏", "无限流",
         )
         for novel_type in novel_types:
-            if novel_type in text:
+            if novel_type in text and "novel_type" not in extracted:
                 extracted.setdefault("novel_type", novel_type)
                 break
 
         patterns = {
             "theme": r"(?:主题|核心主题|基调|风格)[是为:： ]+([^。；;，,\n]+)",
-            "protagonist": r"(?:主角|男主|女主)[叫是为:： ]+([^。；;，,\n]+)",
+            "protagonist": r"(?<!女)(?:主角|男主角?|男主)[叫是为:： ]+([^。；;，,\n]+)",
             "plot_idea": r"(?:剧情|故事|主线|走向|设定)[是为:： ]+([^。；;，,\n]+)",
         }
         for key, pattern in patterns.items():
@@ -620,8 +625,22 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 if value:
                     extracted[key] = value[:500]
 
+        if "theme" not in extracted:
+            theme_parts = []
+            for token in ("古代", "古言", "甜宠", "复仇成长", "复仇", "成长", "权谋", "宅斗", "宫廷"):
+                if token in text and token not in theme_parts:
+                    theme_parts.append("古代" if token == "古言" else token)
+            if "古代" in theme_parts and "甜宠" in theme_parts:
+                extracted["theme"] = "古代甜宠"
+            elif theme_parts:
+                extracted["theme"] = "、".join(theme_parts[:3])
+
+        word_count_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:w|W|万)\s*字", text)
+        if word_count_match:
+            extracted["target_word_count"] = int(float(word_count_match.group(1)) * 10000)
+
         requirement_markers = ("不要", "不能", "必须", "要求", "保留", "改成", "改为", "以后", "后续")
-        if any(marker in text for marker in requirement_markers):
+        if any(marker in text for marker in requirement_markers) or "target_word_count" in extracted:
             existing = str(extracted.get("requirements") or "").strip()
             extracted["requirements"] = (existing + "\n" + text if existing else text)[:1200]
 

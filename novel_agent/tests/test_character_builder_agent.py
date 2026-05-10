@@ -96,3 +96,47 @@ async def test_character_builder_rejects_placeholder_name(builder, monkeypatch):
 
     assert result["success"] is False
     assert any("占位名" in issue for issue in result["missing_info"])
+
+
+@pytest.mark.asyncio
+async def test_character_builder_autonomous_mode_prompts_model_to_fill_blanks(builder, monkeypatch):
+    captured = {}
+
+    async def _fake_call_llm(messages, temperature=None, max_tokens=None, stream=False, enable_retry=True):
+        captured["prompt"] = messages[-1]["content"]
+        return json.dumps(
+            {
+                "status": "ok",
+                "confidence": 0.87,
+                "missing_info": [],
+                "characters": [
+                    {
+                        "name": "沈知棠",
+                        "role": "女主",
+                        "identity": "没落侯府养女",
+                        "description": "古代甜宠故事女主，外柔内韧，擅长在家族夹缝中护住亲近之人。",
+                        "personality": ["聪慧", "清醒"],
+                        "goals": ["重建安全感", "守住真实心意"],
+                        "relationships": {"谢临舟": "姐弟恋对象"},
+                        "notes": "由助手自主补全的角色草稿",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(builder, "call_llm", _fake_call_llm)
+    result = await builder.execute(
+        {
+            "novel_type": "古代言情",
+            "theme": "古代甜宠",
+            "character_request": "",
+            "recent_discussion": "用户想写古代甜宠，篇幅5w字，其他由AI安排。",
+            "request_mode": "autonomous_draft",
+            "ai_autonomy_requested": True,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["characters"][0]["name"] == "沈知棠"
+    assert "不要因为姓名/身份/剧情细节未给出而返回 missing_info" in captured["prompt"]

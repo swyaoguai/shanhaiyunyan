@@ -99,3 +99,46 @@ def test_assistant_auto_save_supports_custom_category(tmp_path):
     rows = pm.load_project_data("custom_lore")
     assert rows[0]["name"] == "灵感库"
     assert "记忆硬币" in rows[0]["content"]
+
+
+def test_assistant_auto_save_ignores_failed_character_sections(tmp_path):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    assistant_text = """
+## 生成角色档案：失败
+角色构建结果为空，未能创建角色档案。
+
+## 错误
+当前请求失败：模型返回为空。
+"""
+
+    result = process_assistant_auto_save(
+        pm,
+        assistant_text,
+        mode="execute",
+        auto_save_enabled=True,
+    )
+
+    assert result is None
+    assert pm.load_project_data("characters") == []
+
+
+def test_assistant_auto_save_ignores_chatty_discussion_sections(tmp_path):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    assistant_text = """
+## 我帮你设计了一个4集为一组的小结构
+这里先聊角色节奏：第一集负责拉关系，第二集制造误会，后面再看要不要落到角色档案。
+
+## 聊天生成角色
+好啦，那我拍板了，这一等一集女主撞见误会之后的响咕咕，用这句，其他的不改动。
+"""
+
+    result = process_assistant_auto_save(
+        pm,
+        assistant_text,
+        mode="execute",
+        auto_save_enabled=True,
+    )
+
+    assert result is None
+    assert pm.load_project_data("characters") == []
+    assert pm.load_project_data("chapters") == []

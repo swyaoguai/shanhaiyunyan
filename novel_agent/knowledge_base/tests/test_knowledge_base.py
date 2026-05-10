@@ -133,6 +133,26 @@ This is chapter two content.
         assert marker._parse_chinese_number("二十三") == 23
         assert marker._parse_chinese_number("一百") == 100
         assert marker._parse_chinese_number("123") == 123
+
+    def test_detect_chapters_ignores_chapter_prefixed_body_lines(self):
+        """正文行以第X章开头时不应被误判为章节标题"""
+        marker = ChapterMarker()
+
+        text = """
+第1章 标题1
+第1章正文里主角继续调查，并发现新的线索。
+后续正文继续展开。
+
+第2章 标题2
+第2章正文里主角继续调查，并发现新的线索。
+后续正文继续展开。
+"""
+        chapters = marker.detect_chapters(text)
+
+        assert len(chapters) == 2
+        assert [chapter.chapter_number for chapter in chapters] == [1, 2]
+        assert [chapter.title for chapter in chapters] == ["标题1", "标题2"]
+        assert "第1章正文里主角继续调查" in chapters[0].content
     
     def test_no_chapters(self):
         """测试无章节标记的文本"""

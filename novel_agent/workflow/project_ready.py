@@ -88,6 +88,9 @@ class ProjectReadyTaskExecutor:
             "volume_count",
             "chapters_per_volume",
             "total_chapters",
+            "target_word_count",
+            "target_words_per_chapter",
+            "ai_autonomy_requested",
         )
         for key in common_keys:
             if data.get(key) in (None, "", [], {}) and scope.get(key) not in (None, "", [], {}):
@@ -99,8 +102,19 @@ class ProjectReadyTaskExecutor:
             data.setdefault("recent_discussion", discussion_context)
 
         if task_type == "build_characters":
-            data.setdefault("character_request", data.get("protagonist") or data.get("plot_idea") or "")
-            data.setdefault("request_mode", "draft")
+            autonomous_brief = str(scope.get("autonomous_brief") or "").strip()
+            if not autonomous_brief and bool(scope.get("ai_autonomy_requested", False)):
+                autonomous_brief = (
+                    "用户已授权助手自主安排未指定的角色姓名、人物设定和剧情细节；"
+                    "请在已给定题材、主题、篇幅与讨论方向内主动补全。"
+                )
+            if autonomous_brief:
+                data.setdefault("autonomous_brief", autonomous_brief)
+                data.setdefault("character_request", data.get("protagonist") or data.get("plot_idea") or autonomous_brief)
+                data.setdefault("request_mode", "autonomous_draft")
+            else:
+                data.setdefault("character_request", data.get("protagonist") or data.get("plot_idea") or "")
+                data.setdefault("request_mode", "draft")
 
         return data
 
@@ -176,11 +190,15 @@ class ProjectReadyTaskExecutor:
         )
         world = self.coordinator.context_manager.get("world", {})
         input_data["world"] = world
-        input_data.setdefault("request_mode", "draft")
+        input_data.setdefault(
+            "request_mode",
+            "autonomous_draft" if input_data.get("ai_autonomy_requested") else "draft",
+        )
         input_data.setdefault(
             "character_request",
             input_data.get("protagonist")
             or input_data.get("plot_idea")
+            or input_data.get("autonomous_brief")
             or input_data.get("user_request")
             or "",
         )

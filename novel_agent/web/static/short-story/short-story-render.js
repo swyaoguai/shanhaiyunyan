@@ -342,6 +342,23 @@ function renderShortStoryNavPanel() {
     });
     navList.appendChild(panelEntry);
 
+    const settingsEntry = document.createElement('button');
+    settingsEntry.type = 'button';
+    settingsEntry.className = 'list-item short-story-nav-entry short-story-nav-entry--secondary short-story-nav-settings';
+    settingsEntry.innerHTML = `
+        <i class="ri-settings-4-line short-story-nav-entry-icon"></i>
+        <span class="list-item-label">短篇设置</span>
+    `;
+    settingsEntry.addEventListener('click', () => {
+        if (typeof switchModule === 'function') {
+            switchModule('settings');
+        }
+        if (typeof loadSettingsTab === 'function') {
+            loadSettingsTab('api');
+        }
+    });
+    navList.appendChild(settingsEntry);
+
     const status = document.createElement('div');
     status.className = 'short-story-nav-status';
     status.innerHTML = `
@@ -902,6 +919,11 @@ function renderShortStoryFinalView(workflow) {
                 </div>
                 <div class="short-story-hero-side">
                     <div class="short-story-side-label">成稿操作</div>
+                    <div class="short-story-action-row short-story-final-return-row">
+                        <button id="short-story-back-to-panel" class="short-story-btn short-story-btn-warm">
+                            <i class="ri-arrow-left-line"></i>返回创作
+                        </button>
+                    </div>
                     ${renderShortStoryDeliverableActions(workflow, { copyId: 'short-story-final-copy' })}
                 </div>
             </div>

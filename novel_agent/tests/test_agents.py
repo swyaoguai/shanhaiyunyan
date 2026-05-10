@@ -162,12 +162,13 @@ class StreamingConcreteAgent(BaseAgent):
 
 
 class _FakeStreamChunk:
-    def __init__(self, content: str):
+    def __init__(self, content: str, usage=None):
         delta = MagicMock()
         delta.content = content
         choice = MagicMock()
         choice.delta = delta
         self.choices = [choice]
+        self.usage = usage
 
 
 class _FakeAsyncStreamResponse:
@@ -315,6 +316,39 @@ class TestBaseAgent:
 
             assert "".join(chunks) == "hello world"
             assert mock_create.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stream_call_records_provider_usage_from_final_chunk(self, agent, monkeypatch):
+        """测试流式尾包里的 usage 会用于 token 统计，而不是字符数估算。"""
+        recorded = {}
+
+        def fake_record_token_usage(**kwargs):
+            recorded.update(kwargs)
+            return 1
+
+        monkeypatch.setattr("novel_agent.agents.base_agent.record_token_usage", fake_record_token_usage)
+
+        async def fake_create(**kwargs):
+            assert kwargs.get("stream") is True
+            assert kwargs.get("stream_options") == {"include_usage": True}
+            return _FakeAsyncStreamResponse([
+                _FakeStreamChunk("hello "),
+                _FakeStreamChunk("world", usage={"prompt_tokens": 123, "completion_tokens": 45}),
+            ])
+
+        with patch.object(agent.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+            mock_create.side_effect = fake_create
+
+            stream = await agent.call_llm([
+                {"role": "user", "content": "Hello"}
+            ], stream=True)
+            chunks = []
+            async for chunk in stream:
+                chunks.append(chunk)
+
+        assert "".join(chunks) == "hello world"
+        assert recorded["tokens_in"] == 123
+        assert recorded["tokens_out"] == 45
     
     @pytest.mark.asyncio
     async def test_execute(self, agent, mock_openai_response):

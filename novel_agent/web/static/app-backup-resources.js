@@ -25,6 +25,10 @@ async function loadBackupSettings() {
             apiCall('/api/backup/list'),
             apiCall('/api/auto-backup/status')
         ]);
+        const backupItems = Array.isArray(backups?.backups) ? backups.backups : [];
+        const autoBackup = autoBackupStatus?.data || autoBackupStatus || {};
+        const autoBackupSchedule = autoBackup.schedule || autoBackup.schedule_type || '未设置';
+        const nextBackupTime = autoBackup.next_backup_time || autoBackup.next_backup;
         
         content.innerHTML = `
             <div style="max-width: 1000px;">
@@ -62,17 +66,17 @@ async function loadBackupSettings() {
                                 自动备份状态
                             </h3>
                             <p style="color: var(--text-secondary); font-size: 13px;">
-                                ${autoBackupStatus.enabled ? 
-                                    `<span style="color: #10b981;">✓ 已启用</span> - ${autoBackupStatus.schedule_type || '未设置'}` :
+                                ${autoBackup.enabled ?
+                                    `<span style="color: #10b981;">✓ 已启用</span> - ${autoBackupSchedule}` :
                                     '<span style="color: #6b7280;">未启用</span>'}
                             </p>
-                            ${autoBackupStatus.enabled && autoBackupStatus.next_backup ? 
+                            ${autoBackup.enabled && nextBackupTime ?
                                 `<p style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
-                                    下次备份: ${new Date(autoBackupStatus.next_backup).toLocaleString('zh-CN')}
+                                    下次备份: ${new Date(nextBackupTime).toLocaleString('zh-CN')}
                                 </p>` : ''}
                         </div>
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                            <input type="checkbox" id="auto-backup-toggle" ${autoBackupStatus.enabled ? 'checked' : ''} style="width: 20px; height: 20px; accent-color: var(--accent-color);">
+                            <input type="checkbox" id="auto-backup-toggle" ${autoBackup.enabled ? 'checked' : ''} style="width: 20px; height: 20px; accent-color: var(--accent-color);">
                             <span style="color: var(--text-secondary); font-size: 13px;">启用自动备份</span>
                         </label>
                     </div>
@@ -82,17 +86,17 @@ async function loadBackupSettings() {
                 <div class="setting-section" style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 20px;">
                     <h3 style="color: var(--text-primary); margin-bottom: 16px; font-size: 15px;">
                         <i class="ri-file-list-3-line" style="margin-right: 6px;"></i>
-                        备份列表 (${backups.backups.length})
+                        备份列表 (${backupItems.length})
                     </h3>
                     
-                    ${backups.backups.length === 0 ? `
+                    ${backupItems.length === 0 ? `
                         <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
                             <i class="ri-inbox-line" style="font-size: 48px; opacity: 0.5;"></i>
                             <p style="margin-top: 12px;">还没有备份，点击上方"创建备份"开始</p>
                         </div>
                     ` : `
                         <div style="display: grid; gap: 12px;">
-                            ${backups.backups.map(backup => `
+                            ${backupItems.map(backup => `
                                 <div class="backup-item" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                                         <div style="flex: 1;">
@@ -211,11 +215,13 @@ function bindBackupEvents() {
     
     // 自动备份开关
     document.getElementById('auto-backup-toggle')?.addEventListener('change', async (e) => {
+        const enabled = e.target.checked;
         try {
-            await apiCall('/api/auto-backup/toggle', 'POST', {
-                enabled: e.target.checked
+            await apiCall('/api/auto-backup/config', 'PUT', {
+                enabled
             });
-            showToast(e.target.checked ? '自动备份已启用' : '自动备份已禁用');
+            showToast(enabled ? '自动备份已启用' : '自动备份已禁用');
+            await loadBackupSettings();
         } catch (err) {
             showToast('操作失败: ' + err.message, 'error');
             e.target.checked = !e.target.checked;

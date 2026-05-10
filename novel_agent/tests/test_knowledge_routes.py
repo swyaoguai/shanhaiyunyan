@@ -80,3 +80,33 @@ def test_delete_knowledge_chapter_returns_success_when_only_chapter_row_exists(t
     finally:
         shutil.rmtree(kb_dir, ignore_errors=True)
         project_manager_module._project_manager = old_manager
+
+
+def test_import_file_chapter_split_ignores_chapter_prefixed_body_lines():
+    app = create_app()
+    client = TestClient(app)
+    content = (
+        "第1章 标题1\n"
+        "第1章正文里主角继续调查，并发现新的线索。\n"
+        "后续正文继续展开。\n\n"
+        "第2章 标题2\n"
+        "第2章正文里主角继续调查，并发现新的线索。\n"
+        "后续正文继续展开。"
+    )
+
+    response = client.post(
+        "/api/knowledge-base/import-file",
+        json={
+            "content": content,
+            "filename": "sample.txt",
+            "category_id": "db-outline-main",
+            "category_key": "outline",
+            "split_mode": "chapter",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert [item["name"] for item in payload["items"]] == ["标题1", "标题2"]
+    assert "第1章正文里主角继续调查" in payload["items"][0]["details"]

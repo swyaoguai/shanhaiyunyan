@@ -70,6 +70,32 @@ def test_character_manager_loads_structured_character_fields(tmp_path):
     assert character.notes == "常用谐音梗回怼别人"
 
 
+def test_character_manager_syncs_learned_abilities_from_chapter_text(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "characters.json").write_text(
+        json.dumps(
+            [{"name": "天齐", "role": "主角", "description": "少年主角", "abilities": ["轻功"]}],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = CharacterManager(project_dir)
+    updates = manager.sync_development_from_text(
+        "天齐在雨夜里终于领悟了御风术，带着女主越过宫墙。",
+        chapter_number=4,
+    )
+    reloaded = CharacterManager(project_dir)
+    character = reloaded.get_character("天齐")
+
+    assert updates == {"天齐": ["御风术"]}
+    assert character is not None
+    assert character.abilities == ["轻功", "御风术"]
+    assert "第4章获得/掌握：御风术" in character.notes
+
+
 def test_world_manager_loads_list_payload_without_warning(tmp_path, caplog):
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True, exist_ok=True)

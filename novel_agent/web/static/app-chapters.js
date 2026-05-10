@@ -15,6 +15,18 @@ function getStoredChapters() {
     return store.projectData.chapters;
 }
 
+function getChapterDisplayNumber(chapter, fallback) {
+    const parsed = Number(chapter?.chapter_number || chapter?.chapter || fallback || 1);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : (fallback || 1);
+}
+
+function getNextStoredChapterNumber() {
+    const numbers = getStoredChapters()
+        .map((chapter, index) => getChapterDisplayNumber(chapter, index + 1))
+        .filter((number) => number > 0);
+    return (numbers.length > 0 ? Math.max(...numbers) : 0) + 1;
+}
+
 function getChapterSettingPlaceholders() {
     const settings = Array.isArray(store.projectData.chapter_settings) ? store.projectData.chapter_settings : [];
     return settings.map((item, index) => {
@@ -106,8 +118,8 @@ function showCollaborativeImportDialog() {
                     <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">导入方式</label>
                     <select id="collab-import-merge-mode"
                         style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; color: var(--text-primary);">
-                        <option value="append">追加到现有章节（推荐）</option>
-                        <option value="replace">替换现有章节</option>
+                        <option value="replace">替换现有章节（推荐）</option>
+                        <option value="append">追加到现有章节</option>
                     </select>
                 </div>
 
@@ -177,10 +189,7 @@ function showCollaborativeImportDialog() {
 function showAddChapterDialog() {
     const modal = document.getElementById('modal-container');
     modal.classList.remove('hidden');
-    
-    const chapters = getMultiAgentChapters();
-    const nextChapterNum = chapters.length + 1;
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; padding: 30px; width: 500px; max-width: 90%;">
@@ -235,7 +244,7 @@ function showAddChapterDialog() {
         
         getStoredChapters().push({
             title: title,
-            chapter_number: getStoredChapters().length + 1,
+            chapter_number: getNextStoredChapterNumber(),
             summary: summary,
             content: '',
             created_at: new Date().toISOString()
@@ -276,7 +285,8 @@ function deleteChapter(index) {
     const chapter = getMultiAgentChapters()[index];
     if (!chapter) return;
 
-    if (confirm(`确定要删除「${formatChapterDisplay(index + 1, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
+    const chapterNumber = getChapterDisplayNumber(chapter, index + 1);
+    if (confirm(`确定要删除「${formatChapterDisplay(chapterNumber, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
         getStoredChapters().splice(index, 1);
         saveChaptersData();
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
@@ -297,7 +307,8 @@ function openChapterEditor(index) {
     if (!chapter) return;
 
     currentEditingChapterIndex = index;
-    updateBreadcrumbs(['写作', formatChapterDisplay(index + 1, chapter.title)]);
+    const chapterNumber = getChapterDisplayNumber(chapter, index + 1);
+    updateBreadcrumbs(['写作', formatChapterDisplay(chapterNumber, chapter.title)]);
 
     const wordCount = (chapter.content || '').replace(/\s/g, '').length;
 
@@ -479,5 +490,6 @@ window.saveCurrentChapter = saveCurrentChapter;
 window.saveOutlineData = saveOutlineData;
 window.saveChaptersData = saveChaptersData;
 window.getMultiAgentChapters = getMultiAgentChapters;
+window.getChapterDisplayNumber = getChapterDisplayNumber;
 
 console.log('[app-chapters.js] 章节管理模块已加载');

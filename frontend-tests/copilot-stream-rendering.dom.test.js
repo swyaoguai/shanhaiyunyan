@@ -39,6 +39,57 @@ describe('copilot stream rendering', () => {
     expect(css).toMatch(/\.msg\.ai\.streaming\s+\.msg-content\s*\{[\s\S]*white-space:\s*pre-wrap;/);
   });
 
+  it('buffers protocol-shaped streaming chunks instead of leaking JSON fragments', () => {
+    const filter = window.createCopilotStreamTextFilter();
+
+    expect(filter.push('{"type":"llm_chunk","agent":"Worldbuilder","content":"')).toBe('');
+    expect(filter.push('道","seed":"abc"}')).toBe('');
+    expect(filter.push('\n\n真正给用户看的回复。')).toBe('真正给用户看的回复。');
+    expect(filter.flush()).toBe('');
+  });
+
+  it('removes complete protocol payloads when visible text follows in the same stream chunk', () => {
+    const filter = window.createCopilotStreamTextFilter();
+
+    expect(filter.push('{"type":"llm_chunk","agent":"Worldbuilder","delta":"内"}\n真正给用户看的回复。')).toBe('真正给用户看的回复。');
+    expect(filter.flush()).toBe('');
+  });
+
+  it('extracts visible content from complete structured stream chunks', () => {
+    const filter = window.createCopilotStreamTextFilter();
+
+    expect(filter.push('{"type":"chunk","content":"第一行\\n第二行"}')).toBe('第一行\n第二行');
+    expect(filter.flush()).toBe('');
+  });
+
+  it('does not show llm_chunk workflow progress as user-visible status', () => {
+    const aiDiv = window.createStreamMessage();
+
+    window.appendStreamWorkflowProgress(aiDiv, {
+      type: 'llm_chunk',
+      current_agent: 'Worldbuilder',
+      last_progress: '"seed":"abc"'
+    });
+
+    expect(aiDiv.querySelector('.copilot-progress-trace-line')).toBeNull();
+  });
+
+  it('renders raw structured payloads as a readable code block', () => {
+    window.appendMessage('{"continents":["中原大陆"],"events":["开端"]}', 'ai');
+
+    const code = document.querySelector('.msg.ai .msg-content pre code');
+    expect(code).not.toBeNull();
+    expect(code?.textContent).toContain('"continents"');
+    expect(code?.textContent).toContain('"中原大陆"');
+  });
+
+  it('keeps assistant bubbles wide enough for structured content', () => {
+    const css = readFileSync(path.join(ROOT, 'novel_agent/web/static/style.css'), 'utf8');
+
+    expect(css).toMatch(/\.msg\.ai\s*\{[\s\S]*min-width:\s*min\(260px,\s*90%\);/);
+    expect(css).toMatch(/\.msg-content pre code\s*\{[\s\S]*white-space:\s*pre-wrap;/);
+  });
+
   it('shows workflow progress without markdown heading markers', () => {
     window.showInlineStatusFromWorkflow({
       current_agent: 'Worldbuilder',
@@ -101,5 +152,33 @@ describe('copilot stream rendering', () => {
 
     expect(payload.contract_id).toBe('contract-2');
     expect(payload.scope.novel_type).toBe('科幻');
+  });
+
+  it('keeps broad creation briefs out of the plot field on contract cards', () => {
+    window.appendMessage(window.renderCreationContractCard({
+      contract_id: 'contract-3',
+      user_confirmed: false,
+      scope: {
+        novel_type: '古代言情',
+        theme: '古代甜宠',
+        protagonist: '',
+        plot_idea: '',
+        ai_autonomy_requested: true,
+        target_word_count: 50000,
+        volume_count: 1,
+        chapters_per_volume: 17,
+        total_chapters: 17
+      },
+      constraints: { style: [], quality_rules: ['避免AI腔'] },
+      deliverables: [],
+      task_graph: []
+    }), 'ai');
+
+    const cardText = document.querySelector('.copilot-contract-card')?.textContent || '';
+    expect(cardText).toContain('类型古代言情');
+    expect(cardText).toContain('主题古代甜宠');
+    expect(cardText).toContain('主角由助手自主设定');
+    expect(cardText).toContain('剧情由助手自主构思');
+    expect(cardText).not.toContain('我想写一本');
   });
 });

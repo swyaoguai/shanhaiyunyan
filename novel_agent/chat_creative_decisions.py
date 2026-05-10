@@ -52,6 +52,17 @@ MODIFICATION_MARKERS = (
     "写入",
     "同步",
 )
+PERSISTENCE_MARKERS = (
+    "保存",
+    "写入",
+    "同步",
+    "落盘",
+    "存档",
+    "加入资料库",
+    "保存到资料库",
+    "写入资料库",
+    "同步到资料库",
+)
 
 CREATIVE_OBJECTS: Dict[str, Dict[str, Any]] = {
     "worldbuilding": {
@@ -146,6 +157,10 @@ def _contains_any(text: str, markers: Tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_explicit_persistence_request(text: str, mode: str) -> bool:
+    return _normalize_mode(mode) == "execute" or _contains_any(text, PERSISTENCE_MARKERS)
+
+
 def _detect_targets(message: str) -> List[str]:
     targets: List[str] = []
     for key, config in CREATIVE_OBJECTS.items():
@@ -180,7 +195,12 @@ def detect_creative_decision(message: str, mode: str = "auto") -> Optional[Creat
     if not has_modification and not targets and not has_direction:
         return None
 
-    should_update_content = bool(has_modification and targets and effective_mode != "plan")
+    should_update_content = bool(
+        has_modification
+        and targets
+        and effective_mode != "plan"
+        and _is_explicit_persistence_request(text, effective_mode)
+    )
     decision_type = "content_revision" if should_update_content else "direction_update"
     if not targets and has_direction:
         targets = ["creation_contract"]
@@ -251,9 +271,28 @@ def _update_project_rows(pm: Any, data_type: str, message: str) -> Optional[Dict
         return None
 
     try:
-        rows = pm.load_project_data(data_type)
+        payload = pm.load_project_data(data_type)
     except Exception:
-        rows = []
+        payload = []
+
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload["revision_notes"] = _append_unique_note(payload.get("revision_notes"), message)
+        payload["updated_at"] = datetime.now().isoformat()
+        try:
+            data_path = pm.get_project_data_path(data_type)
+            existed_before = data_path.exists()
+            pm.save_project_data(data_type, payload)
+        except Exception:
+            return None
+        return {
+            "path": str(data_path),
+            "kind": data_type,
+            "label": str(config.get("label") or data_type),
+            "status": "updated" if existed_before else "created",
+        }
+
+    rows = payload
     if not isinstance(rows, list):
         rows = []
 

@@ -342,12 +342,13 @@ class NovelImportService:
         for index, chapter in enumerate(outline, start=1):
             if not isinstance(chapter, dict):
                 continue
-            title = str(chapter.get("title") or f"Chapter {index}").strip() or f"Chapter {index}"
+            chapter_number = self._positive_int(chapter.get("chapter_number") or chapter.get("number"), index)
+            title = str(chapter.get("title") or f"Chapter {chapter_number}").strip() or f"Chapter {chapter_number}"
             content = str(chapter.get("content") or "").strip()
             summary = str(chapter.get("summary") or "").strip()
 
             hydrated = self._hydrate_chapter(
-                chapter_number=index,
+                chapter_number=chapter_number,
                 title=title,
                 content=content,
             )
@@ -408,10 +409,11 @@ class NovelImportService:
             content = (mark.content or "").strip()
             if not content:
                 continue
-            title = (mark.title or f"Chapter {idx}").strip() or f"Chapter {idx}"
+            chapter_number = self._positive_int(mark.chapter_number, idx)
+            title = (mark.title or f"Chapter {chapter_number}").strip() or f"Chapter {chapter_number}"
             chapters.append(
                 self._hydrate_chapter(
-                    chapter_number=idx,
+                    chapter_number=chapter_number,
                     title=title,
                     content=content,
                 )
@@ -442,7 +444,8 @@ class NovelImportService:
 
         chapters: List[Dict[str, Any]] = []
         for index, match in enumerate(matches, start=1):
-            title = (match.group(1) or "").strip() or f"Chapter {index}"
+            raw_title = (match.group(1) or "").strip()
+            chapter_number, title = self._parse_heading_metadata(raw_title, index)
             content_start = match.end()
             content_end = matches[index].start() if index < len(matches) else len(text)
             content = text[content_start:content_end].strip()
@@ -450,12 +453,18 @@ class NovelImportService:
                 continue
             chapters.append(
                 self._hydrate_chapter(
-                    chapter_number=index,
+                    chapter_number=chapter_number,
                     title=title,
                     content=content,
                 )
             )
         return chapters
+
+    def _parse_heading_metadata(self, title: str, fallback_number: int) -> tuple[int, str]:
+        chapter_number, parsed_title = self._chapter_marker._parse_chapter_title(title)
+        normalized_number = self._positive_int(chapter_number, fallback_number)
+        normalized_title = (parsed_title or title or f"Chapter {normalized_number}").strip()
+        return normalized_number, normalized_title or f"Chapter {normalized_number}"
 
     def _hydrate_chapter(self, chapter_number: int, title: str, content: str) -> Dict[str, Any]:
         content = (content or "").strip()
@@ -485,11 +494,7 @@ class NovelImportService:
         for index, chapter in enumerate(chapters, start=1):
             if not isinstance(chapter, dict):
                 continue
-            number = chapter.get("chapter_number")
-            if isinstance(number, int) and number > 0:
-                chapter_number = number
-            else:
-                chapter_number = index
+            chapter_number = self._positive_int(chapter.get("chapter_number"), index)
 
             title = str(chapter.get("title") or f"Chapter {chapter_number}").strip() or f"Chapter {chapter_number}"
             content = str(chapter.get("content") or "").strip()
@@ -529,9 +534,15 @@ class NovelImportService:
             )
 
         normalized.sort(key=lambda row: row["chapter_number"])
-        for idx, row in enumerate(normalized, start=1):
-            row["chapter_number"] = idx
         return normalized
+
+    @staticmethod
+    def _positive_int(value: Any, fallback: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = int(fallback)
+        return number if number > 0 else int(fallback)
 
     @staticmethod
     def _build_summary(content: str, max_chars: int = 220) -> str:

@@ -42,7 +42,7 @@ def test_no_archive_marker_keeps_chat_revision_discussion_only(tmp_path):
     assert pm.load_project_data("characters") == []
 
 
-def test_chat_revision_updates_contract_task_pool_and_target_data(tmp_path):
+def test_chat_revision_updates_contract_task_pool_without_touching_data_in_auto_mode(tmp_path):
     pm = ProjectManager(data_dir=tmp_path / "data")
     pm.save_project_state(
         "creation_contract",
@@ -77,10 +77,9 @@ def test_chat_revision_updates_contract_task_pool_and_target_data(tmp_path):
 
     assert result is not None
     assert result["applied"] is True
-    assert {item["kind"] for item in result["updated_files"]} >= {
+    assert {item["kind"] for item in result["updated_files"]} == {
         "creation_contract",
         "task_pool",
-        "characters",
     }
 
     contract = pm.load_project_state("creation_contract", default={})
@@ -92,8 +91,59 @@ def test_chat_revision_updates_contract_task_pool_and_target_data(tmp_path):
     assert "宗门复仇线" in task_pool["metadata"]["chat_revision_notes"][-1]
 
     characters = pm.load_project_data("characters")
+    assert "调查城市记忆污染" not in json.dumps(characters, ensure_ascii=False)
+    assert "revision_notes" not in characters[0]
+
+
+def test_chat_revision_updates_target_data_only_in_execute_mode(tmp_path):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    pm.save_project_data(
+        "characters",
+        [
+            {
+                "name": "林渡",
+                "description": "少年剑修",
+            }
+        ],
+    )
+
+    result = process_chat_creative_decision(
+        pm,
+        "把主角林渡的动机修改为调查城市记忆污染，后续不要走宗门复仇线。",
+        mode="execute",
+    )
+
+    assert result is not None
+    assert {item["kind"] for item in result["updated_files"]} >= {"characters"}
+
+    characters = pm.load_project_data("characters")
     assert "调查城市记忆污染" in json.dumps(characters, ensure_ascii=False)
     assert characters[0]["revision_notes"]
+
+
+def test_chat_revision_preserves_dict_project_data_payload(tmp_path):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    pm.save_project_data(
+        "worldbuilding",
+        {
+            "world_name": "旧城",
+            "power_system": "剑修体系",
+        },
+    )
+
+    result = process_chat_creative_decision(
+        pm,
+        "把世界观保存到资料库，后续强调旧城记忆污染。",
+        mode="execute",
+    )
+
+    saved_world = pm.load_project_data("worldbuilding")
+
+    assert result is not None
+    assert {item["kind"] for item in result["updated_files"]} >= {"worldbuilding"}
+    assert isinstance(saved_world, dict)
+    assert saved_world["world_name"] == "旧城"
+    assert "旧城记忆污染" in saved_world["revision_notes"][-1]
 
 
 class _StreamingInfoAgent(CommunicatorAgent):

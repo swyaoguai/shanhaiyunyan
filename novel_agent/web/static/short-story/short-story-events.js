@@ -710,6 +710,11 @@ function bindShortStoryEvents() {
 
     document.getElementById('short-story-copy-final')?.addEventListener('click', copyShortStoryFinalText);
     document.getElementById('short-story-final-copy')?.addEventListener('click', copyShortStoryFinalText);
+    document.getElementById('short-story-back-to-panel')?.addEventListener('click', async () => {
+        shortStoryState.activeView = 'panel';
+        saveShortStoryData();
+        await renderShortStoryInterface();
+    });
     document.getElementById('short-story-export-txt')?.addEventListener('click', () => exportShortStoryFile('txt'));
     document.getElementById('short-story-export-md')?.addEventListener('click', () => exportShortStoryFile('md'));
     document.getElementById('short-story-export-docx')?.addEventListener('click', () => exportShortStoryFile('docx'));

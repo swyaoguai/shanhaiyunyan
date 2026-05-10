@@ -125,6 +125,53 @@ class _FailingFormalCoordinator(_FakeFormalCoordinator):
         raise RuntimeError("formal task pool boom")
 
 
+class _TaskFailedFormalCoordinator(_FakeFormalCoordinator):
+    async def execute_project_ready_tasks(self, max_tasks=2, max_chapter_tasks=1):
+        self.last_execute_kwargs = {
+            "max_tasks": max_tasks,
+            "max_chapter_tasks": max_chapter_tasks,
+        }
+        task_pool = self.project_manager.load_project_state("task_pool", default={})
+        for task in task_pool.get("tasks", []):
+            if task.get("task_type") == "build_world":
+                task["status"] = "completed"
+                task["assigned_agent"] = "Worldbuilder"
+                task["result_ref"] = "worldbuilding.json"
+            elif task.get("task_type") == "build_outline":
+                task["status"] = "pending"
+            elif task.get("task_type") == "write_chapter":
+                task["status"] = "pending"
+        task_pool.setdefault("tasks", []).insert(
+            1,
+            {
+                "task_id": "characters-1",
+                "task_type": "build_characters",
+                "title": "生成角色档案",
+                "status": "failed",
+                "result_ref": "",
+                "assigned_agent": "CharacterBuilder",
+                "inputs": {},
+                "metadata": {"error": "角色卡草稿质量不足"},
+            },
+        )
+        task_pool.setdefault("metadata", {})["project_ready_execution"] = {
+            "executed_task_count": 1,
+            "chapter_tasks_executed": 0,
+            "stop_reason": "task_failed",
+            "stopped_on_task_type": "build_characters",
+        }
+        self.project_manager.save_project_state("task_pool", task_pool)
+        return {
+            "task_pool": task_pool,
+            "executed_tasks": [
+                {"task_id": "world-1", "task_type": "build_world", "title": "生成世界观", "selected_agent": "Worldbuilder", "result_ref": "worldbuilding.json"},
+            ],
+            "project_ready_execution": task_pool["metadata"]["project_ready_execution"],
+            "stop_reason": "task_failed",
+            "stopped_on_task_type": "build_characters",
+        }
+
+
 @pytest.mark.asyncio
 async def test_novel_create_route_uses_formal_router_execution(tmp_path, monkeypatch):
     pm = ProjectManager(data_dir=tmp_path / "data")
@@ -163,7 +210,7 @@ async def test_novel_create_route_uses_formal_router_execution(tmp_path, monkeyp
     saved_task_pool = pm.load_project_state("task_pool", default={})
     saved_trace = pm.load_project_state("collab_execution_trace", default={})
 
-    assert "已切换到正式多Agent协作执行链" in joined
+    assert "已切换到正式多助手协作执行链" in joined
     assert "当前任务池中的章节任务已全部完成。" in joined
     assert coordinator.last_execute_kwargs == {"max_tasks": 3, "max_chapter_tasks": 1}
     assert saved_task_pool.get("metadata", {}).get("source") == "contract_confirmation"
@@ -173,6 +220,41 @@ async def test_novel_create_route_uses_formal_router_execution(tmp_path, monkeyp
     status_response = await chat_routes.get_chat_workflow_status(session_id="copilot")
     status_payload = json.loads(status_response.body.decode("utf-8"))
     assert status_payload["workflow"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_formal_router_execution_does_not_report_empty_outline_as_chapter_complete(tmp_path, monkeypatch):
+    pm = ProjectManager(data_dir=tmp_path / "data")
+    project_dir = pm._get_project_dir(pm.current_project_id)
+    coordinator = _TaskFailedFormalCoordinator(pm=pm, project_dir=project_dir)
+    router = RouterAgent(coordinator=coordinator)
+
+    monkeypatch.setattr("novel_agent.project_manager.get_project_manager", lambda: pm)
+
+    contract_payload = {
+        "contract_id": "contract-failed-character",
+        "scope": {
+            "novel_type": "古代甜宠",
+            "theme": "甜宠",
+            "plot_idea": "",
+            "volume_count": 1,
+            "chapters_per_volume": 17,
+        },
+        "task_graph": [],
+    }
+
+    result = await router._execute_create_novel_pipeline_formal(
+        message="我想写一本古代甜宠题材小说，篇幅5w字，其他的你随便帮我安排",
+        context={"run_id": "run-task-failed"},
+        requirements={},
+        contract_payload=contract_payload,
+    )
+
+    assert result["is_complete"] is False
+    assert result["focus_chapter"] == 1
+    assert "当前停止原因：任务执行失败" in result["response"]
+    assert "章节任务尚未完成：上游任务已停止，请先处理当前停止原因。" in result["response"]
+    assert "当前任务池中的章节任务已全部完成。" not in result["response"]
 
 
 @pytest.mark.asyncio

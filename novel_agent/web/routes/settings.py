@@ -25,7 +25,7 @@ from ..models.requests import (
 )
 from ..runtime_refresh import refresh_runtime_after_config_reload
 from ...config import config
-from ...constants import TIMEOUTS, LLM_DEFAULTS, SERVER_DEFAULTS
+from ...constants import TIMEOUTS, LLM_DEFAULTS, SERVER_DEFAULTS, get_app_root
 from ...timeout_settings import get_timeout_setting_ranges, get_timeout_settings, save_timeout_settings
 from ...utils.atomic_write import atomic_write_text
 
@@ -363,7 +363,7 @@ async def get_settings():
 @router.post("/settings")
 async def save_settings(request: APIConfigRequest):
     """Save API settings to .env file."""
-    env_path = Path(__file__).parent.parent.parent.parent / ".env"
+    env_path = get_app_root() / ".env"
     
     # 
     env_content = {}

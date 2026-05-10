@@ -35,3 +35,10 @@ def test_strip_visible_technical_markers_does_not_leak_metadata_only_json():
     raw = '助手返回：{"status":"completed","task_graph":[{"title":"世界观"}]}'
 
     assert strip_visible_technical_markers(raw) == ""
+
+
+def test_strip_visible_technical_markers_does_not_leak_metadata_fragments():
+    raw = '_id\n";\n"\nz\nhao\n-'
+
+    assert strip_visible_technical_markers(raw) == ""
+    assert stream_visible_text(raw) == ""

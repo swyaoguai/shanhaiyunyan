@@ -3,3 +3,6 @@
 # Test dependencies
 pytest>=9.0.0
 pytest-asyncio>=1.3.0
+
+# Portable build
+pyinstaller>=6.0.0

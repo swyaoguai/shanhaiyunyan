@@ -86,6 +86,59 @@ def test_collab_import_creates_collab_memory(client_with_project):
     assert len(memory_payload.get("chapter_cards", [])) >= 2
 
 
+def test_collab_import_replace_preserves_source_chapter_numbers(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data(
+        "chapters",
+        [{"chapter_number": index, "title": f"旧第{index}章", "content": "旧正文"} for index in range(1, 124)],
+    )
+    content = (
+        "第123章 雨夜\n"
+        "林风在雨夜遇见旧友，决定连夜进城。\n"
+        "第124章 异象\n"
+        "城门口突然出现异光，所有人都停下脚步。"
+    )
+
+    response = client.post(
+        "/api/projects/import-novel",
+        files={"novel_file": ("sample.txt", content.encode("utf-8"), "text/plain")},
+        data={"merge_mode": "replace"},
+    )
+
+    assert response.status_code == 200
+    saved = manager.load_project_data("chapters")
+    assert [chapter["chapter_number"] for chapter in saved] == [123, 124]
+    assert [chapter["title"] for chapter in saved] == ["雨夜", "异象"]
+
+
+def test_collab_import_append_offsets_colliding_chapter_numbers(client_with_project):
+    client, manager = client_with_project
+    manager.save_project_data(
+        "chapters",
+        [
+            {"chapter_number": 1, "title": "旧第1章", "content": "旧正文"},
+            {"chapter_number": 2, "title": "旧第2章", "content": "旧正文"},
+        ],
+    )
+    content = (
+        "第1章 雨夜\n"
+        "林风在雨夜遇见旧友，决定连夜进城。\n"
+        "第2章 异象\n"
+        "城门口突然出现异光，所有人都停下脚步。"
+    )
+
+    response = client.post(
+        "/api/projects/import-novel",
+        files={"novel_file": ("sample.txt", content.encode("utf-8"), "text/plain")},
+        data={"merge_mode": "append"},
+    )
+
+    assert response.status_code == 200
+    saved = manager.load_project_data("chapters")
+    assert [chapter["chapter_number"] for chapter in saved] == [1, 2, 3, 4]
+    assert [chapter["title"] for chapter in saved[-2:]] == ["雨夜", "异象"]
+
+
 def test_infinite_import_creates_isolated_memory(client_with_project):
     client, manager = client_with_project
     content = (
@@ -121,6 +174,50 @@ def test_infinite_import_creates_isolated_memory(client_with_project):
     assert memory_payload["mode"] == "infinite_write"
     assert memory_payload["session_id"] == "sess_import_1"
     assert len(memory_payload.get("chapter_memory", [])) >= 2
+
+
+def test_infinite_import_preserves_source_chapter_numbers(client_with_project):
+    client, _manager = client_with_project
+    content = (
+        "第123章 雨夜\n"
+        "林风在雨夜遇见旧友，决定连夜进城。\n"
+        "第124章 异象\n"
+        "城门口突然出现异光，所有人都停下脚步。"
+    )
+
+    response = client.post(
+        "/api/continuous-write/import",
+        files={"novel_file": ("sample.txt", content.encode("utf-8"), "text/plain")},
+        data={"session_id": "sess_import_123"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [chapter["chapter_number"] for chapter in payload["chapters"]] == [123, 124]
+    assert payload["current_chapter"] == 124
+
+
+def test_infinite_import_does_not_double_chapter_prefixed_body_lines(client_with_project):
+    client, _manager = client_with_project
+    content = "\n".join(
+        f"第{index}章 标题{index}\n"
+        f"第{index}章正文里主角继续调查，并发现新的线索。\n"
+        "后续正文继续展开。"
+        for index in range(1, 124)
+    )
+
+    response = client.post(
+        "/api/continuous-write/import",
+        files={"novel_file": ("sample.txt", content.encode("utf-8"), "text/plain")},
+        data={"session_id": "sess_import_no_double"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["imported_chapters"] == 123
+    assert payload["current_chapter"] == 123
+    assert payload["chapters"][-1]["chapter_number"] == 123
+    assert payload["chapters"][-1]["title"] == "标题123"
 
 
 def test_chapters_save_auto_refreshes_collab_memory(client_with_project):

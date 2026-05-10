@@ -154,6 +154,27 @@ describe('copilot workflow panel regressions', () => {
     expect(document.body.textContent).toContain('待审查');
   });
 
+  it('translates internal workflow error codes before rendering progress', () => {
+    window.updateCopilotWorkflowPanel({
+      run_id: 'run-error',
+      status: 'failed',
+      current_agent: 'ChapterWriter',
+      target_agent: 'ChapterWriter',
+      stage: 'chapters',
+      last_progress: '### 工作流停止\n生成正文章节未通过：missing_chapter_number',
+      last_error: 'missing_chapter_number',
+      task_queue: [
+        { task_id: 'create_chapters', title: '生成正文章节', task_type: 'chapters', status: 'failed', target_agent: 'ChapterWriter', review_required: true }
+      ],
+      reviews: []
+    });
+
+    const text = document.body.textContent || '';
+    expect(text).toContain('缺少章节号');
+    expect(text).toContain('正文章节');
+    expect(text).not.toContain('missing_chapter_number');
+  });
+
   it('restoring workflow status requests backend snapshot and syncs runtime task pool', async () => {
     window.apiCall
       .mockResolvedValueOnce({ workflow: null })
@@ -219,6 +240,8 @@ describe('copilot workflow panel regressions', () => {
     window.appendMessage(taskPoolHtml, 'ai');
 
     expect(document.body.textContent).toContain('创作合同草案');
+    expect(document.body.textContent).toContain('世界观设定');
+    expect(document.body.textContent).not.toContain('计划产物worldbuilding.json');
     expect(document.body.textContent).toContain('任务池摘要');
     expect(document.querySelector('.copilot-contract-confirm-btn')).not.toBeNull();
   });
@@ -419,7 +442,8 @@ describe('copilot workflow panel regressions', () => {
     expect(document.getElementById('main-view')?.textContent).toContain('项目调度');
     expect(document.getElementById('main-view')?.textContent).toContain('各执行助手最近产出');
     expect(document.getElementById('main-view')?.textContent).toContain('世界观构建师');
-    expect(document.getElementById('main-view')?.textContent).toContain('产物位置：worldbuilding.json');
+    expect(document.getElementById('main-view')?.textContent).toContain('产物位置：世界观设定');
+    expect(document.getElementById('main-view')?.textContent).not.toContain('产物位置：worldbuilding.json');
     expect(document.getElementById('main-view')?.textContent).toContain('最近匹配');
     expect(document.querySelector('#collab-execution-filter-breadcrumbs')?.textContent).toContain('当前筛选');
     expect(document.querySelector('#collab-execution-filter-breadcrumbs')?.textContent).toContain('全部阶段');
