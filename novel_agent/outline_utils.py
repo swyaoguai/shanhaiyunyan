@@ -313,18 +313,48 @@ def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = Non
     if isinstance(data, dict):
         next_number = 1
         for volume_index, volume in enumerate(get_outline_volumes(data), start=1):
-            chapters = volume.get("chapters")
-            if not isinstance(chapters, list):
-                continue
             volume_title = str(
                 volume.get("volume_title")
                 or volume.get("title")
                 or volume.get("name")
                 or f"第{volume_index}卷"
             ).strip()
-            for chapter in chapters:
-                append_chapter(chapter, next_number, volume_title=volume_title)
-                next_number += 1
+            chapters = volume.get("chapters")
+            if isinstance(chapters, list) and chapters:
+                for chapter in chapters:
+                    append_chapter(chapter, next_number, volume_title=volume_title)
+                    next_number += 1
+                continue
+
+            # Fallback: when the outline only carries volume-level beats
+            # (key_events/story_beats/major_events), promote each beat to a
+            # chapter row so downstream chapter-setting and chapter-writing
+            # tasks can plan per chapter instead of replaying the global synopsis.
+            beats = (
+                volume.get("key_events")
+                or volume.get("story_beats")
+                or volume.get("major_events")
+            )
+            if isinstance(beats, list) and beats:
+                for beat in beats:
+                    if isinstance(beat, dict):
+                        append_chapter(beat, next_number, volume_title=volume_title)
+                        next_number += 1
+                        continue
+                    beat_text = humanize_structured_value(beat).strip()
+                    if not beat_text or is_pending_text(beat_text):
+                        continue
+                    append_chapter(
+                        {
+                            "chapter_number": next_number,
+                            "title": f"第{next_number}章",
+                            "summary": beat_text,
+                            "key_event": beat_text,
+                        },
+                        next_number,
+                        volume_title=volume_title,
+                    )
+                    next_number += 1
 
         direct_chapters = data.get("chapters")
         if isinstance(direct_chapters, list):

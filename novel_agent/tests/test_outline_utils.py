@@ -4,6 +4,7 @@ from novel_agent.outline_utils import (
     build_global_outline_text,
     build_outline_overview_row,
     extract_eventlines_from_outline,
+    extract_outline_chapter_rows,
     format_outline_volume_plan,
     merge_eventline_rows,
     normalize_outline_payload,
@@ -184,3 +185,61 @@ def test_outline_eventline_merge_preserves_user_fields():
     assert merged[0]["description"] == "用户手动改过的版本"
     assert merged[0]["start_chapter"] == 3
     assert merged[1]["thread_id"] == "secret_box"
+
+
+def test_extract_chapters_falls_back_to_volume_key_events():
+    """When the outline only carries volume-level beats, each beat must be
+    promoted to its own chapter row so chapter-setting/chapter-writing
+    can plan per chapter instead of replaying the global synopsis."""
+    payload = {
+        "title": "凝王府的甜宠日常",
+        "volumes": [
+            {
+                "volume_number": 1,
+                "volume_title": "初遇成婚",
+                "volume_summary": "上元灯会初遇到大婚庆典。",
+                "key_events": [
+                    "上元灯会初遇，赵景渊暗中留下女主花灯",
+                    "奉旨成婚，洞房夜尴尬互动",
+                    "沈清欢用医术治愈赵景渊旧伤",
+                ],
+            }
+        ],
+    }
+
+    rows = extract_outline_chapter_rows(payload, timestamp="2026-05-11T00:00:00")
+
+    assert [row["chapter_number"] for row in rows] == [1, 2, 3]
+    assert rows[0]["key_event"] == "上元灯会初遇，赵景渊暗中留下女主花灯"
+    assert "上元灯会初遇" in rows[0]["summary"]
+    assert rows[1]["key_event"] == "奉旨成婚，洞房夜尴尬互动"
+    assert rows[2]["key_event"] == "沈清欢用医术治愈赵景渊旧伤"
+    # 不同章节的 summary 必须各不相同，避免回归到"全书梗概被复制 N 份"。
+    assert len({row["summary"] for row in rows}) == 3
+    assert all(row.get("volume_title") == "初遇成婚" for row in rows)
+
+
+def test_explicit_chapters_take_priority_over_key_events():
+    """If a volume already declares chapters, key_events must not duplicate them."""
+    payload = {
+        "volumes": [
+            {
+                "volume_number": 1,
+                "volume_title": "初遇成婚",
+                "chapters": [
+                    {"title": "第1章 灯会偶遇", "summary": "灯会偶遇引出婚约。"},
+                    {"title": "第2章 奉旨成婚", "summary": "奉旨成婚开始磨合。"},
+                ],
+                "key_events": [
+                    "不应被升级为章节的备注节拍",
+                ],
+            }
+        ]
+    }
+
+    rows = extract_outline_chapter_rows(payload, timestamp="2026-05-11T00:00:00")
+
+    assert len(rows) == 2
+    assert all("不应被升级为章节的备注节拍" not in row["summary"] for row in rows)
+    assert rows[0]["title"].startswith("第1章")
+    assert rows[1]["title"].startswith("第2章")
