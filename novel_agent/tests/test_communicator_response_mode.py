@@ -217,6 +217,23 @@ class TestCommunicatorResponseModePropagation:
         assert agent.callback_handler is None
 
 
+class TestCommunicatorRequirementExtraction:
+    """测试沟通阶段的轻量需求抽取。"""
+
+    def test_extracts_per_chapter_words_as_discussable_requirement(self):
+        info = CommunicatorAgent._extract_info_from_user_message("全书5w字左右，每章2500字，卷数我们再讨论")
+
+        assert info["target_word_count"] == 50000
+        assert info["target_words_per_chapter"] == 2500
+        assert info["target_words_per_chapter_source"] == "user"
+
+    def test_per_chapter_words_do_not_become_total_words(self):
+        info = CommunicatorAgent._extract_info_from_user_message("先按每章0.3w字来规划")
+
+        assert info["target_words_per_chapter"] == 3000
+        assert "target_word_count" not in info
+
+
 class TestCommunicatorSearchIntentFallback:
     """测试搜索意图判定失败时的兜底逻辑。"""
 

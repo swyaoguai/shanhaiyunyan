@@ -46,7 +46,10 @@
       "Read(//tmp/**)",
       "Bash(python3 *)",
       "Bash(git -C C:/Users/wen/Desktop/AGENT diff --stat novel_agent/workflow/ novel_agent/agents/collab_sub_agents.py)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(findstr /C:\"passed\" /C:\"failed\" /C:\"error\")",
+      "Bash(findstr \"passed failed\")",
+      "Bash(powershell *)"
     ]
   }
 }

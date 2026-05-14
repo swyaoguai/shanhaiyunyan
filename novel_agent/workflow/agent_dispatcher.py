@@ -44,6 +44,42 @@ class DispatchResult:
         return asdict(self)
 
 
+def _format_agent_failure(result: Any) -> str:
+    """Turn an agent failure payload into a concise user-facing reason."""
+    if not isinstance(result, dict):
+        return "任务执行失败：助手未返回结构化结果。"
+
+    primary = str(
+        result.get("error")
+        or result.get("response_message")
+        or result.get("message")
+        or result.get("reason")
+        or ""
+    ).strip()
+
+    details: List[str] = []
+    for key in ("missing_info", "validation_issues", "violations", "issues"):
+        value = result.get(key)
+        if isinstance(value, list):
+            details.extend(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, str) and value.strip():
+            details.append(value.strip())
+
+    if not primary:
+        primary = "任务执行失败"
+    if details:
+        joined_details = "；".join(dict.fromkeys(details[:4]))
+        if joined_details and joined_details not in primary:
+            primary = f"{primary}：{joined_details}"
+
+    raw_response = str(result.get("raw_response") or "").strip()
+    if raw_response and primary == "任务执行失败":
+        compact_raw = re.sub(r"\s+", " ", raw_response)[:160]
+        primary = f"{primary}，模型原始返回：{compact_raw}"
+
+    return primary[:500] or "任务执行失败"
+
+
 class AgentDispatcher:
     """多 Agent 协作模式的 Phase 1 统一执行入口。"""
 
@@ -611,7 +647,19 @@ class AgentDispatcher:
         try:
             result = await selected_agent.execute(envelope.input_data, context=current_context.to_agent_context())
             if not isinstance(result, dict) or not result.get("success", True):
-                raise RuntimeError(str((result or {}).get("error") or "task_failed"))
+                failure_msg = _format_agent_failure(result)
+                logger.warning(
+                    f"[AgentDispatcher] 任务首次执行失败，task_type={envelope.task_type}, "
+                    f"agent={claimed_by}, reason={failure_msg[:200]}，正在重试..."
+                )
+                retry_context = envelope.context.clone()
+                result = await selected_agent.execute(
+                    envelope.input_data, context=retry_context.to_agent_context()
+                )
+                if not isinstance(result, dict) or not result.get("success", True):
+                    raise RuntimeError(_format_agent_failure(result))
+            if bool(result.get("fallback_used")) or bool(result.get("coverage_fallback_used")):
+                fallback_used = True
 
             current_context.apply_task_result(envelope.task_type, result)
             if envelope.task_type == "content_read":

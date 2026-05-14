@@ -412,6 +412,55 @@ class TestWorldbuilderAgent:
             
             assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_execute_missing_info_returns_failure(self, worldbuilder, mock_context):
+        """missing_info 应在 Agent 层标记失败，避免任务池先记录完成。"""
+        worldbuilder.call_llm = AsyncMock(return_value='''
+        {
+            "status": "missing_info",
+            "missing_info": ["时代背景", "主角身份"]
+        }
+        ''')
+
+        result = await worldbuilder.execute({
+            "novel_type": "古代言情",
+            "theme": "古代甜宠",
+        }, mock_context)
+
+        assert result["success"] is False
+        assert "时代背景" in result["error"]
+        assert result["world"]["status"] == "missing_info"
+
+    @pytest.mark.asyncio
+    async def test_execute_autonomy_prompt_forbids_missing_info_for_unspecified_details(self, worldbuilder, mock_context):
+        """用户授权自主补全时，世界观提示词必须要求主动生成。"""
+        captured = {}
+
+        async def fake_call_llm(messages, *args, **kwargs):
+            captured["prompt"] = messages[-1]["content"]
+            return '''
+            {
+                "status": "ok",
+                "world_name": "云烟京华",
+                "world_type": "古代言情",
+                "geography": {"main_stage": "京城"},
+                "history": "架空王朝承平末年",
+                "rules": ["甜宠关系推进必须服务主线"]
+            }
+            '''
+
+        worldbuilder.call_llm = fake_call_llm
+
+        result = await worldbuilder.execute({
+            "novel_type": "古代言情",
+            "theme": "古代甜宠",
+            "ai_autonomy_requested": True,
+            "discussion_context": "其他的设定和内容都由你补充",
+        }, mock_context)
+
+        assert result["success"] is True
+        assert "不要输出 missing_info" in captured["prompt"] or "不要因为主角" in captured["prompt"]
+
 
 # ==================== OutlinerAgent Tests ====================
 

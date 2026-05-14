@@ -311,13 +311,13 @@ def _update_project_rows(pm: Any, data_type: str, message: str) -> Optional[Dict
             matched = True
         next_rows.append(row_copy)
 
-    if rows and not matched:
-        # Keep the original rows intact and add a scoped revision row.
-        next_rows.append(_make_revision_row(config, message))
-        touched = True
-    elif not rows:
-        next_rows.append(_make_revision_row(config, message))
-        touched = True
+    if data_type != "chapters":
+        if rows and not matched:
+            next_rows.append(_make_revision_row(config, message))
+            touched = True
+        elif not rows:
+            next_rows.append(_make_revision_row(config, message))
+            touched = True
 
     if not touched:
         return None

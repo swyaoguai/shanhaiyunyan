@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Mapping, MutableMapping
 
 from .utils.atomic_write import atomic_write_json
+from .constants import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,14 @@ DEFAULT_TIMEOUT_SETTINGS: Dict[str, Dict[str, int]] = {
     "short_story": DEFAULT_SHORT_STORY_TIMEOUTS,
 }
 
-TIMEOUT_SETTINGS_FILE = Path(__file__).parent / "data" / "timeout_settings.json"
+TIMEOUT_SETTINGS_FILE: Path | None = None
+
+
+def get_timeout_settings_file() -> Path:
+    """Return the writable timeout settings path for the current runtime root."""
+    if TIMEOUT_SETTINGS_FILE is not None:
+        return Path(TIMEOUT_SETTINGS_FILE)
+    return get_data_dir() / "timeout_settings.json"
 
 
 def _coerce_llm_timeout(key: str, value: object) -> int:
@@ -104,9 +112,10 @@ def _normalize_short_story_timeouts(payload: Mapping[str, object] | None) -> Dic
 
 def get_timeout_settings() -> Dict[str, Dict[str, int]]:
     payload = {}
-    if TIMEOUT_SETTINGS_FILE.exists():
+    settings_file = get_timeout_settings_file()
+    if settings_file.exists():
         try:
-            payload = json.loads(TIMEOUT_SETTINGS_FILE.read_text(encoding="utf-8")) or {}
+            payload = json.loads(settings_file.read_text(encoding="utf-8")) or {}
         except Exception as exc:
             logger.warning("Failed to load timeout settings: %s", exc)
 
@@ -148,13 +157,14 @@ def save_timeout_settings(updates: Mapping[str, Mapping[str, object]]) -> Dict[s
         if step in short_story_updates and short_story_updates[step] is not None:
             next_settings["short_story"][step] = _coerce_short_story_timeout(step, short_story_updates[step])
 
+    settings_file = get_timeout_settings_file()
     old_content = (
-        TIMEOUT_SETTINGS_FILE.read_text(encoding="utf-8")
-        if TIMEOUT_SETTINGS_FILE.exists()
+        settings_file.read_text(encoding="utf-8")
+        if settings_file.exists()
         else None
     )
     atomic_write_json(
-        TIMEOUT_SETTINGS_FILE,
+        settings_file,
         next_settings,
         old_content=old_content,
         ensure_ascii=False,

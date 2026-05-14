@@ -434,6 +434,31 @@ class TestLibraryService:
         assert fetched.links_out == ["[[林渡]]", "[[苏晚]]"]
         assert fetched.vector_text == "第3章摘要 和[[林渡]]、[[苏晚]]有关。" or fetched.vector_text == "第3章摘要 和林渡苏晚有关。"
 
+    def test_save_chapter_summary_writes_rich_wiki_page(self, project_dir):
+        from novel_agent.chapter_summary_service import save_chapter_summary_to_library
+        from novel_agent.wiki.wiki_store import WikiStore
+        from novel_agent.wiki.wiki_types import PageType
+
+        saved = save_chapter_summary_to_library(
+            7,
+            {
+                "title": "第7章摘要",
+                "chapter_number": 7,
+                "summary_text": "林渡取得玄铁令，苏晚发现旧案线索。",
+                "key_events": ["取得玄铁令", "旧案线索浮出"],
+                "appearing_characters": ["林渡", "苏晚"],
+                "ending_hook": "玄铁令指向禁地。",
+            },
+            project_dir=project_dir,
+        )
+
+        assert saved is True
+        pages = WikiStore(project_dir / "wiki").list_pages(page_type=PageType.CHAPTER)
+        page = next(item for item in pages if item.frontmatter.chapter_number == 7)
+        assert page.title == "第7章摘要"
+        assert "取得玄铁令" in page.body
+        assert "[[林渡]]" in page.body
+
     def test_project_legacy_view(self, svc):
         svc.load()
         outline = [{"chapter_number": 1, "title": "Ch1"}]

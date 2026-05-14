@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 
@@ -29,6 +30,50 @@ def test_packaged_agent_api_config_persists_next_to_portable_exe(monkeypatch, tm
     env_text = (portable_dir / ".env").read_text(encoding="utf-8")
     assert "OPENAI_API_BASE=http://127.0.0.1:8000/v1" in env_text
     assert "OPENAI_MODEL=deepseek-test" in env_text
+
+
+def test_packaged_runtime_state_defaults_to_portable_data_dir(monkeypatch, tmp_path):
+    portable_dir = tmp_path / "Portable"
+    portable_dir.mkdir()
+    exe_path = portable_dir / "app.exe"
+    exe_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_path))
+
+    from novel_agent.agents.chat_session_store import ChatSessionStore
+    from novel_agent.agents.session_store import SessionStore
+    import novel_agent.timeout_settings as timeout_settings
+    from novel_agent.utils.token_stats import TokenStatsStore
+
+    monkeypatch.setattr(timeout_settings, "TIMEOUT_SETTINGS_FILE", None)
+
+    token_store = TokenStatsStore()
+    try:
+        assert Path(token_store.db_path) == portable_dir / "data" / "stats" / "token_stats.db"
+    finally:
+        token_store.close()
+    assert ChatSessionStore().storage_dir == portable_dir / "data" / "chat_sessions"
+    assert SessionStore().storage_dir == portable_dir / "data" / "sessions"
+    assert timeout_settings.get_timeout_settings_file() == portable_dir / "data" / "timeout_settings.json"
+
+
+def test_run_startup_log_path_uses_portable_data_logs(monkeypatch, tmp_path):
+    original_cwd = Path.cwd()
+    portable_dir = tmp_path / "Portable"
+    portable_dir.mkdir()
+    exe_path = portable_dir / "app.exe"
+    exe_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_path))
+
+    try:
+        import run
+
+        assert run._get_runtime_log_file() == portable_dir / "data" / "logs" / "agent.log"
+    finally:
+        os.chdir(original_cwd)
 
 
 def test_packaged_config_reload_reads_portable_env(monkeypatch, tmp_path):

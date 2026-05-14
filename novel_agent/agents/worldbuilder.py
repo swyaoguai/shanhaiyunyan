@@ -7,6 +7,15 @@ from typing import Dict, Any, Optional
 from .base_agent import AgentCapability, BaseAgent
 
 
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "on", "是", "已授权", "授权", "自主"}
+
+
 class WorldbuilderAgent(BaseAgent):
     """世界观构建Agent"""
     
@@ -54,6 +63,20 @@ class WorldbuilderAgent(BaseAgent):
         novel_type = input_data.get("novel_type") or ""
         theme = input_data.get("theme", "")
         requirements = input_data.get("requirements", "")
+        ai_autonomy_requested = _is_truthy(
+            input_data.get("ai_autonomy_requested")
+            or ((context or {}).get("ai_autonomy_requested") if isinstance(context, dict) else False)
+        )
+        autonomous_brief = str(
+            input_data.get("autonomous_brief")
+            or ((context or {}).get("autonomous_brief") if isinstance(context, dict) else "")
+            or ""
+        ).strip()
+        if ai_autonomy_requested and not autonomous_brief:
+            autonomous_brief = (
+                "用户已授权助手自主补全未指定的时代背景、地域、角色关系、冲突钩子和世界细节；"
+                "请在已给定题材、主题、篇幅和讨论方向内主动创作。"
+            )
         discussion_context = str(
             input_data.get("discussion_context")
             or input_data.get("recent_discussion")
@@ -77,13 +100,23 @@ class WorldbuilderAgent(BaseAgent):
                 "theme": theme,
                 "requirements": requirements,
                 "discussion_context": discussion_context,
+                "ai_autonomy_requested": ai_autonomy_requested,
+                "autonomous_brief": autonomous_brief,
             },
             novel_type=novel_type,
             theme=theme,
             requirements=requirements,
             discussion_context=discussion_context,
+            ai_autonomy_requested=ai_autonomy_requested,
+            autonomous_brief=autonomous_brief,
         )
         if not prompt:
+            missing_info_instruction = (
+                "用户已授权你自主补全未指定设定。除非小说类型完全缺失，否则不要输出 missing_info；"
+                "必须基于已知题材、主题、篇幅和聊天上下文主动生成完整世界观。"
+                if ai_autonomy_requested
+                else '如果关键创作信息不足以可靠构建世界观，请输出 {"status":"missing_info","missing_info":[...]}，不要擅自补成无关设定。'
+            )
             prompt = f"""请为以下小说构建世界观：
 
 {novel_type_section}
@@ -97,10 +130,20 @@ class WorldbuilderAgent(BaseAgent):
 ## 聊天讨论上下文（最高优先级）
 {discussion_context if discussion_context else "无"}
 
+## 用户自主补全授权
+{autonomous_brief if ai_autonomy_requested else "未授权；关键缺失时可以要求用户补充"}
+
 请严格继承聊天讨论中用户已经确认或明显倾向的设定；不要用默认套路覆盖主角、题材、能力体系、世界背景、禁忌或风格要求。
-如果关键创作信息不足以可靠构建世界观，请输出 {{"status":"missing_info","missing_info":[...]}}，不要擅自补成无关设定。
+{missing_info_instruction}
 
 请输出完整的世界观设定（JSON格式）："""
+        elif ai_autonomy_requested:
+            prompt += (
+                "\n\n## 用户自主补全授权（强制）\n"
+                f"{autonomous_brief}\n"
+                "不要因为主角、时代、地域、关系模式或剧情细节尚未指定而返回 missing_info；"
+                "请在既有题材、主题、篇幅和聊天上下文内主动补全，并输出完整世界观 JSON。"
+            )
 
         messages = [{"role": "user", "content": prompt}]
         
@@ -127,6 +170,20 @@ class WorldbuilderAgent(BaseAgent):
         except (json.JSONDecodeError, ValueError, IndexError):
             # 解析失败则返回原始文本
             world_data = {"raw_content": response}
+
+        if isinstance(world_data, dict) and str(world_data.get("status") or "").strip().lower() == "missing_info":
+            missing_items = world_data.get("missing_info")
+            if isinstance(missing_items, list):
+                error_text = "；".join(str(item).strip() for item in missing_items if str(item).strip())
+            else:
+                error_text = str(missing_items or "").strip()
+            return {
+                "success": False,
+                "agent": self.name,
+                "error": f"世界观关键信息不足：{error_text}" if error_text else "世界观关键信息不足",
+                "world": world_data,
+                "raw_response": response,
+            }
 
         # 进度：补齐钩子与叙事约束 -> 完成
         try:

@@ -28,6 +28,13 @@ var showToast = typeof window.showToast === 'function' ? window.showToast : func
     }, 2500);
 };
 
+function promptApiUrl(agentType, taskName) {
+    const base = `/api/prompts/${encodeURIComponent(String(agentType || ''))}`;
+    const taskPart = taskName === undefined ? '' : `/${encodeURIComponent(String(taskName || ''))}`;
+    const url = `${base}${taskPart}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`;
+    return typeof normalizeApiUrl === 'function' ? normalizeApiUrl(url) : url;
+}
+
 /**
  * 加载提示词管理设置页面
  */
@@ -236,7 +243,7 @@ async function loadAgentPrompts(agentType) {
     `;
     
     try {
-        const response = await fetch(`/api/prompts/${agentType}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`);
+        const response = await fetch(promptApiUrl(agentType));
         const data = await response.json();
         
         if (!data.success) {
@@ -364,45 +371,52 @@ function renderSystemPromptTab(systemPrompt, agentType, isCustom) {
  * 渲染任务提示词标签页
  */
 function renderTasksPromptTab(tasks, agentType, hasCustomMap) {
-    if (!tasks || tasks.length === 0) {
-        return `
+    const taskList = Array.isArray(tasks) ? tasks : [];
+    const taskCards = taskList.length === 0
+        ? `
             <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
                 <i class="ri-file-list-line" style="font-size: 48px; opacity: 0.3;"></i>
                 <p style="margin-top: 16px;">该Agent没有定义任务提示词</p>
             </div>
-        `;
-    }
-    
-    return `
-        <div style="display: flex; flex-direction: column; gap: 16px;">
-            ${tasks.map(task => `
-                <div class="task-prompt-card" data-task="${task.name}" 
-                    style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden;">
-                    <div style="padding: 14px 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleTaskCard(this)">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <i class="ri-arrow-right-s-line task-arrow" style="transition: transform 0.2s;"></i>
-                            <span style="font-weight: 500; color: var(--text-primary);">${task.display_name || task.name}</span>
-                            ${hasCustomMap && hasCustomMap[task.name] ? '<span style="color: #f59e0b; font-size: 11px; margin-left: 8px;">✎ 已自定义</span>' : ''}
-                        </div>
-                        <span style="font-size: 11px; color: var(--text-secondary);">${task.description || ''}</span>
+        `
+        : taskList.map(task => `
+            <div class="task-prompt-card" data-task="${escapeAttributeValue(task.name)}"
+                style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden;">
+                <div style="padding: 14px 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleTaskCard(this)">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <i class="ri-arrow-right-s-line task-arrow" style="transition: transform 0.2s;"></i>
+                        <span style="font-weight: 500; color: var(--text-primary);">${escapeHtml(task.display_name || task.name)}</span>
+                        ${hasCustomMap && hasCustomMap[task.name] ? '<span style="color: #f59e0b; font-size: 11px; margin-left: 8px;">✎ 已自定义</span>' : ''}
                     </div>
-                    <div class="task-content" style="display: none; padding: 16px;">
-                        <textarea class="task-prompt-editor" rows="10" 
-                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px; line-height: 1.5; resize: vertical; font-family: 'Consolas', 'Monaco', monospace;"
-                            placeholder="输入任务提示词...">${escapeHtml(task.prompt || '')}</textarea>
-                        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
-                            ${hasCustomMap && hasCustomMap[task.name] ? `
-                                <button class="reset-task-btn" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
-                                    <i class="ri-arrow-go-back-line"></i> 恢复默认
-                                </button>
-                            ` : ''}
-                            <button class="save-task-btn" style="padding: 6px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;">
-                                <i class="ri-save-line"></i> 保存
+                    <span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(task.description || '')}</span>
+                </div>
+                <div class="task-content" style="display: none; padding: 16px;">
+                    <textarea class="task-prompt-editor" rows="10"
+                        style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px; line-height: 1.5; resize: vertical; font-family: 'Consolas', 'Monaco', monospace;"
+                        placeholder="输入任务提示词...">${escapeHtml(task.prompt || '')}</textarea>
+                    <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                        ${hasCustomMap && hasCustomMap[task.name] ? `
+                            <button class="reset-task-btn" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                                <i class="ri-arrow-go-back-line"></i> 恢复默认
                             </button>
-                        </div>
+                        ` : ''}
+                        <button class="save-task-btn" style="padding: 6px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;">
+                            <i class="ri-save-line"></i> 保存
+                        </button>
                     </div>
                 </div>
-            `).join('')}
+            </div>
+        `).join('');
+
+    return `
+        <div style="display: flex; flex-direction: column; gap: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+                <div style="font-size: 13px; color: var(--text-secondary);">自定义任务提示词</div>
+                <button id="add-task-prompt-btn" style="padding: 8px 14px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap;">
+                    <i class="ri-add-line"></i> 新增任务提示词
+                </button>
+            </div>
+            ${taskCards}
         </div>
     `;
 }
@@ -439,7 +453,7 @@ function bindSystemPromptEvents(agentType) {
             saveBtn.disabled = true;
             
             try {
-            const response = await fetch(`/api/prompts/${agentType}/system?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
+            const response = await fetch(promptApiUrl(agentType, 'system'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ content })
@@ -472,7 +486,7 @@ function bindSystemPromptEvents(agentType) {
             resetBtn.disabled = true;
             
             try {
-            const response = await fetch(`/api/prompts/${agentType}/system?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
+            const response = await fetch(promptApiUrl(agentType, 'system'), {
                     method: 'DELETE'
                 });
                 const data = await response.json();
@@ -497,6 +511,11 @@ function bindSystemPromptEvents(agentType) {
  * 绑定任务提示词事件
  */
 function bindTasksPromptEvents(agentType, tasks) {
+    const addTaskBtn = document.getElementById('add-task-prompt-btn');
+    if (addTaskBtn) {
+        addTaskBtn.addEventListener('click', () => showAddTaskPromptDialog(agentType));
+    }
+
     document.querySelectorAll('.task-prompt-card').forEach(card => {
         const taskName = card.dataset.task;
         const saveBtn = card.querySelector('.save-task-btn');
@@ -510,7 +529,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                 saveBtn.disabled = true;
                 
                 try {
-                    const response = await fetch(`/api/prompts/${agentType}/${taskName}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
+                    const response = await fetch(promptApiUrl(agentType, taskName), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ content })
@@ -542,7 +561,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                 resetBtn.disabled = true;
                 
                 try {
-                    const response = await fetch(`/api/prompts/${agentType}/${taskName}?include_advanced=${promptsData.showAdvanced ? 'true' : 'false'}`, {
+                    const response = await fetch(promptApiUrl(agentType, taskName), {
                         method: 'DELETE'
                     });
                     const data = await response.json();
@@ -562,6 +581,93 @@ function bindTasksPromptEvents(agentType, tasks) {
             });
         }
     });
+}
+
+function showAddTaskPromptDialog(agentType) {
+    const modal = document.getElementById('modal-container');
+    if (!modal) {
+        showToast('无法打开弹窗', 'error');
+        return;
+    }
+
+    modal.classList.remove('hidden');
+    modal.innerHTML = `
+        <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000;">
+            <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 14px; padding: 24px; width: 680px; max-width: 94%; max-height: 90vh; overflow-y: auto;">
+                <h3 style="color: var(--text-primary); margin: 0 0 20px; font-size: 18px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-file-add-line"></i>
+                    新增任务提示词
+                </h3>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">任务名称</label>
+                    <input id="new-task-prompt-name" type="text" placeholder="例如：custom_revision 或 角色成长检查"
+                        style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
+                </div>
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">提示词内容</label>
+                    <textarea id="new-task-prompt-content" rows="12" placeholder="输入该任务的完整提示词..."
+                        style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 13px; line-height: 1.5; resize: vertical; font-family: 'Consolas', 'Monaco', monospace;"></textarea>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                    <button id="cancel-add-task-prompt" style="padding: 10px 16px; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">取消</button>
+                    <button id="confirm-add-task-prompt" style="padding: 10px 18px; background: var(--accent-color); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                        <i class="ri-save-line"></i> 保存
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const closeModal = () => {
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+    };
+
+    document.getElementById('cancel-add-task-prompt')?.addEventListener('click', closeModal);
+    document.getElementById('confirm-add-task-prompt')?.addEventListener('click', async () => {
+        const taskName = document.getElementById('new-task-prompt-name')?.value.trim() || '';
+        const content = document.getElementById('new-task-prompt-content')?.value || '';
+
+        if (!/^[\w\u4e00-\u9fff.-]{1,80}$/.test(taskName)) {
+            showToast('任务名称只能包含中英文、数字、下划线、短横线和点号', 'error');
+            return;
+        }
+        if (!content.trim()) {
+            showToast('请输入提示词内容', 'error');
+            return;
+        }
+
+        const confirmBtn = document.getElementById('confirm-add-task-prompt');
+        if (confirmBtn) {
+            confirmBtn.innerHTML = '<i class="ri-loader-4-line"></i> 保存中...';
+            confirmBtn.disabled = true;
+        }
+
+        try {
+            const response = await fetch(promptApiUrl(agentType, taskName), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content })
+            });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || data.detail || '保存失败');
+            }
+            closeModal();
+            showToast(`任务提示词「${taskName}」已创建 ✓`);
+            loadAgentPrompts(agentType);
+            loadAgentList();
+        } catch (e) {
+            showToast('保存失败: ' + e.message, 'error');
+        } finally {
+            if (confirmBtn) {
+                confirmBtn.innerHTML = '<i class="ri-save-line"></i> 保存';
+                confirmBtn.disabled = false;
+            }
+        }
+    });
+
+    setTimeout(() => document.getElementById('new-task-prompt-name')?.focus(), 50);
 }
 
 /**
@@ -590,9 +696,18 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function escapeAttributeValue(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 // 导出到全局
 window.loadPromptSettings = loadPromptSettings;
 window.toggleTaskCard = toggleTaskCard;
+window.showAddTaskPromptDialog = showAddTaskPromptDialog;
 
 console.log('[PromptManager] 提示词管理模块已完成加载并导出到全局');
 

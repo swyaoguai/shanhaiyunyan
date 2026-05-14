@@ -117,6 +117,61 @@ async def test_creation_requirement_extraction_marks_freeform_ai_autonomy(monkey
 
 
 @pytest.mark.asyncio
+async def test_creation_requirement_extraction_marks_you_supplement_as_ai_autonomy():
+    ra = RouterAgent()
+    message = "我想写一本古代的甜宠题材小说，篇幅大概5W字，其他的设定和内容都由你补充"
+
+    info = await ra._build_creation_requirements_async({}, message)
+
+    assert info["target_word_count"] == 50000
+    assert info["ai_autonomy_requested"] is True
+    assert "未指定的世界观、角色姓名、人物设定和剧情细节由助手自主创作" in info["requirements"]
+    contract_payload = ra._build_creation_contract_payload(info, {}, user_confirmed=False)
+    world_task = next(task for task in contract_payload["task_graph"] if task["task_type"] == "build_world")
+    assert contract_payload["scope"]["ai_autonomy_requested"] is True
+    assert world_task["inputs"]["ai_autonomy_requested"] is True
+    assert "用户已授权助手自主安排" in world_task["inputs"]["autonomous_brief"]
+
+
+@pytest.mark.asyncio
+async def test_creation_requirement_extraction_uses_user_per_chapter_words():
+    ra = RouterAgent()
+    message = "我想写一本古代甜宠小说，篇幅5w字，每章2500字，其他的你帮我安排"
+
+    info = await ra._build_creation_requirements_async({}, message)
+
+    assert info["target_word_count"] == 50000
+    assert info["target_words_per_chapter"] == 2500
+    assert info["target_words_per_chapter_source"] == "user"
+    assert info["chapters_per_volume"] == 20
+
+
+def test_per_chapter_word_count_does_not_become_total_word_count():
+    hints = RouterAgent._extract_local_creation_requirement_hints("先按每章3000字规划，卷数和章节数我们再讨论")
+
+    assert hints["target_words_per_chapter"] == 3000
+    assert hints["target_words_per_chapter_source"] == "user"
+    assert "target_word_count" not in hints
+
+
+@pytest.mark.asyncio
+async def test_contract_confirmation_marks_estimated_per_chapter_words_as_adjustable():
+    ra = RouterAgent()
+    requirements = await ra._build_creation_requirements_async({}, "我想写一本古代甜宠小说，篇幅5w字，其他你安排")
+    contract_payload = ra._build_creation_contract_payload(requirements, {}, user_confirmed=False)
+
+    response = ra._build_contract_confirmation_response(
+        requirements=requirements,
+        contract_payload=contract_payload,
+        context={},
+    )
+
+    assert contract_payload["scope"]["target_words_per_chapter_source"] == "estimated"
+    assert "每章目标字数" in response["response"]
+    assert "可继续调整" in response["response"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
     [

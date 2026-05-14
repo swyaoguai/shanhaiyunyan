@@ -1069,7 +1069,8 @@ function getProjectReadyStopReasonLabel(reason) {
         max_tasks_reached: '这一轮任务先跑到上限了',
         max_chapter_tasks_reached: '这一轮连续写章先跑满了',
         fallback_triggered: '系统判断这一轮需要先回退处理',
-        review_required: '这一步需要你先确认'
+        review_required: '这一步需要你先确认',
+        chapter_settings_review_required: '章纲设定还没有确认'
     };
     return labels[key] || (key || '暂时没有卡住');
 }
@@ -1131,6 +1132,9 @@ function getCollabNextStepSuggestion(projectReadyExecution, nextReadyTasks) {
     if (stopReason === 'review_required') {
         return '建议先回到上一步确认内容，再继续往下推进。';
     }
+    if (stopReason === 'chapter_settings_review_required') {
+        return '章纲还没有被确认，确认后才会开始创建正文章节文件。';
+    }
     if (stopReason === 'fallback_triggered') {
         return `建议先处理「${getProjectReadyTaskTypeLabel(stoppedOnTaskType)}」的回退问题，再继续执行。`;
     }
@@ -1144,6 +1148,71 @@ function getCollabNextStepSuggestion(projectReadyExecution, nextReadyTasks) {
         return `下一步最适合推进：${String(nextReadyTasks[0].title || nextReadyTasks[0].task_type || '未命名任务').trim()}。`;
     }
     return '当前没有必须立刻处理的动作，可以先看最近产出，再决定下一步。';
+}
+
+function getCollabResumeAction(projectReadyExecution, nextReadyTasks) {
+    const stopReason = String(projectReadyExecution?.stopReason || '').trim();
+    const stoppedOnTaskType = String(projectReadyExecution?.stoppedOnTaskType || '').trim();
+    const canResume = ['review_required', 'chapter_settings_review_required', 'max_tasks_reached', 'max_chapter_tasks_reached'].includes(stopReason)
+        || (Array.isArray(nextReadyTasks) && nextReadyTasks.length > 0);
+    if (!canResume) return null;
+
+    if (
+        (stopReason === 'review_required' && ['chapter_settings', 'write_chapter'].includes(stoppedOnTaskType))
+        || (stopReason === 'chapter_settings_review_required' && stoppedOnTaskType === 'write_chapter')
+    ) {
+        return {
+            label: '已检查章纲，继续创作正文',
+            hint: '会确认当前章纲并从任务池继续调度，不会重建世界观、角色或大纲。',
+            approveChapterSettings: true
+        };
+    }
+    if (stopReason === 'max_chapter_tasks_reached') {
+        return {
+            label: '继续下一批章节',
+            hint: '适合在看过刚生成的章节后继续推进。'
+        };
+    }
+    return {
+        label: '继续执行任务池',
+        hint: '会沿用已完成产物，从下一个就绪任务开始。'
+    };
+}
+
+async function resumeCollabCreationFlow(options = {}) {
+    const maxTasks = Math.max(1, Number(options.maxTasks || 7) || 7);
+    const maxChapterTasks = Math.max(0, Number(options.maxChapterTasks || 2) || 2);
+    const response = await apiCall('/api/v1/contract/resume', 'POST', {
+        session_id: typeof getCurrentCopilotSessionId === 'function' ? getCurrentCopilotSessionId() : '',
+        max_tasks: maxTasks,
+        max_chapter_tasks: maxChapterTasks,
+        approve_chapter_settings: Boolean(options.approveChapterSettings)
+    });
+    if (response && response.task_pool) {
+        window.store.currentTaskPool = response.task_pool;
+    }
+    if (response && response.collab_execution_trace) {
+        window.store.collabExecutionTrace = response.collab_execution_trace;
+    }
+    if (response && response.creation_contract) {
+        window.store.pendingCreationContract = response.creation_contract;
+    }
+    const projectReadyExecution = response?.project_ready_execution
+        || response?.project_ready_task_execution?.project_ready_execution
+        || null;
+    if (projectReadyExecution) {
+        window.store.projectReadyExecution = projectReadyExecution;
+    }
+    if (typeof window.loadCurrentProjectData === 'function') {
+        await window.loadCurrentProjectData();
+    }
+    if (typeof window.renderNavPanel === 'function') {
+        window.renderNavPanel(window.store.currentModule || 'write');
+    }
+    if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+        window.renderMultiAgentWriteNavPanel();
+    }
+    return response;
 }
 
 function getCollabNextReadyTasks(tasks) {
@@ -1286,6 +1355,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
     const nextReadyTasks = getCollabNextReadyTasks(normalizedPool.tasks);
     const recentOutputs = buildCollabAgentOutputSummaries(normalizedPool.tasks);
     const nextStepSuggestion = getCollabNextStepSuggestion(normalizedProjectReady, nextReadyTasks);
+    const resumeAction = getCollabResumeAction(normalizedProjectReady, nextReadyTasks);
     const statusEntries = Object.entries(normalizedPool.statusCount || {});
     const quickFilters = buildCollabTraceQuickFilters(normalizedTrace.events);
     const namedFilters = getCollabTraceNamedFilters();
@@ -1350,6 +1420,20 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                 当前没有可以立刻接着做的任务。
             </div>
         `;
+    const resumeActionHtml = resumeAction
+        ? `
+            <div style="padding: 12px; border-radius: 10px; background: rgba(34, 197, 94, 0.10); border: 1px solid rgba(34, 197, 94, 0.28);">
+                <button type="button" id="collab-resume-creation-flow-btn"
+                    style="width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(34, 197, 94, 0.45); background: rgba(34, 197, 94, 0.18); color: #bbf7d0; cursor: pointer; font-size: 13px; font-weight: 700;">
+                    <i class="ri-play-line"></i>
+                    ${escapeHtml(resumeAction.label)}
+                </button>
+                <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                    ${escapeHtml(resumeAction.hint)}
+                </div>
+            </div>
+        `
+        : '';
 
     const recentOutputsHtml = recentOutputs.length
         ? recentOutputs.map((item) => `
@@ -1472,6 +1556,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                             <div style="padding: 10px 12px; border-radius: 10px; background: rgba(99, 102, 241, 0.10); border: 1px solid rgba(99, 102, 241, 0.24); font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
                                 ${escapeHtml(nextStepSuggestion)}
                             </div>
+                            ${resumeActionHtml}
                             ${nextReadyHtml}
                         </div>
                     </div>
@@ -1615,6 +1700,34 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
             }
             if (typeof showToast === 'function') {
                 showToast('协作状态已刷新', 'success');
+            }
+        }
+    });
+
+    workspace.querySelector('#collab-resume-creation-flow-btn')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        const previousHtml = button.innerHTML;
+        button.innerHTML = '<i class="ri-loader-4-line"></i> 正在继续...';
+        try {
+            const response = await resumeCollabCreationFlow({
+                approveChapterSettings: Boolean(resumeAction?.approveChapterSettings)
+            });
+            renderCollabTaskPoolWorkspace(window.store.currentTaskPool, window.store.collabExecutionTrace, window.store.projectReadyExecution);
+            if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+                window.renderMultiAgentWriteNavPanel();
+            }
+            if (typeof appendMessage === 'function' && response?.message) {
+                appendMessage(response.message, 'ai');
+            }
+            if (typeof showToast === 'function') {
+                showToast('已继续执行创作流程', 'success');
+            }
+        } catch (error) {
+            button.disabled = false;
+            button.innerHTML = previousHtml;
+            if (typeof showToast === 'function') {
+                showToast(`继续执行失败: ${error.message}`, 'error');
             }
         }
     });
@@ -3739,6 +3852,7 @@ async function exportInfiniteWriteFile(format) {
 window.renderMultiAgentWriteNavPanel = renderMultiAgentWriteNavPanel;
 window.renderCollabTaskPoolWorkspace = renderCollabTaskPoolWorkspace;
 window.openCollabTaskPoolWorkspace = openCollabTaskPoolWorkspace;
+window.resumeCollabCreationFlow = resumeCollabCreationFlow;
 window.renderInfiniteWriteNavPanel = renderInfiniteWriteNavPanel;
 window.loadInfiniteWriteChapterList = loadInfiniteWriteChapterList;
 window.loadInfiniteWriteNavChapterList = loadInfiniteWriteNavChapterList;

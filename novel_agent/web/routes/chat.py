@@ -519,7 +519,14 @@ def _apply_router_result_to_workflow(active_run: Optional[Dict[str, Any]], route
         if isinstance(interruptions, list):
             active_run["user_interruptions"] = interruptions
 
-    if isinstance(router_result, dict) and not router_result.get("success", True):
+    stop_reason = _project_ready_stop_reason_from_delegated(delegated_result)
+    if stop_reason == "task_failed":
+        active_run["status"] = "failed"
+        active_run["last_error"] = str(delegated_params.get("stopped_on_task_type") or stop_reason).strip()
+    elif stop_reason in {"review_required", "chapter_settings_review_required"}:
+        active_run["status"] = "needs_confirmation"
+        active_run["stage"] = "awaiting_confirmation"
+    elif isinstance(router_result, dict) and not router_result.get("success", True):
         active_run["status"] = "failed"
         active_run["last_error"] = str((router_result.get("error") or delegated_result.get("error") or "")).strip()
     elif delegated_result.get("error"):
@@ -596,12 +603,44 @@ def _record_workflow_interruption(
     }
 
 
+def _project_ready_stop_reason_from_delegated(delegated_result: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(delegated_result, dict):
+        return ""
+    params = delegated_result.get("params") if isinstance(delegated_result.get("params"), dict) else {}
+    candidates = [
+        params,
+        params.get("project_ready_execution") if isinstance(params.get("project_ready_execution"), dict) else {},
+    ]
+    project_ready_task_execution = (
+        params.get("project_ready_task_execution")
+        if isinstance(params.get("project_ready_task_execution"), dict)
+        else {}
+    )
+    if project_ready_task_execution:
+        candidates.append(project_ready_task_execution)
+        nested = project_ready_task_execution.get("project_ready_execution")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        stop_reason = str(candidate.get("stop_reason") or "").strip()
+        if stop_reason:
+            return stop_reason
+    return ""
+
+
 def _router_result_terminal_workflow_update(router_result: Optional[Dict[str, Any]]) -> Dict[str, str]:
     delegated_result = (
         router_result.get("delegated_result")
         if isinstance(router_result, dict) and isinstance(router_result.get("delegated_result"), dict)
         else {}
     )
+    stop_reason = _project_ready_stop_reason_from_delegated(delegated_result)
+    if stop_reason == "task_failed":
+        return {"status": "failed", "stage": "failed"}
+    if stop_reason in {"review_required", "chapter_settings_review_required"}:
+        return {"status": "needs_confirmation", "stage": "awaiting_confirmation"}
     if delegated_result.get("error") or (isinstance(router_result, dict) and not router_result.get("success", True)):
         return {"status": "failed", "stage": "failed"}
     if "is_complete" in delegated_result and not bool(delegated_result.get("is_complete")):
@@ -959,9 +998,23 @@ def _normalize_creation_requirements(
             novel_type = ""
 
     target_word_count = _normalize_positive_int(info.get("target_word_count") or hints.get("target_word_count"), 0)
+    target_words_per_chapter = _normalize_positive_int(
+        info.get("target_words_per_chapter") or hints.get("target_words_per_chapter"),
+        0,
+    )
+    target_words_per_chapter_source = str(
+        info.get("target_words_per_chapter_source")
+        or hints.get("target_words_per_chapter_source")
+        or ("user" if target_words_per_chapter else "")
+    ).strip()
     chapters_per_volume = _normalize_positive_int(info.get("chapters_per_volume") or hints.get("chapters_per_volume"), 5)
     if target_word_count and chapters_per_volume <= 5:
-        chapters_per_volume = max(5, min(80, (target_word_count + 2999) // 3000))
+        if target_words_per_chapter:
+            chapters_per_volume = max(1, min(80, (target_word_count + target_words_per_chapter - 1) // target_words_per_chapter))
+        else:
+            chapters_per_volume = max(5, min(80, (target_word_count + 2999) // 3000))
+            target_words_per_chapter = max(500, (target_word_count + chapters_per_volume - 1) // chapters_per_volume)
+            target_words_per_chapter_source = "estimated"
 
     plot_idea = str(info.get("plot_idea") or hints.get("plot_idea") or "").strip()
 
@@ -974,7 +1027,8 @@ def _normalize_creation_requirements(
         "volume_count": _normalize_positive_int(info.get("volume_count"), 1),
         "chapters_per_volume": chapters_per_volume,
         "target_word_count": target_word_count,
-        "target_words_per_chapter": _normalize_positive_int(info.get("target_words_per_chapter") or hints.get("target_words_per_chapter"), 0),
+        "target_words_per_chapter": target_words_per_chapter,
+        "target_words_per_chapter_source": target_words_per_chapter_source,
     }
 
 
@@ -1795,6 +1849,25 @@ def _merge_router_delegated_info(agent: Any, router_result: Optional[Dict[str, A
     return delegated_result
 
 
+def _merge_delegated_runtime_payload(target: Dict[str, Any], delegated_result: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(target, dict) or not isinstance(delegated_result, dict):
+        return
+    params = delegated_result.get("params") if isinstance(delegated_result.get("params"), dict) else {}
+    for key in ("creation_contract", "task_pool", "collab_execution_trace"):
+        value = params.get(key)
+        if isinstance(value, dict) and value:
+            target[key] = value
+    project_ready_task_execution = params.get("project_ready_task_execution")
+    if isinstance(project_ready_task_execution, dict) and project_ready_task_execution:
+        target["project_ready_task_execution"] = project_ready_task_execution
+        nested = project_ready_task_execution.get("project_ready_execution")
+        target["project_ready_execution"] = nested if isinstance(nested, dict) else project_ready_task_execution
+    for key in ("stop_reason", "stopped_on_task_type", "awaiting_user_review"):
+        value = params.get(key)
+        if value not in (None, "", [], {}):
+            target[key] = value
+
+
 def _process_chat_creative_decision(pm: Any, message: str, creative_mode: str) -> Optional[Dict[str, Any]]:
     """Persist/apply chat-driven creative decisions without breaking chat flow."""
     try:
@@ -1842,6 +1915,8 @@ def _router_result_allows_assistant_auto_save(
     if isinstance(router_result, dict) and not router_result.get("success", True):
         return False
     if isinstance(delegated_result, dict):
+        if _project_ready_stop_reason_from_delegated(delegated_result) == "task_failed":
+            return False
         if delegated_result.get("error"):
             return False
         status = str(delegated_result.get("status") or "").strip().lower()
@@ -1997,7 +2072,7 @@ async def _resume_creative_workflow_response(
     _append_agent_history(agent, "user", "继续创作")
     _append_agent_history(agent, "assistant", reply_text)
     _persist_chat_session(store, session_id, project_id, agent)
-    return JSONResponse({
+    response_payload = {
         "reply": reply_text,
         "is_complete": bool(delegated_result.get("is_complete", False)),
         "collected_info": getattr(agent, "collected_info", {}) or {},
@@ -2010,7 +2085,9 @@ async def _resume_creative_workflow_response(
         "updated_files": (workflow_snapshot or {}).get("updated_files", []),
         "reused_files": (workflow_snapshot or {}).get("reused_files", []),
         "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
-    })
+    }
+    _merge_delegated_runtime_payload(response_payload, delegated_result)
+    return JSONResponse(response_payload)
 
 
 @router.post("/chat/start")
@@ -2508,6 +2585,7 @@ async def chat(request: ChatRequest):
                 "reused_files": (workflow_snapshot or {}).get("reused_files", []),
                 "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
             }
+            _merge_delegated_runtime_payload(result, delegated_result)
             if routing_hint:
                 result["routing"] = routing_hint
             decision_result = None
@@ -2728,6 +2806,7 @@ async def chat_stream(request: ChatRequest):
                             "reused_files": (workflow_snapshot or {}).get("reused_files", []),
                             "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
                         }
+                        _merge_delegated_runtime_payload(done_payload, delegated_result)
                         decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
                         _merge_creative_decision_result(done_payload, decision_result)
                         auto_save_result = None

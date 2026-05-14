@@ -30,7 +30,7 @@ from ..models.requests import (
     RegexReplaceRequest,
     ContinuousWriteExportRequest,
 )
-from ...constants import LLM_DEFAULTS
+from ...constants import LLM_DEFAULTS, get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ def _wire_character_manager(writer, pm) -> None:
         logger.warning(f"[ContinuousWriter] CharacterManager初始化失败: {e}")
 _EXPORT_CHAPTER_HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s*)?第\s*\d+\s*章[^\n\r]*[\r\n]+")
 CONTINUOUS_WRITE_MAX_TOKENS_LIMIT = 8192
+
+
+def _knowledge_base_config_path() -> Path:
+    return get_data_dir() / "knowledge_base_config.json"
 
 
 def _safe_export_filename(name: str) -> str:
@@ -427,7 +431,7 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
             if not CHROMA_AVAILABLE:
                 logger.error(f"[ContinuousWriter] ChromaDB不可用: {CHROMA_IMPORT_ERROR}")
             else:
-                config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
+                config_path = _knowledge_base_config_path()
                 
                 has_embedding_config = False
                 if config_path.exists():
@@ -832,7 +836,7 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
             from ...knowledge_base import KnowledgeBase
             from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE
             if CHROMA_AVAILABLE:
-                config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
+                config_path = _knowledge_base_config_path()
                 has_embedding_config = False
                 if config_path.exists():
                     try:

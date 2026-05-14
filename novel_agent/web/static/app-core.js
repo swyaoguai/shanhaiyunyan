@@ -2856,6 +2856,27 @@ function normalizeTaskPoolSummary(taskPool) {
     };
 }
 
+function getTaskPoolForContract(contractPayload) {
+    const taskPool = store.currentTaskPool && typeof store.currentTaskPool === 'object'
+        ? store.currentTaskPool
+        : null;
+    if (!taskPool || !Array.isArray(taskPool.tasks)) return null;
+    const contractId = String(contractPayload?.contract_id || '').trim();
+    const poolContractId = String(taskPool.metadata?.contract_id || '').trim();
+    if (contractId && poolContractId && contractId !== poolContractId) return null;
+    return taskPool;
+}
+
+function formatContractTaskStatus(task) {
+    const status = String(task?.status || 'pending').trim() || 'pending';
+    const translated = translateTechnicalText(status);
+    const error = String(task?.metadata?.error || task?.error || '').trim();
+    if (status === 'failed' && error) {
+        return `${translated}：${translateTechnicalText(error)}`;
+    }
+    return translated;
+}
+
 function renderTaskPoolSummaryCard(taskPool) {
     const summary = normalizeTaskPoolSummary(taskPool);
     if (!summary) return '';
@@ -2901,20 +2922,48 @@ function renderCreationContractCard(contractPayload) {
     const scope = contractPayload.scope && typeof contractPayload.scope === 'object' ? contractPayload.scope : {};
     const constraints = contractPayload.constraints && typeof contractPayload.constraints === 'object' ? contractPayload.constraints : {};
     const deliverables = Array.isArray(contractPayload.deliverables) ? contractPayload.deliverables : [];
-    const taskGraphDraft = Array.isArray(contractPayload.task_graph) ? contractPayload.task_graph : [];
+    const taskGraphDraft = Array.isArray(contractPayload.task_graph_preview)
+        ? contractPayload.task_graph_preview
+        : (Array.isArray(contractPayload.task_graph) ? contractPayload.task_graph : []);
+    const contractMetadata = contractPayload.metadata && typeof contractPayload.metadata === 'object' ? contractPayload.metadata : {};
+    const pauseAfterChapterSettings = contractMetadata.pause_after_chapter_settings !== false;
+    const isConfirmed = Boolean(contractPayload.user_confirmed);
+    const actionLabel = isConfirmed ? '继续执行任务池' : '确认当前任务并开始';
+    const actionMode = isConfirmed ? 'resume' : 'confirm';
+    const runtimeTaskPool = getTaskPoolForContract(contractPayload);
+    const runtimeTasks = Array.isArray(runtimeTaskPool?.tasks)
+        ? runtimeTaskPool.tasks.filter((task) => task && typeof task === 'object')
+        : [];
     const aiAutonomyRequested = Boolean(scope.ai_autonomy_requested);
     const styleText = Array.isArray(constraints.style) && constraints.style.length ? constraints.style.join('、') : '未指定';
     const qualityText = Array.isArray(constraints.quality_rules) && constraints.quality_rules.length ? constraints.quality_rules.join('、') : '未指定';
+    const wordsPerChapter = Number(scope.target_words_per_chapter || 0);
+    const wordsPerChapterSource = String(scope.target_words_per_chapter_source || '').trim();
+    const wordsPerChapterText = wordsPerChapter
+        ? `约${wordsPerChapter.toLocaleString()}字${wordsPerChapterSource === 'estimated' ? '（估算，可改）' : ''}`
+        : '待确认';
     const deliverablesHtml = deliverables.length
         ? `<ul>${deliverables.slice(0, 8).map(item => `<li>${window.escapeHtml ? window.escapeHtml(formatPlanDeliverableLabel(item)) : formatPlanDeliverableLabel(item)}</li>`).join('')}</ul>`
         : '<div class="copilot-contract-empty">暂无计划产物</div>';
-    const taskHtml = taskGraphDraft.length
+    const taskSectionTitle = runtimeTasks.length ? '任务状态' : '任务预览';
+    const taskHtml = runtimeTasks.length
+        ? `<ul>${runtimeTasks.slice(0, 8).map(item => {
+            const title = String(item.title || item.task_type || '未命名任务').trim();
+            const statusText = formatContractTaskStatus(item);
+            const safeTitle = window.escapeHtml ? window.escapeHtml(title) : title;
+            const safeStatus = window.escapeHtml ? window.escapeHtml(`（${statusText}）`) : `（${statusText}）`;
+            return `<li>${safeTitle}${safeStatus}</li>`;
+        }).join('')}</ul>`
+        : (taskGraphDraft.length
         ? `<ul>${taskGraphDraft.slice(0, 6).map(item => {
             const title = item && typeof item === 'object' ? String(item.title || item.task_type || '未命名任务').trim() : '未命名任务';
+            const previewStatus = item && typeof item === 'object' ? String(item.preview_status || '').trim() : '';
+            const statusSuffix = previewStatus === 'reuse' ? '（已完成，将复用）' : '';
             const safeTitle = window.escapeHtml ? window.escapeHtml(title) : title;
-            return `<li>${safeTitle}</li>`;
+            const safeSuffix = window.escapeHtml ? window.escapeHtml(statusSuffix) : statusSuffix;
+            return `<li>${safeTitle}${safeSuffix}</li>`;
         }).join('')}</ul>`
-        : '<div class="copilot-contract-empty">暂无任务草案</div>';
+        : '<div class="copilot-contract-empty">暂无任务草案</div>');
     const contractJson = window.escapeHtml
         ? window.escapeHtml(JSON.stringify(contractPayload))
         : JSON.stringify(contractPayload);
@@ -2923,7 +2972,7 @@ function renderCreationContractCard(contractPayload) {
         <div class="copilot-contract-card" data-contract-id="${window.escapeHtml ? window.escapeHtml(String(contractPayload.contract_id || '')) : String(contractPayload.contract_id || '')}">
             <div class="copilot-contract-header">
                 <strong>创作合同草案</strong>
-                <span>${contractPayload.user_confirmed ? '已确认' : '待确认'}</span>
+                <span>${isConfirmed ? '已确认' : '待确认'}</span>
             </div>
             <div class="copilot-contract-grid">
                 ${formatContractScopeLine('类型', scope.novel_type)}
@@ -2931,6 +2980,7 @@ function renderCreationContractCard(contractPayload) {
                 ${formatContractScopeLine('主角', scope.protagonist || (aiAutonomyRequested ? '由助手自主设定' : ''))}
                 ${formatContractScopeLine('剧情', scope.plot_idea || (aiAutonomyRequested ? '由助手自主构思' : ''))}
                 ${formatContractScopeLine('篇幅', scope.target_word_count ? `约${Number(scope.target_word_count).toLocaleString()}字` : '')}
+                ${formatContractScopeLine('每章字数', wordsPerChapterText)}
                 ${formatContractScopeLine('卷数', scope.volume_count)}
                 ${formatContractScopeLine('每卷章节', scope.chapters_per_volume)}
                 ${formatContractScopeLine('总章节', scope.total_chapters)}
@@ -2942,11 +2992,15 @@ function renderCreationContractCard(contractPayload) {
                 ${deliverablesHtml}
             </div>
             <div class="copilot-contract-section">
-                <div class="copilot-contract-section-title">任务预览</div>
+                <div class="copilot-contract-section-title">${taskSectionTitle}</div>
                 ${taskHtml}
             </div>
             <div class="copilot-contract-actions">
-                <button type="button" class="copilot-contract-confirm-btn" data-contract-confirm="${contractJson}">确认当前任务并开始</button>
+                <label class="copilot-contract-review-toggle" style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px;">
+                    <input type="checkbox" class="copilot-contract-pause-after-settings" ${pauseAfterChapterSettings ? 'checked' : ''}>
+                    章纲生成完后暂停由我审阅
+                </label>
+                <button type="button" class="copilot-contract-confirm-btn" data-contract-action="${actionMode}" data-contract-confirm="${contractJson}">${actionLabel}</button>
             </div>
         </div>
     `;
@@ -3004,6 +3058,51 @@ async function confirmCreationContract(contractPayload) {
     const nextTaskPool = response && response.task_pool ? response.task_pool : null;
     store.pendingCreationContract = nextContract;
     store.currentTaskPool = nextTaskPool;
+    if (typeof window.loadCurrentProjectData === 'function') {
+        await window.loadCurrentProjectData();
+    }
+    if (typeof window.renderNavPanel === 'function') {
+        window.renderNavPanel(store.currentModule || 'write');
+    }
+    if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+        window.renderMultiAgentWriteNavPanel();
+    }
+    return {
+        contract: nextContract,
+        taskPool: nextTaskPool,
+        collabExecutionTrace: response && response.collab_execution_trace ? response.collab_execution_trace : null,
+        response
+    };
+}
+
+async function resumeCreationContractFlow(options = {}) {
+    const maxTasks = Math.max(1, Number(options.maxTasks || 7) || 7);
+    const maxChapterTasks = Math.max(0, Number(options.maxChapterTasks || 2) || 2);
+    const response = await apiCall('/api/v1/contract/resume', 'POST', {
+        session_id: getCurrentCopilotSessionId(),
+        max_tasks: maxTasks,
+        max_chapter_tasks: maxChapterTasks,
+        approve_chapter_settings: Boolean(options.approveChapterSettings)
+    });
+    const nextContract = response && response.creation_contract ? response.creation_contract : store.pendingCreationContract;
+    const nextTaskPool = response && response.task_pool ? response.task_pool : store.currentTaskPool;
+    store.pendingCreationContract = nextContract;
+    store.currentTaskPool = nextTaskPool;
+    if (response && response.collab_execution_trace) {
+        store.collabExecutionTrace = response.collab_execution_trace;
+    }
+    if (response && response.project_ready_execution) {
+        store.projectReadyExecution = response.project_ready_execution;
+    }
+    if (typeof window.loadCurrentProjectData === 'function') {
+        await window.loadCurrentProjectData();
+    }
+    if (typeof window.renderNavPanel === 'function') {
+        window.renderNavPanel(store.currentModule || 'write');
+    }
+    if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+        window.renderMultiAgentWriteNavPanel();
+    }
     return {
         contract: nextContract,
         taskPool: nextTaskPool,
@@ -3025,16 +3124,49 @@ function bindContractCardActions(container) {
             }
             button.disabled = true;
             try {
-                const result = await confirmCreationContract(payload);
-                const confirmedText = '合同已确认，正式任务池已初始化。';
+                const card = button.closest ? button.closest('.copilot-contract-card') : null;
+                const pauseToggle = card ? card.querySelector('.copilot-contract-pause-after-settings') : null;
+                const payloadWithReviewPolicy = {
+                    ...payload,
+                    metadata: {
+                        ...(payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {}),
+                        pause_after_chapter_settings: pauseToggle ? Boolean(pauseToggle.checked) : true
+                    }
+                };
+                if (Array.isArray(payloadWithReviewPolicy.task_graph)) {
+                    payloadWithReviewPolicy.task_graph = payloadWithReviewPolicy.task_graph.map((task) => {
+                        if (!task || typeof task !== 'object' || String(task.task_type || '').trim() !== 'chapter_settings') {
+                            return task;
+                        }
+                        const metadata = { ...(task.metadata && typeof task.metadata === 'object' ? task.metadata : {}) };
+                        if (payloadWithReviewPolicy.metadata.pause_after_chapter_settings) {
+                            metadata.stop_on_review_required = true;
+                        } else {
+                            delete metadata.stop_on_review_required;
+                        }
+                        return {
+                            ...task,
+                            review_required: Boolean(payloadWithReviewPolicy.metadata.pause_after_chapter_settings),
+                            metadata
+                        };
+                    });
+                }
+                const actionMode = String(button.dataset.contractAction || '').trim();
+                const shouldResume = actionMode === 'resume' || Boolean(payloadWithReviewPolicy.user_confirmed);
+                const result = shouldResume
+                    ? await resumeCreationContractFlow({ maxTasks: 7, maxChapterTasks: 2, approveChapterSettings: true })
+                    : await confirmCreationContract(payloadWithReviewPolicy);
+                const confirmedText = shouldResume
+                    ? '已继续执行任务池。'
+                    : '合同已确认，正式任务池已初始化。';
                 appendMessage(confirmedText, 'ai');
                 if (result.taskPool) {
                     appendMessage(renderTaskPoolSummaryCard(result.taskPool), 'ai');
                 }
-                showToast('合同确认成功', 'success');
+                showToast(shouldResume ? '任务池已继续执行' : '合同确认成功', 'success');
             } catch (e) {
                 button.disabled = false;
-                showToast(`合同确认失败: ${e.message}`, 'error');
+                showToast(`任务执行失败: ${e.message}`, 'error');
             }
         });
     });
@@ -3119,7 +3251,8 @@ async function sendCopilotMessage() {
             updateCopilotWorkflowPanel(res && res.workflow, res && res.routing);
             clearInlineStatus();
             if (res && res.workflow) {
-                showInlineStatusFromWorkflow(res.workflow);
+                const doneWf = Object.assign({}, res.workflow, { status: 'completed', stage: 'completed' });
+                showInlineStatusFromWorkflow(doneWf);
             }
 
             if (res && res.workflow) {
@@ -3140,12 +3273,14 @@ async function sendCopilotMessage() {
             const delegatedParams = res && res.delegated_result && res.delegated_result.params && typeof res.delegated_result.params === 'object'
                 ? res.delegated_result.params
                 : {};
+            if (res && res.task_pool) {
+                store.currentTaskPool = res.task_pool;
+            }
             if (delegatedParams.creation_contract) {
                 store.pendingCreationContract = delegatedParams.creation_contract;
                 appendMessage(renderCreationContractCard(delegatedParams.creation_contract), 'ai');
             }
             if (res && res.task_pool) {
-                store.currentTaskPool = res.task_pool;
                 appendMessage(renderTaskPoolSummaryCard(res.task_pool), 'ai');
             }
             currentStreamAbort = null;
@@ -3207,9 +3342,10 @@ async function sendCopilotMessage() {
                             updateCopilotSessionHeaderFromRouting(evt.routing);
                         }
                         if (evt.workflow) {
-                            showInlineStatusFromWorkflow(evt.workflow);
+                            const doneWorkflow = Object.assign({}, evt.workflow, { status: 'completed', stage: 'completed' });
+                            showInlineStatusFromWorkflow(doneWorkflow);
                             updateCopilotWorkflowPanel(evt.workflow);
-                            
+
                             if (typeof handleWorkflowAutoSave === 'function') {
                                 try {
                                     await handleWorkflowAutoSave(evt.workflow);
@@ -3225,12 +3361,14 @@ async function sendCopilotMessage() {
                         const delegatedParams = evt && evt.delegated_result && evt.delegated_result.params && typeof evt.delegated_result.params === 'object'
                             ? evt.delegated_result.params
                             : {};
+                        if (evt && evt.task_pool) {
+                            store.currentTaskPool = evt.task_pool;
+                        }
                         if (delegatedParams.creation_contract) {
                             store.pendingCreationContract = delegatedParams.creation_contract;
                             appendMessage(renderCreationContractCard(delegatedParams.creation_contract), 'ai');
                         }
                         if (evt && evt.task_pool) {
-                            store.currentTaskPool = evt.task_pool;
                             appendMessage(renderTaskPoolSummaryCard(evt.task_pool), 'ai');
                         }
                         // 移除打字光标
@@ -3577,6 +3715,7 @@ window.NovelAgentApp.core = {
     renderCreationContractCard,
     renderTaskPoolSummaryCard,
     confirmCreationContract,
+    resumeCreationContractFlow,
     parseCreationContractFromButton,
     bindContractCardActions,
     createStreamMessage,
@@ -3624,6 +3763,7 @@ window.renderTaskPoolSummaryCard = renderTaskPoolSummaryCard;
 window.startNovelCollabRuntimePolling = startNovelCollabRuntimePolling;
 window.stopNovelCollabRuntimePolling = stopNovelCollabRuntimePolling;
 window.confirmCreationContract = confirmCreationContract;
+window.resumeCreationContractFlow = resumeCreationContractFlow;
 window.parseCreationContractFromButton = parseCreationContractFromButton;
 window.bindContractCardActions = bindContractCardActions;
 window.createStreamMessage = createStreamMessage;

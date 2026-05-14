@@ -6,6 +6,7 @@ LLM 驱动的角色构建 Agent
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_agent import AgentCapability, BaseAgent
@@ -17,6 +18,14 @@ class CharacterBuilderAgent(BaseAgent):
 
     PLACEHOLDER_NAMES = {
         "主角", "男主", "女主", "角色", "人物", "配角", "反派", "角色1", "人物1",
+    }
+    _COMMON_CHINESE_SURNAMES = set(
+        "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元顾孟平黄和穆萧尹姚邵湛汪祁毛狄米贝明臧成戴宋庞熊纪舒屈项祝董梁杜阮蓝闵季贾路江童颜郭梅盛林钟徐邱骆高夏蔡田胡凌霍虞万支柯管卢莫房解应宗丁宣邓杭洪包左石崔吉龚程邢裴陆荣翁荀惠曲封靳井段焦侯全班仰秋仲伊宫宁仇甘厉祖武符刘景詹龙叶司韶黎薄白蒲从索卓蔺池乔翟谭姬申冉桂牛寿边燕尚农温庄柴阎慕连习鱼容向古易廖终居步耿满弘匡文寇广东欧利蔚隆师巩聂晁勾融冷辛阚简饶曾沙养鞠丰关查荆游权盖益桓"
+    )
+    _NON_NAME_SUFFIXES = {
+        "府", "家", "党", "城", "朝", "国", "帝", "妃", "军", "将", "门", "线",
+        "章", "卷", "夜", "宴", "街", "池", "庙", "市", "集", "相", "女",
+        "郎", "人", "们", "被",
     }
 
     REQUIRED_TOP_FIELDS = ["status", "characters", "missing_info", "confidence"]
@@ -132,7 +141,11 @@ class CharacterBuilderAgent(BaseAgent):
         return normalized
 
     @classmethod
-    def _validate_payload(cls, payload: Dict[str, Any]) -> Tuple[bool, List[str], List[Dict[str, Any]], str]:
+    def _validate_payload(
+        cls,
+        payload: Dict[str, Any],
+        required_names: Optional[List[str]] = None,
+    ) -> Tuple[bool, List[str], List[Dict[str, Any]], str]:
         raw_characters = payload.get("characters")
         if not isinstance(raw_characters, list):
             return False, ["characters 必须是数组"], [], "角色生成结果格式错误，未返回角色数组。"
@@ -161,10 +174,205 @@ class CharacterBuilderAgent(BaseAgent):
                 continue
             normalized_characters.append(character)
 
+        locked_names = [
+            str(name or "").strip()
+            for name in (required_names or [])
+            if str(name or "").strip()
+        ]
+        if locked_names:
+            generated_names = {str(item.get("name") or "").strip() for item in normalized_characters}
+            missing_locked_names = [name for name in locked_names if name not in generated_names]
+            if missing_locked_names:
+                issues.append("缺少已确认角色名：" + "、".join(missing_locked_names))
+
         if issues or not normalized_characters:
             message = "角色卡草稿质量不足，暂不保存：" + "；".join(issues[:4]) if issues else "角色卡草稿为空，暂不保存。"
             return False, issues or ["未生成有效角色卡"], normalized_characters, message
         return True, [], normalized_characters, ""
+
+    @staticmethod
+    def _check_character_world_consistency(
+        characters: List[Dict[str, Any]],
+        input_data: Dict[str, Any],
+    ) -> List[str]:
+        issues: List[str] = []
+        world = input_data.get("world")
+        if not isinstance(world, dict) or not characters:
+            return issues
+        if isinstance(world.get("world"), dict):
+            world = world["world"]
+
+        world_terms: List[str] = []
+        ps = world.get("power_system")
+        if isinstance(ps, dict):
+            ps_name = str(ps.get("name") or "").strip()
+            if ps_name and len(ps_name) >= 2:
+                world_terms.append(ps_name)
+        factions = world.get("factions")
+        if isinstance(factions, list):
+            for f in factions:
+                if isinstance(f, dict):
+                    fn = str(f.get("name") or "").strip()
+                    if fn and len(fn) >= 2:
+                        world_terms.append(fn)
+        geo = world.get("geography")
+        if isinstance(geo, dict):
+            for key in ("name", "capital", "continent"):
+                gn = str(geo.get(key) or "").strip()
+                if gn and len(gn) >= 2:
+                    world_terms.append(gn)
+
+        if len(world_terms) < 2:
+            return issues
+
+        for char in characters:
+            if not isinstance(char, dict):
+                continue
+            name = str(char.get("name") or "").strip()
+            text_parts: List[str] = []
+            for key in ("background", "personality", "abilities", "description", "role"):
+                value = char.get(key)
+                if isinstance(value, str):
+                    text_parts.append(value)
+                elif isinstance(value, (dict, list)):
+                    text_parts.append(json.dumps(value, ensure_ascii=False))
+            combined = "\n".join(text_parts)
+            if combined and not any(term in combined for term in world_terms):
+                issues.append(
+                    f"角色「{name}」的背景描述未提及任何已设定世界元素"
+                    f"（{', '.join(world_terms[:4])}）"
+                )
+        return issues
+
+    @staticmethod
+    def _stringify_for_prompt(value: Any, max_chars: int = 3000) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = str(value or "")
+        text = text.strip()
+        return text[:max_chars]
+
+    @classmethod
+    def _build_world_summary(cls, world_payload: Any) -> str:
+        if isinstance(world_payload, dict) and isinstance(world_payload.get("world"), dict):
+            world_payload = world_payload.get("world")
+        if not isinstance(world_payload, dict):
+            return str(world_payload or "").strip()
+
+        parts: List[str] = []
+        for label, key in (
+            ("世界名", "name"),
+            ("世界名", "world_name"),
+            ("类型", "world_type"),
+            ("核心概念", "core_concept"),
+            ("时间线", "timeline"),
+        ):
+            value = cls._stringify_for_prompt(world_payload.get(key), max_chars=1200)
+            if value:
+                parts.append(f"{label}：{value}")
+
+        for label, key in (
+            ("叙事硬约束", "narrative_constraints"),
+            ("故事钩子", "story_hooks"),
+            ("支线种子", "thread_seed_hooks"),
+            ("世界规则", "rules"),
+            ("势力", "factions"),
+            ("地理/地点", "geography"),
+        ):
+            value = cls._stringify_for_prompt(world_payload.get(key), max_chars=1800)
+            if value:
+                parts.append(f"【{label}】\n{value}")
+
+        return "\n".join(parts).strip()
+
+    @classmethod
+    def _looks_like_chinese_person_name(cls, name: str) -> bool:
+        text = str(name or "").strip()
+        if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", text):
+            return False
+        if text in cls.PLACEHOLDER_NAMES:
+            return False
+        if text[0] not in cls._COMMON_CHINESE_SURNAMES:
+            return False
+        if text[-1] in cls._NON_NAME_SUFFIXES:
+            return False
+        if any(token in text for token in ("相国", "将军", "皇帝", "夫人", "嫡姐", "旧部", "二皇子")):
+            return False
+        return True
+
+    @classmethod
+    def _append_locked_name(cls, names: List[str], candidate: str, limit: int = 2) -> None:
+        name = str(candidate or "").strip()
+        if len(names) >= limit or name in names:
+            return
+        if cls._looks_like_chinese_person_name(name):
+            names.append(name)
+
+    @classmethod
+    def _extract_main_names_from_text(cls, text: Any, limit: int = 2) -> List[str]:
+        source = str(text or "")
+        names: List[str] = []
+        patterns = (
+            r"(?:女主|庶女|夫人|妻子|姑娘)([\u4e00-\u9fff]{2,4}?)(?=被|嫁|与|和|，|。|、|$)",
+            r"(?:男主|丈夫)([\u4e00-\u9fff]{2,4}?)(?=被|娶|与|和|，|。|、|$)",
+            r"([\u4e00-\u9fff]{2,4}?)(?=被迫)",
+            r"嫁给(?:冷面将军|镇北将军|战功赫赫的)?([\u4e00-\u9fff]{2,4}?)(?=，|。|、|$)",
+            r"([\u4e00-\u9fff]{2,4}?)与([\u4e00-\u9fff]{2,4}?)(?=从|在|因|，|。|、|$)",
+            r"([\u4e00-\u9fff]{2,4}?)和([\u4e00-\u9fff]{2,4}?)(?=从|在|因|，|。|、|$)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, source):
+                for group in match.groups():
+                    cls._append_locked_name(names, group, limit=limit)
+                    if len(names) >= limit:
+                        return names
+        return names
+
+    @classmethod
+    def _extract_locked_character_names(
+        cls,
+        input_data: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        limit: int = 2,
+    ) -> List[str]:
+        data = dict(input_data or {})
+        context_data = context if isinstance(context, dict) else {}
+        names: List[str] = []
+
+        for key in ("locked_character_names", "canonical_character_names"):
+            value = data.get(key) or context_data.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    cls._append_locked_name(names, str(item), limit=limit)
+            elif isinstance(value, str):
+                for item in re.split(r"[,，、/\s]+", value):
+                    cls._append_locked_name(names, item, limit=limit)
+
+        for key in ("character_name", "protagonist"):
+            value = str(data.get(key) or context_data.get(key) or "").strip()
+            if value and value not in {"未指定", "无"}:
+                for item in cls._extract_main_names_from_text(value, limit=limit):
+                    cls._append_locked_name(names, item, limit=limit)
+                cls._append_locked_name(names, value, limit=limit)
+
+        world_payload = data.get("world") or context_data.get("world")
+        if isinstance(world_payload, dict) and isinstance(world_payload.get("world"), dict):
+            world_payload = world_payload.get("world")
+        if isinstance(world_payload, dict):
+            main_text_parts: List[str] = []
+            for key in ("story_hooks", "core_concept", "thread_seed_hooks"):
+                value = world_payload.get(key)
+                if isinstance(value, list):
+                    main_text_parts.extend(cls._stringify_for_prompt(item, max_chars=1000) for item in value)
+                else:
+                    main_text_parts.append(cls._stringify_for_prompt(value, max_chars=1000))
+            for name in cls._extract_main_names_from_text("\n".join(main_text_parts), limit=limit):
+                cls._append_locked_name(names, name, limit=limit)
+
+        return names[:limit]
 
     @staticmethod
     def _build_user_prompt(input_data: Dict[str, Any]) -> str:
@@ -185,6 +393,7 @@ class CharacterBuilderAgent(BaseAgent):
             f"## 角色需求摘要\n{str(input_data.get('character_request') or '').strip() or '无'}\n\n"
             f"## 角色类型提示\n{str(input_data.get('character_role') or '').strip() or '未指定'}\n\n"
             f"## 已识别姓名提示\n{str(input_data.get('character_name') or '').strip() or '未识别'}\n\n"
+            f"## 已确认角色名锁定\n{CharacterBuilderAgent._stringify_for_prompt(input_data.get('locked_character_names'), max_chars=500) or '无'}\n\n"
             f"## 完整讨论上下文基准\n{str(input_data.get('discussion_context') or '').strip() or '无'}\n\n"
             f"## 最近讨论摘要\n{str(input_data.get('recent_discussion') or '').strip() or '无'}\n\n"
             f"## 当前 collected_info\n"
@@ -199,8 +408,9 @@ class CharacterBuilderAgent(BaseAgent):
             "2. 若信息不足以生成可靠角色卡，返回 status='missing_info'，并明确列出缺什么。\n"
             "3. 关系字段使用对象映射，如 {\"角色A\": \"师徒\"}。\n"
             "4. 必须沿用完整讨论上下文基准中的已确认设定；缺失则 missing_info，不得随机换题。\n"
-            "5. 不要输出任何 JSON 以外的内容。\n"
-            "6. 当 AI自主创作授权 为已授权时，第2条和第4条中的“信息不足”只指题材/篇幅/风格完全缺失；"
+            "5. 如果“已确认角色名锁定”列出姓名，主角/男女主必须使用这些姓名，不得改名、替换或另起同定位角色。\n"
+            "6. 不要输出任何 JSON 以外的内容。\n"
+            "7. 当 AI自主创作授权 为已授权时，第2条和第4条中的“信息不足”只指题材/篇幅/风格完全缺失；"
             "角色姓名、身份、人物关系和剧情细节未指定时，应由你主动补全。\n"
         )
 
@@ -241,15 +451,20 @@ class CharacterBuilderAgent(BaseAgent):
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         request = dict(input_data or {})
+        if not request.get("world") and isinstance(context, dict) and context.get("world"):
+            request["world"] = context.get("world")
         if not str(request.get("world_summary") or "").strip() and isinstance(context, dict):
             world_payload = context.get("world")
-            if isinstance(world_payload, dict):
-                world_name = str(world_payload.get("name") or world_payload.get("world_name") or "").strip()
-                world_type = str(world_payload.get("world_type") or "").strip()
-                request["world_summary"] = "\n".join(
-                    part for part in [f"世界名：{world_name}" if world_name else "", f"类型：{world_type}" if world_type else ""]
-                    if part
-                )
+            world_summary = self._build_world_summary(world_payload)
+            if world_summary:
+                request["world_summary"] = world_summary
+        elif request.get("world") and not str(request.get("world_summary") or "").strip():
+            world_summary = self._build_world_summary(request.get("world"))
+            if world_summary:
+                request["world_summary"] = world_summary
+        locked_names = self._extract_locked_character_names(request, context)
+        if locked_names:
+            request["locked_character_names"] = locked_names
         ai_autonomy_requested = bool(request.get("ai_autonomy_requested")) or str(request.get("request_mode") or "").strip() == "autonomous_draft"
         if not str(request.get("character_request") or "").strip():
             request["character_request"] = str(request.get("protagonist") or request.get("plot_idea") or request.get("user_request") or "").strip()
@@ -272,11 +487,27 @@ class CharacterBuilderAgent(BaseAgent):
         payload: Optional[Dict[str, Any]] = None
         feedback = ""
         issues: List[str] = []
+        is_valid = False
+        business_issues: List[str] = []
+        normalized_characters: List[Dict[str, Any]] = []
+        message = ""
         for _ in range(2):
             payload, response, issues = await self._generate_once(request, feedback=feedback)
-            if payload is not None:
+            if payload is None:
+                feedback = "；".join(str(item) for item in issues if str(item).strip()) or "请输出合法且完整的 JSON"
+                continue
+            status_for_validation = str(payload.get("status") or "ok").strip() or "ok"
+            if status_for_validation == "missing_info":
                 break
-            feedback = "；".join(str(item) for item in issues if str(item).strip()) or "请输出合法且完整的 JSON"
+            is_valid, business_issues, normalized_characters, message = self._validate_payload(
+                payload,
+                required_names=locked_names,
+            )
+            if is_valid:
+                break
+            feedback = "；".join(str(item) for item in business_issues if str(item).strip()) or "角色卡草稿质量不足"
+            if locked_names:
+                feedback += "；必须使用已确认角色名：" + "、".join(locked_names)
 
         if payload is None:
             return {
@@ -298,7 +529,11 @@ class CharacterBuilderAgent(BaseAgent):
         except (TypeError, ValueError):
             confidence_value = 0.0
 
-        is_valid, business_issues, normalized_characters, message = self._validate_payload(payload)
+        if status != "missing_info" and not is_valid:
+            is_valid, business_issues, normalized_characters, message = self._validate_payload(
+                payload,
+                required_names=locked_names,
+            )
         if status == "missing_info":
             return {
                 "success": False,
@@ -322,6 +557,10 @@ class CharacterBuilderAgent(BaseAgent):
                 "validation_issues": business_issues,
             }
 
+        consistency_warnings = self._check_character_world_consistency(
+            normalized_characters, input_data,
+        )
+
         return {
             "success": True,
             "agent": self.name,
@@ -330,4 +569,5 @@ class CharacterBuilderAgent(BaseAgent):
             "characters": normalized_characters,
             "missing_info": missing_info,
             "raw_response": response,
+            "consistency_warnings": consistency_warnings,
         }

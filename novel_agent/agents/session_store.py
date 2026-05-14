@@ -21,6 +21,7 @@ from datetime import datetime
 from contextlib import contextmanager
 
 from ..utils.atomic_write import atomic_write_json
+from ..constants import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ class _SessionStoreBase:
             storage_dir: 存储目录，默认为 data/sessions/
         """
         if storage_dir is None:
-            storage_dir = Path(__file__).parent.parent / "data" / "sessions"
+            storage_dir = get_data_dir() / "sessions"
         
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)

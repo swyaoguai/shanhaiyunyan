@@ -17,6 +17,51 @@ from novel_agent.web.models.requests import ChatRequest
 from novel_agent.web.routes import chat as chat_routes
 
 
+def test_router_project_ready_task_failed_marks_workflow_failed():
+    active_run = {"status": "running", "stage": "project_dispatch"}
+    router_result = {
+        "success": True,
+        "delegated_result": {
+            "agent_name": "Coordinator",
+            "params": {
+                "stop_reason": "task_failed",
+                "stopped_on_task_type": "build_world",
+            },
+        },
+    }
+
+    snapshot = chat_routes._apply_router_result_to_workflow(active_run, router_result)
+    terminal_update = chat_routes._router_result_terminal_workflow_update(router_result)
+
+    assert active_run["status"] == "failed"
+    assert active_run["last_error"] == "build_world"
+    assert terminal_update == {"status": "failed", "stage": "failed"}
+    assert snapshot["status"] == "failed"
+
+
+def test_merge_delegated_runtime_payload_exposes_task_pool_to_frontend():
+    target = {}
+    task_pool = {"tasks": [{"task_id": "world", "status": "failed"}]}
+
+    chat_routes._merge_delegated_runtime_payload(
+        target,
+        {
+            "params": {
+                "task_pool": task_pool,
+                "project_ready_task_execution": {
+                    "project_ready_execution": {
+                        "stop_reason": "task_failed",
+                        "stopped_on_task_type": "build_world",
+                    }
+                },
+            }
+        },
+    )
+
+    assert target["task_pool"] is task_pool
+    assert target["project_ready_execution"]["stop_reason"] == "task_failed"
+
+
 class _FakeChatStore:
     def __init__(self):
         self.saved_states = []

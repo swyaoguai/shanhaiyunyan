@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..config import config
 from ..settings import get_settings
 from ..agents import RouterAgent
-from ..constants import TIMEOUTS
+from ..constants import TIMEOUTS, get_data_dir
 from .dependencies import set_coordinator, set_router_agent
 from .runtime_refresh import create_runtime_coordinator
 from .routes import register_routes
@@ -100,7 +100,7 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
             logger.error(f"[Router] ChromaDB不可用: {CHROMA_IMPORT_ERROR}")
             return
         
-        config_path = Path(__file__).parent.parent / "data" / "knowledge_base_config.json"
+        config_path = get_data_dir() / "knowledge_base_config.json"
         
         has_embedding_config = False
         if config_path.exists():

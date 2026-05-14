@@ -21,6 +21,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class EmptyResponseError(Exception):
+    """LLM 返回空内容，可自动重试。"""
+    pass
+
+
 _RETRYABLE_MARKERS = (
     "stream error", "internal_error", "server disconnected",
     "connection reset", "connection aborted", "connection broken",
@@ -34,6 +39,8 @@ _RETRYABLE_MARKERS = (
 
 def is_retryable_error(error: Exception) -> bool:
     """识别适合自动重试的传输/服务端错误。"""
+    if isinstance(error, EmptyResponseError):
+        return True
     if httpx is not None and isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
         return True
     error_lower = str(error or "").lower()

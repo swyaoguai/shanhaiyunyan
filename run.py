@@ -12,6 +12,29 @@ from pathlib import Path
 
 import socket
 
+
+def configure_runtime_paths():
+    """配置打包后运行时路径
+
+    重要：此函数必须在打开日志文件和导入其他模块之前调用。
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).parent
+        # 确保工作目录在exe同级
+        try:
+            os.chdir(exe_dir)
+        except Exception:
+            pass
+
+
+def _get_runtime_log_file() -> Path:
+    """Return a stable writable startup log path for dev and packaged runs."""
+    root = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+    log_dir = root / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "agent.log"
+
+
 # 设置标准输出为 UTF-8 编码，解决 Windows 控制台编码问题
 # 在 --noconsole 模式下 sys.stdout/sys.stderr 可能为 None，需兜底处理
 if sys.platform == 'win32':
@@ -34,13 +57,16 @@ if sys.platform == 'win32':
     sys.stdout = _safe_text_stream(sys.stdout)
     sys.stderr = _safe_text_stream(sys.stderr)
 
+# 在打开日志文件前执行路径配置，避免打包EXE把 agent.log 写到启动目录。
+configure_runtime_paths()
+
 import logging
 # 配置根日志 - 使用 append 模式避免文件锁冲突
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("agent.log", encoding='utf-8', mode='a'),  # 改为追加模式
+        logging.FileHandler(_get_runtime_log_file(), encoding='utf-8', mode='a'),  # 改为追加模式
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -51,22 +77,6 @@ logger = logging.getLogger(__name__)
 logging.getLogger("uvicorn").propagate = True
 logging.getLogger("uvicorn.error").propagate = True
 logging.getLogger("uvicorn.access").propagate = True
-
-def configure_runtime_paths():
-    """配置打包后运行时路径
-    
-    重要：此函数必须在导入其他模块之前调用
-    """
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).parent
-        # 确保工作目录在exe同级
-        try:
-            os.chdir(exe_dir)
-        except Exception:
-            pass
-
-# 在导入任何其他模块之前立即执行路径配置
-configure_runtime_paths()
 
 # 确保能找到模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

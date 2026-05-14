@@ -76,6 +76,28 @@ function mapWorkflowFileKindToProjectDataKey(fileKind) {
     return mapping[normalizedKind] || '';
 }
 
+function mapWorkflowFileToProjectDataKey(file) {
+    if (!file || typeof file !== 'object') return '';
+    const direct = mapWorkflowFileKindToProjectDataKey(file.kind);
+    if (direct) return direct;
+
+    const descriptor = `${String(file.path || '')} ${String(file.label || '')}`.toLowerCase();
+    const filenameMapping = {
+        'chapter_settings.json': 'chapter_settings',
+        'detail_settings.json': 'detail_settings',
+        'outline_settings.json': 'outline_settings',
+        'eventlines.json': 'eventlines',
+        'items.json': 'items',
+        'characters.json': 'characters',
+        'worldbuilding.json': 'worldbuilding',
+        'outline.json': 'outline'
+    };
+    for (const [filename, dataKey] of Object.entries(filenameMapping)) {
+        if (descriptor.includes(filename)) return dataKey;
+    }
+    return '';
+}
+
 async function refreshWorkflowTargetedData(workflow) {
     const normalizedWorkflow = workflow && typeof workflow === 'object' ? workflow : {};
     const workflowFiles = dedupeWorkflowFiles([
@@ -84,7 +106,7 @@ async function refreshWorkflowTargetedData(workflow) {
     ]);
     const refreshKeys = Array.from(new Set(
         workflowFiles
-            .map((file) => mapWorkflowFileKindToProjectDataKey(file.kind))
+            .map((file) => mapWorkflowFileToProjectDataKey(file))
             .filter(Boolean)
     ));
 
@@ -196,6 +218,7 @@ async function handleWorkflowAutoSave(workflow) {
 
     const sessionId = getCurrentCopilotSessionId();
     const savedCount = { success: 0, failed: 0, skipped: 0 };
+    const hasRefreshableProjectData = workflowFiles.some((file) => mapWorkflowFileToProjectDataKey(file));
 
     for (const file of workflowFiles) {
         try {
@@ -217,9 +240,11 @@ async function handleWorkflowAutoSave(workflow) {
         }
     }
 
-    if (savedCount.success > 0) {
+    if (savedCount.success > 0 || hasRefreshableProjectData) {
         await reloadProjectDataAndRefreshView(workflow);
-        showToast(`已自动同步 ${savedCount.success} 个文件到对应位置`, 'success');
+        if (savedCount.success > 0) {
+            showToast(`已自动同步 ${savedCount.success} 个文件到对应位置`, 'success');
+        }
     }
 
     if (savedCount.failed > 0) {

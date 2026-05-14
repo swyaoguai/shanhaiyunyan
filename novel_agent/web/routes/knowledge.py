@@ -22,7 +22,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from ...constants import SERVER_DEFAULTS
-from ...constants import get_app_root
+from ...constants import get_app_root, get_data_dir
 from ...knowledge_base.logic_layer.chapter_marker import ChapterMarker
 from ...utils.atomic_write import atomic_write_text
 from ..models.requests import (
@@ -35,6 +35,14 @@ from ..models.requests import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _knowledge_base_config_path() -> Path:
+    return get_data_dir() / "knowledge_base_config.json"
+
+
+def _project_knowledge_base_dir(project_id: str) -> Path:
+    return get_data_dir() / "knowledge_base" / project_id
 
 
 def _sanitize_summary_text(value: str) -> str:
@@ -191,7 +199,7 @@ def _safe_extract_zip_bytes(content: bytes, target_dir: Path) -> Dict[str, Any]:
 @router.get("/knowledge-base/config")
 async def get_knowledge_base_config():
     """获取知识库配置"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
+    config_path = _knowledge_base_config_path()
     
     default_config = {
         "embedding_provider": os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")),
@@ -256,8 +264,8 @@ async def get_knowledge_base_config():
 @router.post("/knowledge-base/config")
 async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
     """保存知识库配置"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
-    env_path = Path(__file__).parent.parent.parent.parent / ".env"
+    config_path = _knowledge_base_config_path()
+    env_path = get_app_root() / ".env"
     
     existing_config = {}
     if config_path.exists():
@@ -396,7 +404,7 @@ async def install_local_onnx_model(model_package: UploadFile = File(...)):
 @router.post("/knowledge-base/test-embedding")
 async def test_embedding_connection(request: TestEmbeddingRequest = None):
     """测试向量化服务连接"""
-    config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
+    config_path = _knowledge_base_config_path()
     
     is_masked = False
     if request and request.api_key:
@@ -641,7 +649,7 @@ async def save_infinite_summary(request: dict):
         "created_at": datetime.datetime.now().isoformat(),
     }
 
-    config_path = Path(__file__).parent.parent.parent / "data" / "knowledge_base_config.json"
+    config_path = _knowledge_base_config_path()
     has_embedding_config = False
     if config_path.exists():
         try:
@@ -796,7 +804,7 @@ async def get_knowledge_base_stats():
             "message": "请先选择一个项目"
         })
     
-    data_dir = Path(__file__).parent.parent.parent.parent / "data" / "knowledge_base" / pm.current_project_id
+    data_dir = _project_knowledge_base_dir(pm.current_project_id)
     
     stats = {
         "configured": False,
@@ -871,7 +879,7 @@ async def clear_knowledge_base(request: ClearKnowledgeBaseRequest):
             "error": "请先选择一个项目"
         })
     
-    data_dir = Path(__file__).parent.parent.parent.parent / "data" / "knowledge_base" / pm.current_project_id
+    data_dir = _project_knowledge_base_dir(pm.current_project_id)
     
     if not data_dir.exists():
         return JSONResponse({
@@ -952,7 +960,7 @@ async def delete_knowledge_chapter(chapter_id: str):
     if not pm.current_project_id:
         raise HTTPException(status_code=400, detail="请先选择一个项目")
     
-    data_dir = Path(__file__).parent.parent.parent.parent / "data" / "knowledge_base" / pm.current_project_id
+    data_dir = _project_knowledge_base_dir(pm.current_project_id)
     db_path = data_dir / "knowledge.db"
     chroma_dir = data_dir / "chroma"
     

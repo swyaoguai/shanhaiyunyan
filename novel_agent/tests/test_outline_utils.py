@@ -3,6 +3,7 @@ import json
 from novel_agent.outline_utils import (
     build_global_outline_text,
     build_outline_overview_row,
+    derive_chapter_seed_rows_from_outline,
     extract_eventlines_from_outline,
     extract_outline_chapter_rows,
     format_outline_volume_plan,
@@ -68,6 +69,7 @@ def test_truncated_raw_content_outline_can_be_recovered_loosely():
 def test_global_outline_can_be_rebuilt_from_structured_fields():
     payload = {
         "title": "归墟录",
+        "author": "AI助手",
         "theme": "少年在归墟中找回真相。",
         "main_conflict": "归墟遗民与旧王朝的冲突。",
     }
@@ -75,8 +77,21 @@ def test_global_outline_can_be_rebuilt_from_structured_fields():
     text = build_global_outline_text(payload)
 
     assert "书名\n归墟录" in text
+    assert "作者" not in text
+    assert "AI助手" not in text
     assert "简介\n少年在归墟中找回真相。" in text
     assert "四、【矛盾冲突】\n归墟遗民与旧王朝的冲突。" in text
+
+
+def test_internal_ai_author_line_is_stripped_from_global_outline():
+    payload = {
+        "global_outline": "书名：《归墟录》\n作者：AI助手\n简介：旧案重开。\n故事梗概：林渡回城查案。",
+    }
+
+    text = build_global_outline_text(payload)
+
+    assert "书名：《归墟录》" in text
+    assert "作者：AI助手" not in text
 
 
 def test_placeholder_outline_rows_normalize_to_empty():
@@ -107,6 +122,24 @@ def test_volume_plan_uses_volume_level_fields_only():
     assert "吴迪与执事阁公开对立。" in plan
     assert "建立梗派、击败王扒皮" in plan
     assert "第6章" not in plan
+
+
+def test_identical_global_outline_and_volume_plan_do_not_mirror_in_overview():
+    same_text = "书名：《归墟录》\n简介：旧城追凶。\n故事梗概：林渡回城查案。"
+    payload = [
+        {
+            "title": "主线大纲",
+            "summary": same_text,
+            "global_outline": same_text,
+            "volume_plan": same_text,
+        }
+    ]
+
+    row = build_outline_overview_row(payload, timestamp="2026-05-11T00:00:00")
+
+    assert row["summary"] == same_text
+    assert row["global_outline"] == same_text
+    assert row["volume_plan"] == ""
 
 
 def test_legacy_chapter_only_outline_builds_global_synopsis():
@@ -187,10 +220,9 @@ def test_outline_eventline_merge_preserves_user_fields():
     assert merged[1]["thread_id"] == "secret_box"
 
 
-def test_extract_chapters_falls_back_to_volume_key_events():
-    """When the outline only carries volume-level beats, each beat must be
-    promoted to its own chapter row so chapter-setting/chapter-writing
-    can plan per chapter instead of replaying the global synopsis."""
+def test_extract_chapters_does_not_promote_volume_key_events_by_default():
+    """Outliner output must stay a global/volume outline unless a downstream
+    chapter-setting stage explicitly asks to derive seed rows."""
     payload = {
         "title": "凝王府的甜宠日常",
         "volumes": [
@@ -208,6 +240,28 @@ def test_extract_chapters_falls_back_to_volume_key_events():
     }
 
     rows = extract_outline_chapter_rows(payload, timestamp="2026-05-11T00:00:00")
+
+    assert rows == []
+
+
+def test_derive_chapter_seed_rows_promotes_volume_key_events_explicitly():
+    payload = {
+        "title": "凝王府的甜宠日常",
+        "volumes": [
+            {
+                "volume_number": 1,
+                "volume_title": "初遇成婚",
+                "volume_summary": "上元灯会初遇到大婚庆典。",
+                "key_events": [
+                    "上元灯会初遇，赵景渊暗中留下女主花灯",
+                    "奉旨成婚，洞房夜尴尬互动",
+                    "沈清欢用医术治愈赵景渊旧伤",
+                ],
+            }
+        ],
+    }
+
+    rows = derive_chapter_seed_rows_from_outline(payload, timestamp="2026-05-11T00:00:00")
 
     assert [row["chapter_number"] for row in rows] == [1, 2, 3]
     assert rows[0]["key_event"] == "上元灯会初遇，赵景渊暗中留下女主花灯"

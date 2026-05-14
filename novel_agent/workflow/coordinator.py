@@ -40,13 +40,14 @@ from ..utils.atomic_write import atomic_write_text, atomic_write_json
 from ..content_sanitizer import strip_internal_author_markers
 from ..outline_utils import (
     build_outline_overview_row,
+    derive_chapter_seed_rows_from_outline,
     extract_outline_chapter_rows,
     extract_eventlines_from_outline,
     merge_eventline_rows,
     normalize_outline_payload,
 )
 from ..memory_manager import get_memory_manager
-from ..aux_memory import get_aux_memory_service
+from ..aux_memory import AuxMemoryService
 from ..project_manager import get_project_manager
 from ..route_targets import build_default_route_target_registry
 from .plot_thread_state import PlotThreadStateMachine
@@ -93,7 +94,7 @@ class WorkflowCheckpoint:
     project_data: Dict[str, Any]
     last_updated: str
     error_info: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "state": self.state.value,
@@ -103,7 +104,7 @@ class WorkflowCheckpoint:
             "last_updated": self.last_updated,
             "error_info": self.error_info
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'WorkflowCheckpoint':
         return cls(
@@ -128,7 +129,7 @@ class NovelProject:
     total_chapters: int = 0
     completed_chapters: int = 0
     word_count: int = 0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -140,12 +141,12 @@ ProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 class NovelCoordinator:
     """
     小说创作协调器
-    
+
     采用协调者-工作者智能体模式：
     - 协调器负责任务分配和流程控制
     - 各专业智能体作为工作者执行具体任务
     - ContextManager负责上下文的隔离与同步
-    
+
     增强功能：
     - 工作流状态管理和检查点
     - 串行章节写作
@@ -153,7 +154,7 @@ class NovelCoordinator:
     - 消息总线集成
     - 智能路由（强制LLM意图识别）
     """
-    
+
     def __init__(
         self,
         project_dir: Optional[Path] = None,
@@ -162,7 +163,7 @@ class NovelCoordinator:
     ):
         """
         初始化协调器
-        
+
         Args:
             project_dir: 项目目录
             progress_callback: 进度回调函数
@@ -171,11 +172,11 @@ class NovelCoordinator:
         from ..constants import PATH_DEFAULTS
         self.project_dir = project_dir or Path(PATH_DEFAULTS.NOVEL_OUTPUT_DIR)
         self.project_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 回调配置
         self.progress_callback = progress_callback
         self.auto_save_checkpoint = auto_save_checkpoint
-        
+
         # 初始化各专业Agent（传入回调处理器）
         self.worldbuilder = WorldbuilderAgent()
         self.outliner = OutlinerAgent()
@@ -202,15 +203,15 @@ class NovelCoordinator:
         # 问题6修复：使用 ServiceBackedCollabParticipant 包装后的实例，与其他服务保持一致
         self.file_naming = default_collab_participants.get("FileNaming") or self.collab_service_registry.get("file_naming")
         self.summary_orchestrator = default_collab_participants["SummaryOrchestrator"]
-        
+
         # 为Agent设置回调处理器
         if progress_callback:
             self._setup_agent_callbacks()
-        
+
         # 记忆管理（先初始化，因为管理器需要用到）
         self.memory_manager = get_memory_manager()
-        self.aux_memory_service = get_aux_memory_service()
         self.project_manager = get_project_manager()
+        self.aux_memory_service = AuxMemoryService(data_dir=self.project_manager.data_dir)
         self.checkpoint_manager = CheckpointManager(
             project_dir_provider=lambda: self.project_dir,
         )
@@ -225,7 +226,7 @@ class NovelCoordinator:
             memory_manager=self.memory_manager,
             contract_version_provider=lambda: self._memory_contract_version,
         )
-        
+
         # 初始化上下文管理器（使用当前项目目录）
         self._init_managers()
         self._plot_thread_state_key = "plot_thread_state"
@@ -239,13 +240,13 @@ class NovelCoordinator:
 
         # 项目信息
         self.project: Optional[NovelProject] = None
-        
+
         # 工作流状态
         self.workflow_state = WorkflowState.IDLE
         self._last_active_workflow_state = WorkflowState.IDLE
         self.checkpoint: Optional[WorkflowCheckpoint] = None
         self._load_checkpoint()
-        
+
         # 消息总线和指标
         self.message_bus = get_message_bus()
         self.metrics = get_metrics_collector()
@@ -302,15 +303,15 @@ class NovelCoordinator:
         # 监督式自组织保底策略
         self.supervised_mode = True
         self.fallback_to_orchestrated = True
-        
+
         # 控制标志
         self._paused = False
         self._cancelled = False
-        
+
         # 消息总线状态
         self._bus_started = False
         self._subscribed = False
-        
+
         # 待处理的用户输入请求
         self._pending_user_inputs: Dict[str, asyncio.Future] = {}
         self._project_persistence_lock = asyncio.Lock()
@@ -321,7 +322,7 @@ class NovelCoordinator:
         """Dedup: sync outline to library service."""
         try:
             from ..library_service import get_library_service
-            svc = get_library_service()
+            svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("outline", outline_rows)
         except Exception as e:
             logger.warning(f"[Coordinator] Library outline sync failed: {e}")
@@ -330,7 +331,7 @@ class NovelCoordinator:
         """Dedup: sync eventlines to library service."""
         try:
             from ..library_service import get_library_service
-            svc = get_library_service()
+            svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("eventlines", eventline_rows)
         except Exception as e:
             logger.warning(f"[Coordinator] Library eventlines sync failed: {e}")
@@ -339,7 +340,7 @@ class NovelCoordinator:
         """Dedup: sync chapter settings to library service."""
         try:
             from ..library_service import get_library_service
-            svc = get_library_service()
+            svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("chapter_settings", chapter_setting_rows)
         except Exception as e:
             logger.warning(f"[Coordinator] Library chapter settings sync failed: {e}")
@@ -367,16 +368,33 @@ class NovelCoordinator:
 
     def _build_metadata_patch(self, run_result: Dict[str, Any]) -> Dict[str, Any]:
         """Dedup: build metadata patch for project-ready task execution."""
-        return {
+        result_payload = run_result.get("result") if isinstance(run_result.get("result"), dict) else {}
+        rows = []
+        if isinstance(result_payload, dict):
+            candidate_rows = result_payload.get("rows") or result_payload.get("chapter_settings") or []
+            rows = candidate_rows if isinstance(candidate_rows, list) else []
+        fallback_used = bool(
+            run_result.get("fallback_used", False)
+            or (isinstance(result_payload, dict) and result_payload.get("fallback_used"))
+            or (isinstance(result_payload, dict) and result_payload.get("coverage_fallback_used"))
+        )
+        metadata_patch = {
             "project_task_execution": "ready_task_loop",
             "selected_agent": run_result.get("selected_agent", ""),
             "execution_mode": run_result.get("execution_mode", ""),
-            "fallback_used": bool(run_result.get("fallback_used", False)),
+            "fallback_used": fallback_used,
             "route_reason": run_result.get("route_reason", ""),
             "candidate_source": run_result.get("candidate_source", ""),
             "context_snapshot_id": run_result.get("context_snapshot_id", ""),
             "fallback_provenance": run_result.get("fallback_provenance", {}),
         }
+        if isinstance(result_payload, dict):
+            for key in ("coverage_fallback_used", "validation_issues", "response_message", "batch_count"):
+                if key in result_payload:
+                    metadata_patch[key] = result_payload.get(key)
+            if rows:
+                metadata_patch["generated_row_count"] = len(rows)
+        return metadata_patch
 
     def _init_managers(self):
         """初始化或重新初始化所有管理器（使用当前项目目录）"""
@@ -386,39 +404,39 @@ class NovelCoordinator:
                 self.project_manager.current_project_id
             )
             self.project_dir = current_project_dir
-        
+
         # 初始化上下文管理器
         self.context_manager = ContextManager(self.project_dir)
         self.character_manager = CharacterManager(self.project_dir)
         self.world_manager = WorldManager(self.project_dir)
-        
+
         logger.debug(f"Managers initialized with project dir: {self.project_dir}")
-    
+
     def switch_to_project(self, project_id: str) -> bool:
         """
         切换到指定项目并同步所有管理器
-        
+
         Args:
             project_id: 项目ID
-            
+
         Returns:
             是否切换成功
         """
         if not self.project_manager.switch_project(project_id):
             logger.warning(f"Failed to switch to project {project_id}")
             return False
-        
+
         # 获取新项目目录
         new_project_dir = self.project_manager._get_project_dir(project_id)
         self.project_dir = new_project_dir
-        
+
         # 重新初始化所有管理器
         self._init_managers()
-        
+
         # 重新加载检查点和状态
         self._load_checkpoint()
         self._load_plot_thread_state()
-        
+
         logger.info(f"Switched to project {project_id}, dir: {new_project_dir}")
         return True
 
@@ -574,7 +592,7 @@ class NovelCoordinator:
             await self.message_bus.start()
             self._bus_started = True
             logger.info("Message bus started")
-        
+
         if not self._subscribed:
             self.message_bus.subscribe("coordinator", self._handle_agent_message)
             # 订阅用户输入请求类型
@@ -584,21 +602,21 @@ class NovelCoordinator:
             )
             self._subscribed = True
             logger.info("Coordinator subscribed to message bus")
-    
+
     async def _handle_agent_message(self, message: AgentMessage) -> None:
         """
         处理来自Agent的消息
-        
+
         Args:
             message: Agent消息
         """
         logger.debug(f"Coordinator received message: {message.msg_type.value} from {message.sender}")
-        
+
         if message.msg_type == MessageType.TASK_COMPLETED:
             # 任务完成，记录指标
             result = message.payload.get("result", {})
             success = message.payload.get("success", True)
-            
+
             if self.progress_callback:
                 await self._notify_progress({
                     "type": "agent_task_completed",
@@ -606,19 +624,19 @@ class NovelCoordinator:
                     "success": success,
                     "result_summary": str(result)[:200]
                 })
-        
+
         elif message.msg_type == MessageType.TASK_FAILED:
             # 任务失败
             error = message.payload.get("error", "Unknown error")
             logger.error(f"Task failed from {message.sender}: {error}")
-            
+
             if self.progress_callback:
                 await self._notify_progress({
                     "type": "agent_task_failed",
                     "agent": message.sender,
                     "error": error
                 })
-        
+
         elif message.msg_type == MessageType.TASK_PROGRESS:
             # 进度更新
             if self.progress_callback:
@@ -627,20 +645,20 @@ class NovelCoordinator:
                     "agent": message.sender,
                     **message.payload
                 })
-    
+
     async def _handle_user_input_request(self, message: AgentMessage) -> None:
         """
         处理用户输入请求
-        
+
         Args:
             message: 用户输入请求消息
         """
         question = message.payload.get("question", "")
         options = message.payload.get("options")
         input_type = message.payload.get("input_type", "text")
-        
+
         logger.info(f"User input requested by {message.sender}: {question}")
-        
+
         # 通过回调通知前端
         if self.progress_callback:
             await self._notify_progress({
@@ -651,11 +669,11 @@ class NovelCoordinator:
                 "options": options,
                 "input_type": input_type
             })
-    
+
     async def submit_user_input(self, request_id: str, user_input: str) -> None:
         """
         提交用户输入（由Web层调用）
-        
+
         Args:
             request_id: 请求ID
             user_input: 用户输入
@@ -670,14 +688,14 @@ class NovelCoordinator:
         )
         await self.message_bus.publish(response)
         logger.info(f"User input submitted for request {request_id}")
-    
+
     def _setup_agent_callbacks(self):
         """为所有Agent设置回调处理器"""
         async def agent_callback(data: Dict[str, Any]) -> Optional[Any]:
             if self.progress_callback:
                 await self.progress_callback(data)
             return None
-        
+
         for agent in [
             self.worldbuilder,
             self.outliner,
@@ -693,7 +711,7 @@ class NovelCoordinator:
             self.summary_orchestrator,
         ]:
             agent.set_callback_handler(agent_callback)
-    
+
     def _load_checkpoint(self):
         """加载检查点"""
         data = self.checkpoint_manager.load_payload()
@@ -704,7 +722,7 @@ class NovelCoordinator:
                 logger.info(f"Checkpoint loaded: state={self.checkpoint.state.value}, chapter={self.checkpoint.current_chapter}")
             except Exception as e:
                 logger.warning(f"Failed to hydrate checkpoint: {e}")
-    
+
     def _save_checkpoint(self):
         """保存检查点"""
         if not self.checkpoint:
@@ -715,7 +733,7 @@ class NovelCoordinator:
         )
         if saved:
             logger.debug(f"Checkpoint saved: state={self.checkpoint.state.value}")
-    
+
     def _update_checkpoint(
         self,
         state: Optional[WorkflowState] = None,
@@ -737,7 +755,7 @@ class NovelCoordinator:
         if state and state != WorkflowState.PAUSED:
             self._last_active_workflow_state = state
         self._save_checkpoint()
-    
+
     async def _notify_progress(self, data: Dict[str, Any]):
         """通知进度"""
         if self.progress_callback:
@@ -775,7 +793,7 @@ class NovelCoordinator:
     async def _export_memory_snapshot(self, reason: str) -> None:
         """导出记忆快照到项目目录"""
         await self.memory_sync_manager.export_snapshot(self._memory_agent_ids, reason)
-    
+
     def pause(self):
         """暂停工作流"""
         if self.workflow_state != WorkflowState.PAUSED:
@@ -783,7 +801,7 @@ class NovelCoordinator:
         self._paused = True
         self._update_checkpoint(state=WorkflowState.PAUSED)
         logger.info("Workflow paused")
-    
+
     def resume(self):
         """恢复工作流"""
         self._paused = False
@@ -799,7 +817,7 @@ class NovelCoordinator:
                 self.project.status = "writing"
                 self.project.updated_at = datetime.now().isoformat()
         logger.info("Workflow resumed")
-    
+
     def cancel(self):
         """取消工作流"""
         self._cancelled = True
@@ -811,17 +829,17 @@ class NovelCoordinator:
             cancel_resume_state = WorkflowState.WRITING
         self._update_checkpoint(state=cancel_resume_state, error_info="cancel_requested")
         logger.info("Workflow cancelled")
-    
+
     async def _check_pause_cancel(self) -> bool:
         """检查是否需要暂停或取消"""
         if self._cancelled:
             return True
-        
+
         while self._paused:
             await asyncio.sleep(1)
             if self._cancelled:
                 return True
-        
+
         return False
 
     async def check_pause_cancel(self) -> bool:
@@ -906,12 +924,22 @@ class NovelCoordinator:
         contract.metadata = dict(contract.metadata or {})
         contract.metadata["draft"] = not bool(approved)
         contract.metadata["confirmed_at"] = contract.updated_at if approved else ""
+        pause_after_chapter_settings = bool(contract.metadata.get("pause_after_chapter_settings", True))
 
         task_pool = TaskPool()
         created_tasks: List[TaskDefinition] = []
         for task in contract.task_graph:
             if not isinstance(task, TaskDefinition):
                 continue
+            task_metadata = dict(task.metadata or {})
+            review_required = bool(task.review_required)
+            if task.task_type == "chapter_settings":
+                if pause_after_chapter_settings:
+                    review_required = True
+                    task_metadata["stop_on_review_required"] = True
+                else:
+                    review_required = False
+                    task_metadata.pop("stop_on_review_required", None)
             created_tasks.append(
                 task_pool.create_task(
                     task_type=task.task_type,
@@ -922,8 +950,9 @@ class NovelCoordinator:
                     candidate_agents=list(task.candidate_agents or []),
                     priority=int(task.priority or 0),
                     depends_on=list(task.depends_on or []),
-                    review_required=bool(task.review_required),
-                    metadata=dict(task.metadata or {}),
+                    dependencies=list(task.dependencies or []),
+                    review_required=review_required,
+                    metadata=task_metadata,
                 )
             )
 
@@ -1126,6 +1155,8 @@ class NovelCoordinator:
 
         outline_rows = self._load_project_outline_rows()
         legacy_rows = extract_outline_chapter_rows(outline_rows)
+        if not legacy_rows:
+            legacy_rows = derive_chapter_seed_rows_from_outline(outline_rows)
         return self._sort_chapter_rows(legacy_rows)
 
     def _load_project_previous_chapters(self, chapter_number: int, outline_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1233,7 +1264,14 @@ class NovelCoordinator:
         row["content"] = chapter_content
         row["updated_at"] = timestamp
 
-        self.project_manager.save_project_data("chapters", chapter_rows)
+        # chapters.json represents completed chapter text. Planning-only rows
+        # stay in chapter_settings.json, otherwise progress/status code can
+        # mistake empty chapter shells for generated chapters.
+        completed_chapter_rows = [
+            row for row in chapter_rows
+            if isinstance(row, dict) and str(row.get("content") or "").strip()
+        ]
+        self.project_manager.save_project_data("chapters", completed_chapter_rows)
 
         legacy_outline_rows = self._load_project_outline_rows()
         if legacy_outline_rows and not all(
@@ -1364,6 +1402,11 @@ class NovelCoordinator:
             max_tasks=max_tasks,
             max_chapter_tasks=max_chapter_tasks,
         )
+
+    def approve_chapter_settings_review(self) -> Dict[str, Any]:
+        """Mark generated chapter settings as reviewed so正文 writing can start."""
+        executor = self._init_project_ready_executor()
+        return executor.approve_chapter_settings_review()
 
     def _load_runtime_task_pool(self) -> TaskPool:
         """加载项目级运行态任务池；若不存在则返回空任务池。"""
@@ -1515,7 +1558,10 @@ class NovelCoordinator:
                 culture=world_data.get("culture", {}),
             )
             self.world_manager.set_world(world_setting)
-            persist_worldbuilding_project_data({"world": world_data})
+            persist_worldbuilding_project_data(
+                {"world": world_data},
+                project_manager=self.project_manager,
+            )
 
         self._update_checkpoint(add_stage="worldbuilding")
         await self._sync_memory_stage("worldbuilding")
@@ -1547,6 +1593,13 @@ class NovelCoordinator:
 
         character_context = dict(creation_context)
         character_context["world"] = world_data
+        locked_character_names: List[str] = []
+        extract_locked_names = getattr(self.character_builder, "_extract_locked_character_names", None)
+        if callable(extract_locked_names):
+            try:
+                locked_character_names = extract_locked_names({"world": world_data}, character_context)
+            except Exception as exc:
+                logger.warning(f"[Coordinator] 角色名锁定提取失败: {exc}")
         character_run_result = await self._run_autonomous_task(
             task_type="build_characters",
             input_data={
@@ -1556,6 +1609,8 @@ class NovelCoordinator:
                 "plot_idea": effective_plot_idea,
                 "character_request": effective_protagonist or effective_plot_idea,
                 "request_mode": "draft",
+                "world": world_data,
+                "locked_character_names": locked_character_names,
             },
             context=character_context,
             fallback_agent=self.character_builder,
@@ -1671,7 +1726,7 @@ class NovelCoordinator:
         """
         创建一部新小说(完整流程)
         采用流式输出，实时返回进度
-        
+
         Args:
             novel_type: 小说类型
             theme: 主题
@@ -1680,7 +1735,7 @@ class NovelCoordinator:
             plot_idea: 剧情构思
             volume_count: 卷数
             chapters_per_volume: 每卷章节数
-            
+
         Yields:
             进度信息和生成结果
         """
@@ -1714,10 +1769,10 @@ class NovelCoordinator:
 
         # 确保消息总线启动
         await self._ensure_message_bus_started()
-        
+
         # 让所有Agent订阅消息总线
         await self._subscribe_all_agents()
-        
+
         # 使用 ProjectManager 创建新项目
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pm_project = self.project_manager.create_project(
@@ -1725,10 +1780,10 @@ class NovelCoordinator:
             description=f"类型：{novel_type}，主题：{effective_theme or '未指定'}",
             novel_type=novel_type,
         )
-        
+
         # 切换到新项目（这会同步所有管理器的目录）
         self.switch_to_project(pm_project.id)
-        
+
         # 创建 NovelProject 对象
         self.project = NovelProject(
             id=pm_project.id,
@@ -1739,7 +1794,7 @@ class NovelCoordinator:
             updated_at=pm_project.updated_at,
             total_chapters=effective_volume_count * effective_chapters_per_volume
         )
-        
+
         contract_payload = self._persist_creation_contract(
             novel_type=novel_type,
             theme=effective_theme,
@@ -1756,7 +1811,7 @@ class NovelCoordinator:
         # 初始化检查点
         self._update_checkpoint(state=WorkflowState.IDLE, current_chapter=0)
         await self._sync_memory_stage("init")
-        
+
         yield {
             "stage": "init",
             "message": f"开始创作小说...（项目ID: {pm_project.id}）",
@@ -1765,7 +1820,7 @@ class NovelCoordinator:
             "project_dir": str(self.project_dir),
             "creation_contract": contract_payload,
         }
-        
+
         try:
             # === Stage 1: 世界观构建 ===
             world_progress, world_data, creation_context = await self._stage_worldbuilding(
@@ -1784,7 +1839,7 @@ class NovelCoordinator:
                 yield event
             if world_progress and world_progress[0].get("stage") == "cancelled":
                 return
-            
+
             # === Stage 1.5: 角色构建 ===
             char_progress, built_characters = await self._stage_character_building(
                 world_data=world_data,
@@ -1811,15 +1866,15 @@ class NovelCoordinator:
                 yield event
             if outline_progress and outline_progress[0].get("stage") == "cancelled":
                 return
-            
+
             # === Stage 3: 章节撰写 ===
             if await self._check_pause_cancel():
                 yield {"stage": "cancelled", "message": "创作已取消"}
                 return
-            
+
             self._update_checkpoint(state=WorkflowState.WRITING)
             self.project.status = "writing"
-            
+
             chapters = self._extract_chapters(outline_data)
             total_chapters = len(chapters)
             self._sync_plot_thread_state_with_outline(
@@ -1827,11 +1882,11 @@ class NovelCoordinator:
                 total_chapters=total_chapters,
                 reset=True,
             )
-            
+
             yield {"stage": "writing", "message": f"开始撰写 {total_chapters} 个章节...", "progress": 35}
-            
+
             written_chapters = []
-            
+
             # 串行写作
             async for progress_data in self._write_chapters_serial(
                 chapters, world_data, outline_data
@@ -1841,7 +1896,7 @@ class NovelCoordinator:
                     return
                 if progress_data.get("stage") == "chapter_complete":
                     written_chapters.append(progress_data.get("chapter"))
-            
+
             await self._sync_memory_stage("writing")
 
             # === Stage 4: 完成 ===
@@ -1850,12 +1905,12 @@ class NovelCoordinator:
             self.project.updated_at = datetime.now().isoformat()
             # 问题8修复：使用去空白字符统计中文字数
             self.project.word_count = sum(len(re.sub(r"\s+", "", ch.get("content", ""))) for ch in written_chapters)
-            
+
             # 保存完整小说
             novel_file = self.project_dir / f"{self.project.title}.txt"
             self._save_novel(novel_file, written_chapters)
             await self._export_memory_snapshot("create_novel_completed")
-            
+
             yield {
                 "stage": "completed",
                 "message": "小说创作完成！",
@@ -1864,7 +1919,7 @@ class NovelCoordinator:
                 "file_path": str(novel_file),
                 "metrics": self.metrics.get_report()
             }
-            
+
         except Exception as e:
             self._update_checkpoint(state=WorkflowState.FAILED, error_info=str(e))
             await self._export_memory_snapshot("create_novel_failed")
@@ -1878,9 +1933,6 @@ class NovelCoordinator:
 
     def _outline_to_project_rows(self, outline_data: Any) -> List[Dict[str, Any]]:
         timestamp = datetime.now().isoformat()
-        chapter_rows = extract_outline_chapter_rows(outline_data, timestamp=timestamp)
-        if chapter_rows:
-            return chapter_rows
         overview = build_outline_overview_row(outline_data, timestamp=timestamp)
         return [overview] if overview else []
 
@@ -1909,12 +1961,12 @@ class NovelCoordinator:
             self.file_naming,
             self.summary_orchestrator,
         ]
-        
+
         for agent in agents:
             await agent.ensure_subscribed()
-        
+
         logger.info("All agents subscribed to message bus")
-    
+
     async def _write_chapters_serial(
         self,
         chapters: List[Dict],
@@ -1924,17 +1976,17 @@ class NovelCoordinator:
         """串行写作章节"""
         total_chapters = len(chapters)
         written_chapters = []
-        
+
         for i, chapter_outline in enumerate(chapters):
             if await self._check_pause_cancel():
                 yield {"stage": "cancelled", "message": "创作已取消"}
                 return
-            
+
             chapter_num = i + 1
             progress = 35 + int(50 * (i / total_chapters))
-            
+
             self._update_checkpoint(current_chapter=chapter_num)
-            
+
             yield {
                 "stage": "writing",
                 "message": f"正在撰写第 {chapter_num} 章...",
@@ -1942,21 +1994,21 @@ class NovelCoordinator:
                 "current_chapter": chapter_num,
                 "total_chapters": total_chapters
             }
-            
+
             chapter_data = await self._write_single_chapter_internal(
                 chapter_num, chapter_outline, written_chapters
             )
-            
+
             written_chapters.append(chapter_data)
             self.project.completed_chapters = chapter_num
-            
+
             yield {
                 "stage": "chapter_complete",
                 "message": f"第 {chapter_num} 章完成",
                 "progress": progress,
                 "chapter": chapter_data
             }
-    
+
     async def _run_autonomous_task(
         self,
         *,
@@ -2007,6 +2059,23 @@ class NovelCoordinator:
 
         # 获取上下文
         context = await self.context_manager.get_optimized_context("ChapterWriter")
+
+        # 防御性 fallback：若 world_manager 内存为空但 worldbuilding.json
+        # 已落盘，则尝试重新 load；仍为空时再从 context_manager 缓存回填。
+        # 修复 formal pipeline 下 _execute_build_world 漏写 world_manager
+        # 导致 ChapterWriter 拿到"暂无世界观设定"的回归 bug。
+        if not getattr(self.world_manager, "world", None):
+            try:
+                if not self.world_manager.ensure_loaded():
+                    cached_world = self.context_manager.get("world", {})
+                    if cached_world:
+                        self.world_manager.apply_payload(
+                            cached_world if isinstance(cached_world, dict) and "world" in cached_world
+                            else {"world": cached_world}
+                        )
+            except Exception as exc:
+                logger.warning(f"[Coordinator] world_manager fallback 失败: {exc}")
+
         context["world"] = self.world_manager.get_world_context()
         context["characters"] = self.character_manager.get_character_context()
         context["eventlines"] = self._get_eventline_context()
@@ -2133,7 +2202,7 @@ class NovelCoordinator:
         }
         if isinstance(summary_result, dict) and summary_result:
             chapter_data["stage_summary"] = str(summary_result.get("summary") or "")
-        
+
         self.context_manager.save_chapter_result(
             chapter_num,
             chapter_content,
@@ -2174,27 +2243,27 @@ class NovelCoordinator:
             chapter_data["stage_summary_file"] = str(summary_persist_result.get("summary_path") or "")
 
         return chapter_data
-    
+
     async def resume_from_checkpoint(self) -> AsyncGenerator[Dict[str, Any], None]:
         """从检查点恢复创作"""
         if not self.checkpoint:
             yield {"stage": "error", "message": "没有找到检查点"}
             return
-        
+
         state = self.checkpoint.state
-        
+
         if state == WorkflowState.COMPLETED:
             yield {"stage": "info", "message": "项目已完成，无需恢复"}
             return
-        
+
         if state == WorkflowState.FAILED:
             yield {"stage": "info", "message": "项目之前失败，需要重新开始"}
             return
-        
+
         # 重置控制标志
         self._paused = False
         self._cancelled = False
-        
+
         # 恢复项目信息（问题3修复：过滤多余字段避免 TypeError）
         if self.checkpoint.project_data:
             import dataclasses
@@ -2203,13 +2272,13 @@ class NovelCoordinator:
             self.project = NovelProject(**filtered_data)
 
         await self._sync_memory_stage("resume")
-        
+
         yield {
             "stage": "resume",
             "message": f"从检查点恢复: 状态={state.value}, 章节={self.checkpoint.current_chapter}",
             "checkpoint": self.checkpoint.to_dict()
         }
-        
+
         try:
             # 根据状态恢复
             if state == WorkflowState.WRITING or state == WorkflowState.PAUSED:
@@ -2223,25 +2292,25 @@ class NovelCoordinator:
                     total_chapters=len(chapters),
                     reset=False,
                 )
-                
+
                 if start_chapter > 0:
                     chapters = chapters[start_chapter:]
-                
+
                 if not chapters:
                     yield {"stage": "info", "message": "所有章节已完成"}
                     return
-                
+
                 yield {
                     "stage": "resume_writing",
                     "message": f"从第 {start_chapter + 1} 章继续撰写...",
                     "remaining_chapters": len(chapters)
                 }
-                
+
                 self._update_checkpoint(state=WorkflowState.WRITING)
                 self.project.status = "writing"
-                
+
                 written_chapters = []
-                
+
                 # 串行写作
                 async for progress_data in self._write_chapters_serial(
                     chapters, world_data, outline_data
@@ -2251,7 +2320,7 @@ class NovelCoordinator:
                         return
                     if progress_data.get("stage") == "chapter_complete":
                         written_chapters.append(progress_data.get("chapter"))
-                
+
                 # 完成
                 await self._sync_memory_stage("writing")
                 self._update_checkpoint(state=WorkflowState.COMPLETED)
@@ -2259,12 +2328,12 @@ class NovelCoordinator:
                 self.project.updated_at = datetime.now().isoformat()
                 # 问题8修复：使用去空白字符统计中文字数
                 self.project.word_count = sum(len(re.sub(r"\s+", "", ch.get("content", ""))) for ch in written_chapters)
-                
+
                 # 保存小说
                 novel_file = self.project_dir / f"{self.project.title}.txt"
                 self._save_novel(novel_file, written_chapters)
                 await self._export_memory_snapshot("resume_completed")
-                
+
                 yield {
                     "stage": "completed",
                     "message": "小说创作完成！",
@@ -2273,13 +2342,13 @@ class NovelCoordinator:
                     "file_path": str(novel_file),
                     "metrics": self.metrics.get_report()
                 }
-            
+
             elif state == WorkflowState.WORLDBUILDING:
                 yield {"stage": "info", "message": "需要重新开始世界观构建"}
-            
+
             elif state == WorkflowState.OUTLINING:
                 yield {"stage": "info", "message": "需要重新开始大纲规划"}
-                
+
         except Exception as e:
             self._update_checkpoint(state=WorkflowState.FAILED, error_info=str(e))
             await self._export_memory_snapshot("resume_failed")
@@ -2290,7 +2359,7 @@ class NovelCoordinator:
                 "error": str(e)
             }
             raise
-    
+
     async def generate_world(self, novel_type: str, theme: str = "", requirements: str = "") -> Dict[str, Any]:
         """单独生成世界观"""
         result = await self.worldbuilder.execute({
@@ -2312,10 +2381,13 @@ class NovelCoordinator:
         if isinstance(world_data, dict) and world_data and not missing_status and not has_missing_info:
             from ..worldbuilding_persistence import persist_worldbuilding_project_data
 
-            persist_worldbuilding_project_data({"world": world_data})
+            persist_worldbuilding_project_data(
+                {"world": world_data},
+                project_manager=self.project_manager,
+            )
 
         return result
-    
+
     async def generate_outline(
         self,
         world: Optional[Dict] = None,
@@ -2330,7 +2402,7 @@ class NovelCoordinator:
             world = self.context_manager.get("world", {})
         if characters is None:
             characters = self.character_manager.export_for_llm()
-        
+
         result = await self.outliner.execute({
             "world": world,
             "characters": characters,
@@ -2349,7 +2421,7 @@ class NovelCoordinator:
         self._sync_eventlines_from_outline(outline_data)
 
         return result
-    
+
     async def write_single_chapter(
         self,
         chapter_number: int,
@@ -2423,7 +2495,7 @@ class NovelCoordinator:
     def save_compiled_novel(self, file_path: Path, chapters: List[Dict[str, Any]]) -> None:
         """公共合集保存接口。"""
         self._save_novel(file_path, chapters)
-    
+
     async def continue_chapter(
         self,
         chapter_index: int,
@@ -2459,7 +2531,7 @@ class NovelCoordinator:
                     f"[Coordinator] 协作续写注入热点: count={len(trends_data)}, query={trends_query[:80]}"
                 )
         trends_prompt_block = self._build_trends_prompt_block(trends_data, limit=5)
-        
+
         # 构建续写提示
         prompt = f"""你是一位专业的小说作家。请基于以下已有内容进行续写，保持风格一致，情节连贯。
 
@@ -2487,13 +2559,13 @@ class NovelCoordinator:
 2. 自然衔接，不要重复已有内容
 3. 推进情节发展，可以增加对话、动作、心理描写
 4. 只输出续写的内容，不要包含任何说明文字"""
-        
+
         try:
             result = await self.chapter_writer.call_llm([
                 {"role": "system", "content": "你是一位专业的小说作家，擅长各类题材的创作。"},
                 {"role": "user", "content": prompt}
             ])
-            
+
             return {
                 "success": True,
                 "content": result,
@@ -2526,7 +2598,7 @@ class NovelCoordinator:
             if count >= limit:
                 break
         return "\n".join(lines) if count else "暂无事件线"
-    
+
     async def polish_content(
         self,
         content: str,
@@ -2548,13 +2620,13 @@ class NovelCoordinator:
 5. 保持原文的核心情节和人物特征不变
 
 请直接输出润色后的完整内容，不要包含任何说明文字。"""
-        
+
         try:
             result = await self.polisher.call_llm([
                 {"role": "system", "content": "你是一位专业的文字编辑，擅长润色和优化小说文本。"},
                 {"role": "user", "content": prompt}
             ])
-            
+
             return {
                 "success": True,
                 "content": result,
@@ -2567,12 +2639,12 @@ class NovelCoordinator:
                 "error": str(e),
                 "content": ""
             }
-    
+
     def _extract_chapters(self, outline_data: Dict) -> List[Dict]:
         """从大纲中提取章节列表"""
         chapters = []
         outline_data = normalize_outline_payload(outline_data)
-        
+
         if isinstance(outline_data, dict):
             # 尝试从volumes中提取
             volumes = outline_data.get("volumes", [])
@@ -2580,17 +2652,17 @@ class NovelCoordinator:
                 if isinstance(volume, dict):
                     vol_chapters = volume.get("chapters", [])
                     chapters.extend(vol_chapters)
-            
+
             # 如果没有volumes，尝试直接获取chapters
             if not chapters:
                 chapters = outline_data.get("chapters", [])
-        
+
         # 如果还是空的，创建默认章节
         if not chapters:
             chapters = [{"title": f"第{i+1}章", "summary": "待生成"} for i in range(10)]
-        
+
         return chapters
-    
+
     def _summarize_chapter(self, content: str, max_length: int = WRITING_CONFIG.SUMMARY_MAX_LENGTH) -> str:
         """章节摘要（问题5修复：提取关键情节而非纯截断）"""
         if not content or not content.strip():
@@ -2614,16 +2686,16 @@ class NovelCoordinator:
             summary_parts.append(para)
             current_len += para_clean_len
         return "\n".join(summary_parts) if summary_parts else clean[:max_length]
-    
+
     def _save_novel(self, file_path: Path, chapters: List[Dict]) -> None:
         """保存小说到文件"""
         content_parts = []
-        
+
         if self.project:
             content_parts.append(f"《{self.project.title}》\n")
             content_parts.append(f"类型：{self.project.novel_type}\n")
             content_parts.append("=" * 50 + "\n\n")
-        
+
         for i, chapter in enumerate(chapters):
             # 使用.get()避免KeyError，提供默认值
             chapter_title = chapter.get('title', f'第{i+1}章')
@@ -2631,11 +2703,11 @@ class NovelCoordinator:
             content_parts.append(f"\n{chapter_title}\n\n")
             content_parts.append(chapter_content)
             content_parts.append("\n\n" + "-" * 30 + "\n")
-        
+
         old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else None
         atomic_write_text(file_path, "".join(content_parts), old_content=old_content)
         logger.info(f"Novel saved to: {file_path}")
-    
+
     def get_candidate_agents_for_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         """查询指定任务的候选 Agent 列表。"""
         return self.collab_agent_registry.find_candidates(task)
@@ -2716,7 +2788,7 @@ class NovelCoordinator:
             "collab_agent_registry": self.collab_agent_registry.to_dict(),
             "collab_service_registry": self.collab_service_registry.to_dict(),
         }
-    
+
     def get_metrics_report(self) -> Dict[str, Any]:
         """获取详细的指标报告"""
         return {

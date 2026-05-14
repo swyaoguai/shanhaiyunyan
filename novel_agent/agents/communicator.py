@@ -114,7 +114,8 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             "protagonist",     # 主角设定
             "plot_idea",       # 剧情构思
             "volume_count",    # 卷数
-            "chapters_per_volume"  # 每卷章节数
+            "chapters_per_volume",  # 每卷章节数
+            "target_words_per_chapter"  # 每章目标字数
         ]
         
         # 路由器（用于增强响应）
@@ -586,6 +587,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 **重要**：请直接用自然语言回复用户，使用Markdown格式排版（标题、列表、粗体等）。
 **绝对不要**输出JSON格式、代码块、或任何技术标记。
 **中文显示要求**：不要向用户暴露内部英文Agent代号（如 Worldbuilder、Outliner、ChapterWriter、Communicator、Coordinator、Router）。需要提及时请使用自然中文说法，例如“后续世界观设定流程”“大纲规划流程”“章节写作流程”。避免使用“Worldbuilder那边”“Outliner那边”这类工程化表达。
+如果用户正在确认小说创作规划，且每章目标字数、卷数或章节数量还没有明确确认，请自然地询问这些细节；可以告诉用户“每章约多少字”可以继续调整。
 结合知识库内容和工具结果给出准确、有条理的回复。
 如果信息已经足够，在回复末尾加上 [INFO_COMPLETE]。""")
 
@@ -635,12 +637,43 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             elif theme_parts:
                 extracted["theme"] = "、".join(theme_parts[:3])
 
-        word_count_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:w|W|万)\s*字", text)
+        word_count_match = next(
+            (
+                match
+                for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:w|W|万)\s*字", text)
+                if not any(
+                    marker in text[max(0, match.start() - 16):match.start()]
+                    for marker in ("每章", "每一章", "单章", "每章节", "章节字数", "每章正文", "单章正文")
+                )
+            ),
+            None,
+        )
         if word_count_match:
             extracted["target_word_count"] = int(float(word_count_match.group(1)) * 10000)
 
+        per_chapter_match = re.search(
+            r"(?:每章|每一章|单章|每章节|章节字数|每章正文|单章正文).{0,8}?(\d+(?:\.\d+)?)\s*(k|K|千|w|W|万)?\s*(?:字|词)?",
+            text,
+        ) or re.search(
+            r"(\d+(?:\.\d+)?)\s*(k|K|千|w|W|万)?\s*(?:字|词)?\s*(?:每章|每一章|单章|每章节|一章)",
+            text,
+        )
+        if per_chapter_match:
+            try:
+                per_chapter_value = float(str(per_chapter_match.group(1)).strip())
+            except (TypeError, ValueError):
+                per_chapter_value = 0
+            unit = str(per_chapter_match.group(2) or "").strip().lower()
+            if unit in {"w", "万"}:
+                per_chapter_value *= 10000
+            elif unit in {"k", "千"}:
+                per_chapter_value *= 1000
+            if per_chapter_value >= 50:
+                extracted["target_words_per_chapter"] = int(round(per_chapter_value))
+                extracted["target_words_per_chapter_source"] = "user"
+
         requirement_markers = ("不要", "不能", "必须", "要求", "保留", "改成", "改为", "以后", "后续")
-        if any(marker in text for marker in requirement_markers) or "target_word_count" in extracted:
+        if any(marker in text for marker in requirement_markers) or "target_word_count" in extracted or "target_words_per_chapter" in extracted:
             existing = str(extracted.get("requirements") or "").strip()
             extracted["requirements"] = (existing + "\n" + text if existing else text)[:1200]
 
@@ -799,10 +832,11 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 1. 从用户的回复中提取有用的信息
 2. 结合知识库内容和工具结果，给出更准确的回复
 3. 判断还缺少哪些关键信息
-4. 如果信息足够，在回复末尾加上 [INFO_COMPLETE]
-5. 如果还需要更多信息，友好地继续提问
-6. 严格遵守当前回复模式，不要在 lightweight 模式下过度结构化
-7. 不要向用户暴露内部英文Agent代号（如 Worldbuilder、Outliner、ChapterWriter、Communicator、Coordinator、Router）；需要说明流程时，用“后续世界观设定流程”“大纲规划流程”“章节写作流程”等自然中文表达，避免“Worldbuilder那边”这类工程化说法
+4. 对小说创作规划，必须把每章目标字数、卷数、章节数量作为可讨论细节；如果用户没有确认，请自然追问或在确认稿中标注“可继续调整”
+5. 如果信息足够，在回复末尾加上 [INFO_COMPLETE]
+6. 如果还需要更多信息，友好地继续提问
+7. 严格遵守当前回复模式，不要在 lightweight 模式下过度结构化
+8. 不要向用户暴露内部英文Agent代号（如 Worldbuilder、Outliner、ChapterWriter、Communicator、Coordinator、Router）；需要说明流程时，用“后续世界观设定流程”“大纲规划流程”“章节写作流程”等自然中文表达，避免“Worldbuilder那边”这类工程化说法
 
 以JSON格式返回：
 {{
@@ -1277,6 +1311,9 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
     "requirements": "其他特殊要求",
     "volume_count": 数字,
     "chapters_per_volume": 数字,
+    "target_word_count": 数字,
+    "target_words_per_chapter": 数字,
+    "target_words_per_chapter_source": "user或estimated或空字符串",
     "confidence": 0.0-1.0的置信度
 }}
 """
@@ -1291,6 +1328,9 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             # 填充默认值
             result.setdefault("volume_count", 1)
             result.setdefault("chapters_per_volume", 5)
+            result.setdefault("target_word_count", 0)
+            result.setdefault("target_words_per_chapter", 0)
+            result.setdefault("target_words_per_chapter_source", "")
             return result
         except (json.JSONDecodeError, ValueError, KeyError):
             # 返回已收集的信息

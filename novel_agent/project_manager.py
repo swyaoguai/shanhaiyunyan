@@ -208,6 +208,19 @@ class ProjectManager:
         if kb_dir.exists():
             shutil.rmtree(kb_dir)
             logger.info(f"Deleted knowledge base data for project {project_id}")
+
+        try:
+            from .utils.token_stats import get_token_stats_store
+
+            deleted_token_records = get_token_stats_store().reset_all(project_id=project_id)
+            if deleted_token_records:
+                logger.info(
+                    "Deleted token stats for project %s: %s records",
+                    project_id,
+                    deleted_token_records,
+                )
+        except Exception as exc:
+            logger.warning("Failed to delete token stats for project %s: %s", project_id, exc)
         
         del self.projects[project_id]
         

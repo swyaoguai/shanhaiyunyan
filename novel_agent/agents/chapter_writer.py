@@ -105,19 +105,25 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
         # 从知识库获取写作上下文
         kb_context = await self._get_kb_context(chapter_outline, chapter_number)
+        project_dir = context.get("project_dir") if isinstance(context, dict) else None
+        recall_query = self.build_semantic_recall_query(
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            chapter_outline=chapter_outline,
+            chapter_planning=chapter_planning,
+            characters=characters,
+            plot_thread=plot_thread,
+            eventlines=eventlines,
+            world=world,
+            discussion_context=discussion_context,
+        )
+        wiki_context = await self._get_wiki_context(
+            query=recall_query,
+            chapter_number=chapter_number,
+            project_dir=project_dir,
+        )
         semantic_recall_context: Dict[str, Any] = {}
         if self._semantic_recall_enabled():
-            recall_query = self.build_semantic_recall_query(
-                chapter_number=chapter_number,
-                chapter_title=chapter_title,
-                chapter_outline=chapter_outline,
-                chapter_planning=chapter_planning,
-                characters=characters,
-                plot_thread=plot_thread,
-                eventlines=eventlines,
-                world=world,
-                discussion_context=discussion_context,
-            )
             semantic_recall_context = await self._get_semantic_recall_context(
                 query=recall_query,
                 chapter_number=chapter_number,
@@ -147,6 +153,7 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 
         trends_prompt = self._format_trends_context(trends_data)
         
+        wiki_context_block = self._format_wiki_context(wiki_context)
         prompt = self._render_custom_task_prompt(
             "write_chapter",
             chapter_number=chapter_number,
@@ -172,10 +179,13 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             chapter_planning=chapter_planning,
             plot_thread_state=plot_thread_prompt,
             semantic_recall=self._format_semantic_recall_context(semantic_recall_context),
+            wiki_context=wiki_context_block,
         )
         semantic_recall_block = self._format_semantic_recall_context(semantic_recall_context)
         if prompt and semantic_recall_block:
             prompt = f"{prompt}\n\n{semantic_recall_block}"
+        if prompt and wiki_context_block:
+            prompt = f"{prompt}\n\n{wiki_context_block}"
         if not prompt:
             prompt = f"""请撰写以下章节：
 
@@ -220,6 +230,8 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
 {constraint_prompt}
 
 {semantic_recall_block}
+
+{wiki_context_block}
 
 {self._format_kb_context(kb_context)}
 
@@ -399,6 +411,79 @@ class ChapterWriterAgent(BaseAgent, KnowledgeBaseMixin):
             snippet = content[:450]
             total_chars += len(snippet)
             if total_chars > 2200:
+                break
+            parts.append(header)
+            parts.append(snippet)
+        parts.append("</context_block>")
+        return "\n".join(parts)
+
+    async def _get_wiki_context(self, query: str, chapter_number: int, project_dir: Any = None) -> Dict[str, Any]:
+        """从项目 Wiki 检索角色、世界观、事件线和历史章节摘要。"""
+        if not query or not project_dir:
+            return {"query": query, "results": []}
+        try:
+            from pathlib import Path
+            from ..wiki.wiki_compat import WikiCompatLayer
+            from ..wiki.wiki_types import PageType
+
+            compat = WikiCompatLayer(Path(project_dir))
+            result = await compat.retriever.retrieve(
+                query=query[:1500],
+                context_window=3500,
+                top_k=6,
+                include_graph=True,
+                include_vector=False,
+            )
+            results: List[Dict[str, Any]] = []
+            for item in getattr(result, "results", []) or []:
+                page = getattr(item, "page", None)
+                if not page:
+                    continue
+                page_chapter = getattr(page.frontmatter, "chapter_number", None)
+                if page.page_type == PageType.CHAPTER and page_chapter:
+                    try:
+                        if int(page_chapter) >= int(chapter_number):
+                            continue
+                    except Exception:
+                        pass
+                body = str(getattr(page, "body", "") or "").strip()
+                if not body:
+                    continue
+                results.append({
+                    "title": page.title,
+                    "type": page.page_type.value,
+                    "score": float(getattr(item, "score", 0.0) or 0.0),
+                    "source": getattr(item, "source", "wiki"),
+                    "content": body[:700],
+                    "chapter_number": page_chapter,
+                })
+                if len(results) >= 5:
+                    break
+            return {"query": query, "results": results}
+        except Exception as e:
+            logger.warning(f"[{self.name}] Wiki检索失败，继续使用当前上下文: {e}")
+            return {"query": query, "results": [], "error": str(e)}
+
+    def _format_wiki_context(self, wiki_context: Dict[str, Any]) -> str:
+        results = wiki_context.get("results", []) if isinstance(wiki_context, dict) else []
+        if not results:
+            return ""
+        parts = ['<context_block source="wiki">']
+        total_chars = 0
+        for idx, item in enumerate(results[:5], 1):
+            content = str(item.get("content", "") if isinstance(item, dict) else item).strip()
+            if not content:
+                continue
+            title = item.get("title", "未命名Wiki页") if isinstance(item, dict) else "未命名Wiki页"
+            page_type = item.get("type", "wiki") if isinstance(item, dict) else "wiki"
+            chapter = item.get("chapter_number") if isinstance(item, dict) else ""
+            score = item.get("score", 0) if isinstance(item, dict) else 0
+            header = f"Wiki片段 {idx} title={title} type={page_type} score={float(score or 0):.2f}"
+            if chapter:
+                header += f" chapter={chapter}"
+            snippet = content[:650]
+            total_chars += len(snippet)
+            if total_chars > 2600:
                 break
             parts.append(header)
             parts.append(snippet)

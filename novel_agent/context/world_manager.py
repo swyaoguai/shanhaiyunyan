@@ -33,64 +33,94 @@ class WorldSetting:
 class WorldManager:
     """
     世界观管理器
-    
+
     职责：
     1. 管理世界设定的各个方面
     2. 确保设定一致性
     3. 提供世界观上下文
     """
-    
+
     def __init__(self, project_dir: Optional[Path] = None):
         self.project_dir = project_dir
         self.world: Optional[WorldSetting] = None
         self.locations: Dict[str, Dict] = {}  # 地点详情
         self.items: Dict[str, Dict] = {}  # 重要物品
         self.events: List[Dict] = []  # 历史事件
-        
+
         if project_dir:
             self._load_world()
-    
+
     def set_world(self, world: WorldSetting) -> None:
         """设置世界观"""
         self.world = world
         self._save_world()
-    
+
+    def ensure_loaded(self) -> bool:
+        """
+        如果内存中未持有世界观但磁盘上已经有 worldbuilding.json，
+        则尝试重新加载一次；返回最终是否持有世界观。
+
+        用于防御某些执行路径只落盘没有同步内存态的情况。
+        """
+        if self.world is not None:
+            return True
+        if not self.project_dir:
+            return False
+        try:
+            self._load_world()
+        except Exception as exc:
+            logger.warning(f"[WorldManager] ensure_loaded 失败: {exc}")
+            return False
+        return self.world is not None
+
+    def apply_payload(self, data: Any) -> bool:
+        """
+        从任意世界观载荷（dict / list / {'world': ...} / {'raw_content': ...}）
+        重建内存态。返回是否成功构建出 WorldSetting。
+        """
+        try:
+            self._apply_world_payload(data)
+        except Exception as exc:
+            logger.warning(f"[WorldManager] apply_payload 失败: {exc}")
+            return False
+        return self.world is not None
+
     def update_world(self, updates: Dict[str, Any]) -> None:
         """更新世界观属性"""
         if not self.world:
             self.world = WorldSetting(name="未命名世界", world_type="通用")
-        
+
         for key, value in updates.items():
             if hasattr(self.world, key):
                 setattr(self.world, key, value)
-        
+
         self._save_world()
-    
+
     def add_location(self, name: str, details: Dict[str, Any]) -> None:
         """添加地点"""
         self.locations[name] = details
         self._save_world()
-    
+
     def add_item(self, name: str, details: Dict[str, Any]) -> None:
         """添加重要物品"""
         self.items[name] = details
         self._save_world()
-    
+
     def add_event(self, event: Dict[str, str]) -> None:
         """添加历史事件"""
         self.events.append(event)
         self._save_world()
-    
+
     def get_world_context(self, compact: bool = True) -> str:
         """
         获取世界观上下文(用于注入到Agent)
-        
+
         Returns:
             格式化的世界观信息
         """
         if not self.world:
             return "暂无世界观设定"
-        
+
         if compact:
             rules = self.world.rules[:3] if self.world.rules else []
             factions = self.world.factions[:2] if self.world.factions else []
@@ -142,59 +172,59 @@ class WorldManager:
         else:
             text = json.dumps(value, ensure_ascii=False)
         return text[:max_len] + ("..." if len(text) > max_len else "")
-    
+
     def _format_factions(self) -> str:
         """格式化势力信息"""
         if not self.world or not self.world.factions:
             return "未设定"
-        
+
         result = []
         for faction in self.world.factions:
             name = faction.get("name", "未知势力")
             desc = faction.get("description", "")
             result.append(f"- {name}: {desc}")
-        
+
         return "\n".join(result)
-    
+
     def get_power_system_context(self) -> str:
         """获取力量体系上下文"""
         if not self.world or not self.world.power_system:
             return "无力量体系设定"
-        
+
         return json.dumps(self.world.power_system, ensure_ascii=False, indent=2)
-    
+
     def check_consistency(self, content: str) -> List[str]:
         """
         检查内容与世界观的一致性
-        
+
         Args:
             content: 待检查的内容
-            
+
         Returns:
             不一致的问题列表
         """
         # 简单实现：检查是否违反世界规则
         issues = []
-        
+
         if self.world and self.world.rules:
             for rule in self.world.rules:
                 # 这里可以用LLM来做更智能的检查
                 # 简单实现先跳过
                 pass
-        
+
         return issues
-    
+
     def _load_world(self) -> None:
         """从文件加载世界观"""
         if not self.project_dir:
             return
-        
+
         # 优先加载worldbuilding.json (与coordinator.py保持一致)
         world_file = self.project_dir / "worldbuilding.json"
         # 向后兼容：如果worldbuilding.json不存在，尝试加载旧的world.json
         if not world_file.exists():
             world_file = self.project_dir / "world.json"
-        
+
         if world_file.exists():
             try:
                 data = json.loads(world_file.read_text(encoding="utf-8"))
@@ -282,25 +312,25 @@ class WorldManager:
         self.locations = data.get("locations", {}) if isinstance(data.get("locations"), dict) else {}
         self.items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
         self.events = data.get("events", []) if isinstance(data.get("events"), list) else []
-    
+
     def _save_world(self) -> None:
         """保存世界观到文件"""
         if not self.project_dir:
             return
-        
+
         self.project_dir.mkdir(parents=True, exist_ok=True)
         # 使用worldbuilding.json (与coordinator.py保持一致)
         world_file = self.project_dir / "worldbuilding.json"
-        
+
         data = {
             "world": asdict(self.world) if self.world else None,
             "locations": self.locations,
             "items": self.items,
             "events": self.events
         }
-        
+
         atomic_write_json(world_file, data)
-    
+
     def export_for_llm(self) -> Dict[str, Any]:
         """导出为LLM可用的格式"""
         return {

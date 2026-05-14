@@ -519,7 +519,7 @@ class BaseAgent(ABC):
         """加载系统提示词
         
         优先级：
-        1. PromptManager 中的用户自定义提示词（通过前端设置页面修改）
+        1. PromptManager 中的内置文件提示词（用户 system 自定义只作为补充追加）
         2. prompts/*.md 文件（与 BaseAgent 运行时一致的文件提示词）
         3. 代码内置默认提示词（_get_default_prompt fallback）
         """
@@ -855,6 +855,9 @@ class BaseAgent(ABC):
                         f"[{self.name}] Received aggregated streamed response: {len(content)} chars, "
                         f"time: {duration:.2f}s"
                     )
+                    if not content.strip():
+                        from ..utils.retry import EmptyResponseError
+                        raise EmptyResponseError(f"[{self.name}] LLM 流式返回空内容")
                     return content
                 try:
                     response = await self._create_chat_completion_with_rotation(params)
@@ -911,16 +914,21 @@ class BaseAgent(ABC):
                 
                 # 处理content为None的情况（某些模型可能返回None，如refusal/tool_calls）
                 if content is None:
-                    # 尝试从refusal字段获取内容
                     refusal = getattr(response.choices[0].message, 'refusal', None)
                     if refusal:
                         content = refusal
+                        logger.warning(
+                            f"[{self.name}] LLM returned refusal: '{content[:100]}'"
+                        )
                     else:
-                        content = ""
-                    logger.warning(
-                        f"[{self.name}] LLM returned None content, using fallback: "
-                        f"'{content[:100] if content else '(empty)'}'"
-                    )
+                        from ..utils.retry import EmptyResponseError
+                        logger.warning(f"[{self.name}] LLM returned empty content, will retry")
+                        raise EmptyResponseError(f"[{self.name}] LLM 返回空内容")
+
+                if not content.strip():
+                    from ..utils.retry import EmptyResponseError
+                    logger.warning(f"[{self.name}] LLM returned blank content, will retry")
+                    raise EmptyResponseError(f"[{self.name}] LLM 返回空白内容")
                 
                 # 计算token使用
                 usage = getattr(response, 'usage', None)

@@ -11,6 +11,8 @@ import pytest
 from novel_agent.agent_config import AgentModelConfig
 from novel_agent.agents.base_agent import AgentCapability, BaseAgent
 from novel_agent.agents.capability_registry import AgentCapabilityRegistry
+from novel_agent.constants import get_data_dir
+from novel_agent.project_manager import ProjectManager
 from novel_agent.route_targets import (
     ROUTE_TARGET_AGENT,
     ROUTE_TARGET_HELPER_SERVICE,
@@ -124,6 +126,41 @@ def build_chapter_settings_stub(total_chapters: int = 2) -> StubAgent:
     )
 
 
+def build_valid_outline_payload(title: str = "归墟录", volume_count: int = 1) -> Dict[str, Any]:
+    volumes = [
+        {
+            "volume_number": index,
+            "volume_title": f"第{index}卷 风雪旧城",
+            "volume_summary": f"第{index}卷围绕旧城归来后的阶段目标展开。",
+            "core_conflict": "旧案真相与宗门余波持续冲突。",
+            "protagonist_growth": "主角从被动自保走向主动追查。",
+            "volume_climax": "主角在卷末拿到关键证据。",
+            "key_events": ["旧城归来", "暗线浮现", "卷末反击"],
+            "foreshadowing": "旧案证物会在后续回收。",
+        }
+        for index in range(1, volume_count + 1)
+    ]
+    return {
+        "title": title,
+        "intro": "旧城归来后的复仇成长故事。",
+        "story_synopsis": "林渊回到旧城，追查宗门旧案并重建信任。",
+        "global_outline": (
+            "书名《归墟录》。故事梗概：主角林渊回到旧城，从旧案线索切入，"
+            "在宗门余波、势力追索和自我怀疑中逐步成长。世界规则以宗门秩序与旧城暗线为核心，"
+            "中心思想是创伤后的自救与重建，矛盾冲突集中在真相追查、旧友立场和势力围堵。"
+        ),
+        "theme": "复仇成长",
+        "main_conflict": "旧案真相与现实势力的对抗。",
+        "selling_points": ["旧城悬疑", "复仇成长"],
+        "ending_direction": "主角揭开旧案并完成阶段性成长。",
+        "plot_threads": [
+            {"name": "旧案追查线", "description": "围绕宗门旧案逐步推进。"},
+        ],
+        "volumes": volumes,
+        "notes": "只保留卷级规划，章纲阶段再拆分单章。",
+    }
+
+
 @pytest.fixture
 def mock_model_config():
     return AgentModelConfig(
@@ -139,9 +176,18 @@ def mock_model_config():
 @pytest.fixture
 def coordinator(mock_model_config):
     with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        project_manager = ProjectManager(data_dir=temp_path / "data")
+        project = project_manager.create_project("测试项目", "隔离项目")
+        project_manager.switch_project(project.id)
         with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:
             mock_manager.return_value.get_effective_config.return_value = mock_model_config
-            instance = NovelCoordinator(project_dir=Path(temp_dir))
+            with (
+                patch("novel_agent.project_manager.get_project_manager", return_value=project_manager),
+                patch("novel_agent.workflow.coordinator.get_project_manager", return_value=project_manager),
+            ):
+                instance = NovelCoordinator(project_dir=project_manager._get_project_dir(project.id))
+                instance.switch_to_project(project.id)
             yield instance
 
 
@@ -236,6 +282,9 @@ class TestContractModels:
         assert task_graph[4].task_type == "write_chapter"
         assert task_graph[-1].inputs["chapter_number"] == 6
         assert task_graph[4].dependencies[0].dependency_key == "chapter_settings_ready"
+        assert contract.metadata["pause_after_chapter_settings"] is True
+        assert task_graph[3].review_required is True
+        assert task_graph[3].metadata["stop_on_review_required"] is True
 
     def test_build_default_task_graph_adds_stage_summary_tasks_for_ten_chapters(self):
         contract = build_default_creation_contract(
@@ -363,6 +412,24 @@ class TestCapabilityRegistry:
         assert decision.agent_name == "RepairAgent"
         assert decision.candidate_source == "dynamic_capability_registry"
         assert decision.candidate_names == ["RepairAgent"]
+
+    def test_routing_policy_prefers_fixed_builtin_agent_for_explicit_route(self):
+        registry = AgentCapabilityRegistry()
+        registry.register(StubAgent("AutoOutliner", accepted_tasks=["build_outline"], priority=99))
+
+        decision = RoutingPolicy.default().resolve(
+            task_type="build_outline",
+            stage="project_ready",
+            context=CollabExecutionContext.from_legacy_context({"project_dir": "C:/tmp/project"}),
+            capability_registry=registry,
+            input_data={"plot_idea": "旧城归来"},
+            fallback_agent_name="Outliner",
+        )
+
+        assert decision.agent_name == "Outliner"
+        assert decision.candidate_source == "fixed_route_rule"
+        assert decision.candidate_names[0] == "Outliner"
+        assert "fixed preferred agent" in decision.route_reason
 
 
 class TestTaskPool:
@@ -595,6 +662,45 @@ class TestCoordinatorAutonomousTask:
         assert "task_failed" in event_types
         assert "task_fallback_started" in event_types
         assert event_types[-1] == "task_completed"
+
+    @pytest.mark.asyncio
+    async def test_run_autonomous_task_surfaces_structured_agent_failure_reason(self, coordinator):
+        registry = AgentCapabilityRegistry()
+        failing_agent = StubAgent(
+            "AutoCharacterBuilder",
+            accepted_tasks=["build_characters"],
+            priority=99,
+            result={
+                "success": False,
+                "response_message": "角色卡草稿质量不足，暂不保存。",
+                "missing_info": ["角色缺少 name", "角色描述过短"],
+                "validation_issues": ["缺少已确认角色名：沈清悦"],
+            },
+        )
+        registry.register(failing_agent)
+
+        coordinator.capability_registry = registry
+        coordinator.supervised_mode = True
+        coordinator.fallback_to_orchestrated = False
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await coordinator._run_autonomous_task(
+                task_type="build_characters",
+                input_data={"input": "characters"},
+                title="生成角色档案",
+            )
+
+        error_text = str(exc_info.value)
+        runtime_task_pool = coordinator.project_manager.load_project_state("task_pool", default={})
+        runtime_trace = coordinator.project_manager.load_project_state("collab_execution_trace", default={})
+        failed_task = next(item for item in runtime_task_pool.get("tasks", []) if item.get("task_type") == "build_characters")
+        failed_event = next(item for item in runtime_trace.get("events", []) if item.get("type") == "task_failed")
+
+        assert "角色卡草稿质量不足" in error_text
+        assert "角色缺少 name" in error_text
+        assert "缺少已确认角色名：沈清悦" in error_text
+        assert failed_task["metadata"]["error"] == error_text
+        assert failed_event["error"] == error_text
 
     @pytest.mark.asyncio
     async def test_run_autonomous_task_without_supervised_mode_uses_fallback_directly(self, coordinator):
@@ -1027,6 +1133,59 @@ class TestCoordinatorContractConfirmation:
         assert "created_at" not in saved_trace["events"][0]
         assert saved_trace["events"][0]["timestamp"]
 
+    def test_initialize_task_pool_hydrates_semantic_dependencies(self, coordinator):
+        contract = build_default_creation_contract(
+            novel_type="玄幻",
+            theme="复仇成长",
+            requirements="压抑递进",
+            protagonist="林渊",
+            plot_idea="旧城归来",
+            volume_count=1,
+            chapters_per_volume=2,
+            user_confirmed=False,
+        )
+        contract.task_graph = build_default_task_graph(contract)
+
+        result = coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        tasks = result["task_pool"]["tasks"]
+        first_by_type = {}
+        write_tasks = []
+        for task in tasks:
+            first_by_type.setdefault(task["task_type"], task)
+            if task["task_type"] == "write_chapter":
+                write_tasks.append(task)
+
+        assert first_by_type["build_characters"]["depends_on"] == [first_by_type["build_world"]["task_id"]]
+        assert set(first_by_type["build_outline"]["depends_on"]) == {
+            first_by_type["build_world"]["task_id"],
+            first_by_type["build_characters"]["task_id"],
+        }
+        assert first_by_type["chapter_settings"]["depends_on"] == [first_by_type["build_outline"]["task_id"]]
+        assert all(task["depends_on"] == [first_by_type["chapter_settings"]["task_id"]] for task in write_tasks)
+
+    def test_initialize_task_pool_respects_disabled_chapter_settings_pause(self, coordinator):
+        contract = build_default_creation_contract(
+            novel_type="玄幻",
+            theme="复仇成长",
+            requirements="压抑递进",
+            protagonist="林渊",
+            plot_idea="旧城归来",
+            volume_count=1,
+            chapters_per_volume=1,
+            user_confirmed=False,
+        )
+        contract.metadata["pause_after_chapter_settings"] = False
+        contract.task_graph = build_default_task_graph(contract)
+
+        result = coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        chapter_settings_task = next(
+            item for item in result["task_pool"]["tasks"]
+            if item["task_type"] == "chapter_settings"
+        )
+
+        assert chapter_settings_task["review_required"] is False
+        assert "stop_on_review_required" not in chapter_settings_task["metadata"]
+
 
     @pytest.mark.asyncio
     async def test_execute_project_ready_tasks_runs_world_and_outline_in_formal_task_pool(self, coordinator):
@@ -1041,7 +1200,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         character_agent = build_character_stub()
         registry.register_many([world_agent, character_agent, outline_agent])
@@ -1088,6 +1247,50 @@ class TestCoordinatorContractConfirmation:
         assert event_types[-1] == "project_ready_execution_cycle"
 
     @pytest.mark.asyncio
+    async def test_project_ready_world_task_fails_without_meaningful_artifact(self, coordinator):
+        registry = AgentCapabilityRegistry()
+        world_agent = StubAgent(
+            "AutoWorldbuilder",
+            accepted_tasks=["build_world"],
+            priority=100,
+            result={
+                "success": True,
+                "world": {
+                    "status": "missing_info",
+                    "missing_info": ["novel_type"],
+                },
+            },
+        )
+        registry.register(world_agent)
+        coordinator.capability_registry = registry
+        coordinator.worldbuilder = world_agent
+
+        contract = build_default_creation_contract(
+            novel_type="",
+            theme="",
+            requirements="",
+            protagonist="",
+            plot_idea="",
+            volume_count=1,
+            chapters_per_volume=1,
+            user_confirmed=True,
+        )
+        contract.task_graph = build_default_task_graph(contract)
+
+        coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=1)
+        world_task = next(
+            item for item in execute_result["task_pool"]["tasks"]
+            if item["task_type"] == "build_world"
+        )
+
+        assert world_task["status"] == TaskStatus.FAILED
+        assert not world_task["result_ref"]
+        assert "novel_type" in world_task["metadata"]["error"]
+        assert execute_result["stop_reason"] == "task_failed"
+        assert coordinator.project_manager.load_project_data("worldbuilding") == []
+
+    @pytest.mark.asyncio
     async def test_project_ready_tasks_inherit_discussion_context_from_contract(self, coordinator):
         registry = AgentCapabilityRegistry()
         world_agent = StubAgent(
@@ -1101,7 +1304,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         registry.register_many([world_agent, character_agent, outline_agent])
         coordinator.capability_registry = registry
@@ -1133,6 +1336,211 @@ class TestCoordinatorContractConfirmation:
         assert "合欢宗元素" in outline_agent.calls[0]["input_data"]["discussion_context"]
 
     @pytest.mark.asyncio
+    async def test_zero_start_creation_pipeline_keeps_planning_artifacts_consistent(self, coordinator):
+        """Regression: fresh creation must not mix character cards, global outline,
+        volume planning, chapter settings, and eventlines into the same content."""
+
+        world_payload = {
+            "world_name": "瑞安朝",
+            "world_type": "古代甜宠",
+            "geography": {"京城": "贵族府邸与朝堂所在"},
+            "factions": [
+                {"name": "苏府", "description": "女主娘家"},
+                {"name": "镇北王府", "description": "男主府邸"},
+            ],
+            "rules": ["男女主无背叛、无长误会", "宅门冲突两章内化解"],
+            "story_hooks": ["赐婚先婚后爱", "嫡姐挑拨", "朝堂弹劾"],
+        }
+        characters_payload = [
+            {
+                "name": "苏晚宁",
+                "role": "女主角",
+                "identity": "苏府庶女，奉旨嫁入镇北王府",
+                "description": "外柔内刚，擅长理家与察言观色。",
+                "personality": ["温和", "清醒", "有主见"],
+                "goals": ["在王府站稳脚跟", "与萧景珩建立真实信任"],
+                "relationships": {"萧景珩": "丈夫", "苏明珠": "嫡姐与挑拨者"},
+            },
+            {
+                "name": "萧景珩",
+                "role": "男主角",
+                "identity": "镇北王世子",
+                "description": "外冷内热，因军功被朝堂忌惮。",
+                "personality": ["克制", "护短", "专一"],
+                "goals": ["守住边军清名", "保护苏晚宁"],
+                "relationships": {"苏晚宁": "妻子", "苏明珠": "外部干扰"},
+            },
+        ]
+        global_outline = (
+            "书名：《春庭雪》\n简介：苏晚宁奉旨嫁入镇北王府，与萧景珩先婚后爱。\n"
+            "故事梗概：两人从试探到互信，在嫡姐挑拨和朝堂弹劾中并肩破局。\n"
+            "世界或时代规则：瑞安朝重门第与军功，宅门与朝堂互相牵动。\n"
+            "中心思想：被安排的婚姻也能靠尊重和信任长出真心。\n"
+            "矛盾冲突：苏明珠挑拨、御史弹劾、王府内外对庶女身份的偏见。\n"
+            "前期剧情方向：新婚试探、回门风波、王府立足。\n"
+            "叙事节奏：甜宠日常与小风波交替，误会不过章。\n"
+            "小说卖点：外冷内热世子与外柔内刚庶女的双向守护。\n"
+            "角色关系与成长方向：苏晚宁从谨慎自保到主动并肩，萧景珩从克制疏离到公开护妻。"
+        )
+        outline_payload = {
+            "title": "春庭雪",
+            "intro": "庶女与世子先婚后爱。",
+            "story_synopsis": "苏晚宁与萧景珩在宅门与朝堂小风波中建立信任。",
+            "global_outline": global_outline,
+            "theme": "信任与尊重",
+            "main_conflict": "两人需要在身份偏见、嫡姐挑拨和朝堂弹劾中守住婚姻。",
+            "selling_points": "甜宠、护妻、宅门小反击。",
+            "ending_direction": "弹劾化解，夫妻圆满相守。",
+            "plot_threads": [
+                {
+                    "id": "main",
+                    "title": "先婚后爱，相守一生",
+                    "objective": "从奉旨成婚到公开互信",
+                    "scope": "全书",
+                },
+                {
+                    "id": "sister_scheme",
+                    "title": "嫡姐挑拨线",
+                    "objective": "化解苏明珠挑拨并反向稳固夫妻信任",
+                    "scope": "第一卷",
+                },
+            ],
+            "volumes": [
+                {
+                    "volume_number": 1,
+                    "volume_title": "新婚试探",
+                    "volume_summary": "新婚夜与回门风波建立信任基础。",
+                    "core_conflict": "苏晚宁庶女身份被轻视，苏明珠趁机挑拨。",
+                    "protagonist_growth": "苏晚宁从谨慎自保到敢于表达需求。",
+                    "volume_climax": "回门宴上萧景珩当众护妻。",
+                    "key_events": ["新婚夜分寸相处", "王府理家初显", "回门宴联手反击"],
+                    "foreshadowing": "御史台暗中收集镇北王府军功旧案。",
+                },
+                {
+                    "volume_number": 2,
+                    "volume_title": "并肩破局",
+                    "volume_summary": "朝堂弹劾升温，夫妻共同查证旧案。",
+                    "core_conflict": "御史弹劾与苏府旧怨合流。",
+                    "protagonist_growth": "苏晚宁从被保护者成长为破局同盟。",
+                    "volume_climax": "夫妻面圣呈证，弹劾者反受惩。",
+                    "key_events": ["旧账线索浮出", "夫妻分头查证", "金殿呈证"],
+                    "foreshadowing": "边军旧账中的空名册在终局回收。",
+                },
+            ],
+            "notes": "章纲阶段只能展开各卷关键事件，不能改名或改关系。",
+        }
+        chapter_settings_payload = [
+            {
+                "chapter_number": 1,
+                "name": "第1章 新婚夜",
+                "description": "苏晚宁与萧景珩新婚夜分寸相处。",
+                "chapter_goal": "建立先婚后爱的初始距离与体贴细节。",
+                "key_event": "萧景珩主动给苏晚宁留出安全边界。",
+                "ending_hook": "苏晚宁发现王府账册有异常空项。",
+            },
+            {
+                "chapter_number": 2,
+                "name": "第2章 回门风波",
+                "description": "回门宴上苏明珠挑拨失败。",
+                "chapter_goal": "让夫妻第一次联手应对娘家压力。",
+                "key_event": "萧景珩当众维护苏晚宁。",
+                "ending_hook": "御史台的人在宴后与苏府管事密谈。",
+            },
+            {
+                "chapter_number": 3,
+                "name": "第3章 金殿呈证",
+                "description": "夫妻查证后面圣破局。",
+                "chapter_goal": "回收朝堂弹劾线并完成关系公开。",
+                "key_event": "苏晚宁呈上空名册证据。",
+                "ending_hook": "萧景珩牵起她的手回府。",
+            },
+        ]
+
+        registry = AgentCapabilityRegistry()
+        world_agent = StubAgent(
+            "AutoWorldbuilder",
+            accepted_tasks=["build_world"],
+            priority=100,
+            result={"success": True, "world": world_payload},
+        )
+        character_agent = StubAgent(
+            "AutoCharacterBuilder",
+            accepted_tasks=["build_characters"],
+            priority=98,
+            result={"success": True, "characters": characters_payload},
+        )
+        outline_agent = StubAgent(
+            "AutoOutliner",
+            accepted_tasks=["build_outline"],
+            priority=97,
+            result={"success": True, "outline": outline_payload},
+        )
+        chapter_settings_agent = StubAgent(
+            "AutoChapterSettingBuilder",
+            accepted_tasks=["chapter_settings"],
+            priority=96,
+            result={"success": True, "rows": chapter_settings_payload},
+        )
+        registry.register_many([world_agent, character_agent, outline_agent, chapter_settings_agent])
+
+        coordinator.capability_registry = registry
+        coordinator.worldbuilder = world_agent
+        coordinator.character_builder = character_agent
+        coordinator.outliner = outline_agent
+        coordinator.chapter_setting_builder = chapter_settings_agent
+
+        contract = build_default_creation_contract(
+            novel_type="古代甜宠",
+            theme="先婚后爱、互相信任",
+            requirements="无背叛、无长误会、甜宠为主",
+            protagonist="苏晚宁、萧景珩",
+            plot_idea="奉旨成婚后在宅门与朝堂风波中相知相守",
+            volume_count=2,
+            chapters_per_volume=3,
+            user_confirmed=True,
+        )
+        contract.metadata["pause_after_chapter_settings"] = True
+        contract.task_graph = build_default_task_graph(contract)
+
+        coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=4, max_chapter_tasks=0)
+
+        assert execute_result["stop_reason"] == "review_required"
+        assert execute_result["stopped_on_task_type"] == "chapter_settings"
+
+        saved_world = coordinator.project_manager.load_project_data("worldbuilding")
+        saved_characters = coordinator.project_manager.load_project_data("characters")
+        saved_outline = coordinator.project_manager.load_project_data("outline")
+        saved_eventlines = coordinator.project_manager.load_project_data("eventlines")
+        saved_chapter_settings = coordinator.project_manager.load_project_data("chapter_settings")
+
+        assert saved_world["world"]["world_name"] == "瑞安朝"
+        assert {row["name"] for row in saved_characters} == {"苏晚宁", "萧景珩"}
+        assert all("林渊" not in json.dumps(row, ensure_ascii=False) for row in saved_characters)
+
+        assert isinstance(saved_outline, list) and len(saved_outline) == 1
+        outline_row = saved_outline[0]
+        assert outline_row["title"] == "主线大纲"
+        assert "作者：AI助手" not in outline_row["global_outline"]
+        assert "第1卷：新婚试探" in outline_row["volume_plan"]
+        assert outline_row["global_outline"] != outline_row["volume_plan"]
+        assert not outline_row.get("chapter_number")
+        assert "chapters" not in json.dumps(outline_row.get("volumes"), ensure_ascii=False)
+
+        eventline_names = {row.get("name") for row in saved_eventlines if isinstance(row, dict)}
+        assert "先婚后爱，相守一生" in eventline_names
+        assert "嫡姐挑拨线" in eventline_names
+        assert any(row.get("source_scope") == "volume_foreshadowing" for row in saved_eventlines)
+
+        assert [row["chapter_number"] for row in saved_chapter_settings] == [1, 2, 3]
+        assert "苏晚宁" in chapter_settings_agent.calls[0]["input_data"]["characters"][0]["name"]
+        assert "先婚后爱，相守一生" in json.dumps(
+            chapter_settings_agent.calls[0]["input_data"]["eventlines"],
+            ensure_ascii=False,
+        )
+        assert "全书/分卷概览" not in saved_chapter_settings[0]["chapter_goal"]
+
+    @pytest.mark.asyncio
     async def test_project_ready_character_task_does_not_use_unregistered_real_fallback(self, coordinator):
         registry = AgentCapabilityRegistry()
         world_agent = StubAgent(
@@ -1145,7 +1553,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         registry.register_many([world_agent, outline_agent])
         coordinator.capability_registry = registry
@@ -1200,7 +1608,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         registry.register_many([failing_world_agent, fallback_world_agent, outline_agent])
 
@@ -1247,7 +1655,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={"success": True, "outline": {"title": "归墟录", "chapters": [{"title": "第一章", "summary": "旧城归来"}]}},
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         character_agent = build_character_stub()
         registry.register_many([world_agent, character_agent, outline_agent])
@@ -1311,16 +1719,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={
-                "success": True,
-                "outline": {
-                    "title": "归墟录",
-                    "chapters": [
-                        {"title": "第一章", "summary": "旧城归来"},
-                        {"title": "第二章", "summary": "风雪入城"},
-                    ],
-                },
-            },
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         character_agent = build_character_stub()
         chapter_settings_agent = build_chapter_settings_stub(total_chapters=2)
@@ -1405,7 +1804,33 @@ class TestCoordinatorContractConfirmation:
         contract.task_graph = build_default_task_graph(contract)
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
-        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=5)
+        review_result = await coordinator.execute_project_ready_tasks(max_tasks=5)
+
+        assert review_result["stop_reason"] == "review_required"
+        assert review_result["stopped_on_task_type"] == "chapter_settings"
+
+        task_by_type = {}
+        for item in review_result["task_pool"]["tasks"]:
+            task_by_type.setdefault(item["task_type"], []).append(item)
+        assert task_by_type["chapter_settings"][0]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["write_chapter"][0]["status"] == TaskStatus.PENDING
+        assert chapter_agent.calls == []
+
+        blocked_result = await coordinator.execute_project_ready_tasks(max_tasks=5, max_chapter_tasks=1)
+        blocked_task_by_type = {}
+        for item in blocked_result["task_pool"]["tasks"]:
+            blocked_task_by_type.setdefault(item["task_type"], []).append(item)
+
+        assert blocked_result["stop_reason"] == "chapter_settings_review_required"
+        assert blocked_result["stopped_on_task_type"] == "write_chapter"
+        assert blocked_task_by_type["write_chapter"][0]["status"] == TaskStatus.BLOCKED
+        assert coordinator.project_manager.load_project_data("chapters") == []
+        assert not any(coordinator.project_manager.get_chapters_dir().glob("*.md"))
+        assert chapter_agent.calls == []
+
+        coordinator.approve_chapter_settings_review()
+
+        execute_result = await coordinator.execute_project_ready_tasks(max_tasks=5, max_chapter_tasks=1)
 
         task_by_type = {}
         for item in execute_result["task_pool"]["tasks"]:
@@ -1424,16 +1849,18 @@ class TestCoordinatorContractConfirmation:
         assert first_write_task["result_ref"]
         assert chapter_path.exists()
         assert chapter_path.read_text(encoding="utf-8") == "第一章正式正文"
-        assert isinstance(outline_rows, list) and outline_rows[0]["content"] == "第一章正式正文"
+        assert isinstance(outline_rows, list) and outline_rows[0]["title"] == "主线大纲"
+        assert not outline_rows[0].get("chapter_number")
         saved_settings = coordinator.project_manager.load_project_data("chapter_settings")
         assert saved_settings[0]["chapter_goal"] == "目标1"
         assert "目标1" in chapter_agent.calls[0]["context"]["chapter_outline"]
-        assert execute_result["stopped_on_task_type"] == ""
+        assert execute_result["stopped_on_task_type"] == "write_chapter"
         assert execute_result["chapter_tasks_executed"] == 1
-        assert execute_result["stop_reason"] == "max_tasks_reached"
-        assert execute_result["project_ready_execution"]["stop_reason"] == "max_tasks_reached"
+        assert execute_result["stop_reason"] == "max_chapter_tasks_reached"
+        assert execute_result["project_ready_execution"]["stop_reason"] == "max_chapter_tasks_reached"
         assert execute_result["project_ready_execution"]["chapter_tasks_executed"] == 1
-        assert execute_result["task_pool"]["metadata"]["project_ready_execution"]["stop_reason"] == "max_tasks_reached"
+        assert execute_result["task_pool"]["metadata"]["project_ready_execution"]["stop_reason"] == "max_chapter_tasks_reached"
+        assert not (get_data_dir() / "projects" / coordinator.project_manager.current_project_id / "aux_memory").exists()
 
     @pytest.mark.asyncio
     async def test_execute_project_ready_tasks_runs_multiple_write_chapters_until_chapter_limit(self, coordinator):
@@ -1448,17 +1875,7 @@ class TestCoordinatorContractConfirmation:
             "AutoOutliner",
             accepted_tasks=["build_outline"],
             priority=95,
-            result={
-                "success": True,
-                "outline": {
-                    "title": "归墟录",
-                    "chapters": [
-                        {"title": "第一章", "summary": "旧城归来"},
-                        {"title": "第二章", "summary": "风雪入城"},
-                        {"title": "第三章", "summary": "夜雨旧巷"},
-                    ],
-                },
-            },
+            result={"success": True, "outline": build_valid_outline_payload()},
         )
         character_agent = build_character_stub()
         chapter_settings_agent = build_chapter_settings_stub(total_chapters=3)
@@ -1543,6 +1960,20 @@ class TestCoordinatorContractConfirmation:
         contract.task_graph = build_default_task_graph(contract)
 
         coordinator.initialize_task_pool_from_contract(contract.to_dict(), approved=True)
+        review_result = await coordinator.execute_project_ready_tasks(
+            max_tasks=7,
+            max_chapter_tasks=2,
+        )
+
+        task_by_type = {}
+        for item in review_result["task_pool"]["tasks"]:
+            task_by_type.setdefault(item["task_type"], []).append(item)
+        assert review_result["stop_reason"] == "review_required"
+        assert review_result["stopped_on_task_type"] == "chapter_settings"
+        assert task_by_type["chapter_settings"][0]["status"] == TaskStatus.COMPLETED
+        assert task_by_type["write_chapter"][0]["status"] == TaskStatus.PENDING
+
+        coordinator.approve_chapter_settings_review()
         execute_result = await coordinator.execute_project_ready_tasks(
             max_tasks=7,
             max_chapter_tasks=2,
@@ -1554,6 +1985,7 @@ class TestCoordinatorContractConfirmation:
 
         write_tasks = task_by_type["write_chapter"]
         outline_rows = coordinator.project_manager.load_project_data("outline")
+        chapter_rows = coordinator.project_manager.load_project_data("chapters")
 
         assert task_by_type["build_world"][0]["status"] == TaskStatus.COMPLETED
         assert task_by_type["build_characters"][0]["status"] == TaskStatus.COMPLETED
@@ -1567,9 +1999,12 @@ class TestCoordinatorContractConfirmation:
         assert execute_result["project_ready_execution"]["stop_reason"] == "max_chapter_tasks_reached"
         assert execute_result["task_pool"]["metadata"]["project_ready_execution"]["chapter_tasks_executed"] == 2
         assert isinstance(outline_rows, list)
-        assert outline_rows[0]["content"] == "统一章节正文"
-        assert outline_rows[1]["content"] == "统一章节正文"
-        assert outline_rows[2]["content"] == ""
+        assert outline_rows[0]["title"] == "主线大纲"
+        assert not outline_rows[0].get("chapter_number")
+        assert isinstance(chapter_rows, list)
+        assert len(chapter_rows) == 2
+        assert chapter_rows[0]["content"] == "统一章节正文"
+        assert chapter_rows[1]["content"] == "统一章节正文"
 
     @pytest.mark.asyncio
     async def test_execute_project_ready_tasks_runs_project_stage_summary_and_persists_result(self, coordinator):
@@ -1687,14 +2122,17 @@ class TestCommunicatorMessageBusFallback:
             agent = CommunicatorAgent(router_agent=None)
             captured = {}
 
-            async def fake_send_task(receiver, task_type, task_data, context=None, timeout=0):
+            async def fake_send_task_stream(receiver, task_type, task_data, context=None, timeout=0):
                 captured["receiver"] = receiver
                 captured["task_type"] = task_type
                 captured["task_data"] = dict(task_data or {})
                 captured["context"] = dict(context or {})
-                return {"outline": {"title": "测试大纲"}}
+                yield {
+                    "msg_type": "task_completed",
+                    "payload": {"result": {"outline": {"title": "测试大纲"}}},
+                }
 
-            agent.send_task = fake_send_task
+            agent.send_task_stream = fake_send_task_stream
 
             result = await agent.request_outline(
                 world={"world_name": "玄荒界"},
@@ -1782,36 +2220,46 @@ class TestRouterContractDraft:
     @pytest.mark.asyncio
     async def test_router_create_novel_returns_draft_contract_confirmation_payload(self, mock_model_config):
         with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            project_manager = ProjectManager(data_dir=temp_path / "data")
+            project = project_manager.create_project("测试项目", "隔离项目")
+            project_manager.switch_project(project.id)
             with patch("novel_agent.agents.base_agent.get_config_manager") as mock_manager:
                 mock_manager.return_value.get_effective_config.return_value = mock_model_config
 
                 from novel_agent.workflow.coordinator import NovelCoordinator
                 from novel_agent.agents.router_agent import RouterAgent
 
-                coordinator = NovelCoordinator(project_dir=Path(temp_dir))
-                router = RouterAgent(coordinator=coordinator)
+                with (
+                    patch("novel_agent.project_manager.get_project_manager", return_value=project_manager),
+                    patch("novel_agent.agents.router_agent.get_project_manager", return_value=project_manager, create=True),
+                    patch("novel_agent.workflow.coordinator.get_project_manager", return_value=project_manager),
+                ):
+                    coordinator = NovelCoordinator(project_dir=project_manager._get_project_dir(project.id))
+                    coordinator.switch_to_project(project.id)
+                    router = RouterAgent(coordinator=coordinator)
 
-                result = await router.route_and_respond(
-                    "我想写一部玄幻复仇成长小说，主角林渊，从旧城归来开始。",
-                    context={
-                        "session_id": "copilot",
-                        "auto_execute": False,
-                        "creation_requirements": {
-                            "novel_type": "玄幻",
-                            "theme": "复仇成长",
-                            "requirements": "压抑递进",
-                            "protagonist": "林渊",
-                            "plot_idea": "旧城归来",
-                            "volume_count": 1,
-                            "chapters_per_volume": 3,
+                    result = await router.route_and_respond(
+                        "我想写一部玄幻复仇成长小说，主角林渊，从旧城归来开始。",
+                        context={
+                            "session_id": "copilot",
+                            "auto_execute": False,
+                            "creation_requirements": {
+                                "novel_type": "玄幻",
+                                "theme": "复仇成长",
+                                "requirements": "压抑递进",
+                                "protagonist": "林渊",
+                                "plot_idea": "旧城归来",
+                                "volume_count": 1,
+                                "chapters_per_volume": 3,
+                            },
+                            "conversation_history": [
+                                {"role": "user", "content": "我想写一部玄幻复仇成长小说"},
+                                {"role": "assistant", "content": "主角和整体风格有什么偏好吗？"},
+                                {"role": "user", "content": "主角叫林渊，压抑递进，从旧城归来开始。"},
+                            ],
                         },
-                        "conversation_history": [
-                            {"role": "user", "content": "我想写一部玄幻复仇成长小说"},
-                            {"role": "assistant", "content": "主角和整体风格有什么偏好吗？"},
-                            {"role": "user", "content": "主角叫林渊，压抑递进，从旧城归来开始。"},
-                        ],
-                    },
-                )
+                    )
 
                 delegated = result["delegated_result"]
                 params = delegated["params"]

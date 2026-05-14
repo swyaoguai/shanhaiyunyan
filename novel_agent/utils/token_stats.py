@@ -908,6 +908,33 @@ class TokenStatsStore:
                 total_count,
             )
             return total_count
+
+    def cleanup_project_records_not_in(self, valid_project_ids: List[str]) -> int:
+        """
+        删除已不存在项目的统计记录。
+
+        Token 统计按项目写入；当测试项目或用户删除的项目已经不在
+        projects.json 中时，继续保留这些记录会污染全局统计和筛选项。
+        空 project_id 视为旧版全局记录，不在这里删除。
+        """
+        normalized_ids = sorted({str(project_id or "").strip() for project_id in valid_project_ids if str(project_id or "").strip()})
+        if not normalized_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in normalized_ids)
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                DELETE FROM token_usage
+                WHERE project_id != ''
+                  AND project_id NOT IN ({placeholders})
+                """,
+                normalized_ids,
+            )
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                logger.info("Cleaned up %s orphan token usage records", deleted_count)
+            return deleted_count
     
     def close(self):
         """关闭数据库连接"""

@@ -629,6 +629,8 @@ def test_characters_post_preserves_structured_fields(client_with_project):
             "description": "抽象系修仙主角",
             "personality": ["抽象", "无厘头"],
             "abilities": ["吞器修炼"],
+            "inventory": ["玄铁令"],
+            "development_history": [{"chapter_number": 2, "event_type": "ability", "title": "吞器入门", "description": "开始掌握吞器修炼"}],
             "motivation": "摆脱追杀并逆袭",
             "goals": ["活着走出秘境", "在宗门站稳脚跟"],
             "relationships": "苏青禾：暧昧对象\n赵不凡：死对头",
@@ -647,11 +649,14 @@ def test_characters_post_preserves_structured_fields(client_with_project):
     assert isinstance(saved_payload, dict)
     assert saved_payload["吴迪"]["identity"] == "合欢宗外门弟子"
     assert saved_payload["吴迪"]["goals"] == ["活着走出秘境", "在宗门站稳脚跟"]
+    assert saved_payload["吴迪"]["inventory"] == ["玄铁令"]
+    assert saved_payload["吴迪"]["development_history"][0]["title"] == "吞器入门"
 
     get_response = client.get("/api/project-data/characters")
     payload = get_response.json()
     assert payload["data"][0]["relationships"]["赵不凡"] == "死对头"
     assert payload["data"][0]["tags"] == ["爽文", "修仙"]
+    assert payload["data"][0]["inventory"] == ["玄铁令"]
 
 
 @pytest.mark.parametrize("data_type", ["eventlines", "outline_settings", "detail_settings", "chapter_settings"])

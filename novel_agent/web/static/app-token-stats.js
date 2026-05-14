@@ -20,7 +20,8 @@ const TOKEN_STATS_CARD_COLORS = [
 const tokenStatsState = {
     currentView: 'hourly',
     filterModel: '',
-    availableModels: []
+    availableModels: [],
+    scope: 'all'
 };
 
 function tokenStatsEscape(value) {
@@ -44,6 +45,7 @@ function buildTokenStatsUrl(path, extraParams = {}) {
     if (tokenStatsState.filterModel) {
         params.set('model', tokenStatsState.filterModel);
     }
+    params.set('scope', tokenStatsState.scope || 'all');
     Object.entries(extraParams).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') {
             params.set(key, value);
@@ -63,7 +65,7 @@ async function fetchTokenStatsJson(path, extraParams = {}) {
 
 async function loadTokenStatsFilters() {
     try {
-        const res = await fetch(normalizeApiUrl('/api/v1/token-stats/filters'));
+        const res = await fetch(buildTokenStatsUrl('/api/v1/token-stats/filters'));
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
         }
@@ -142,9 +144,13 @@ function renderTokenStatsHeader() {
                     <i class="ri-coin-line"></i>
                     Token 消耗统计
                 </h2>
-                <div style="color: var(--text-secondary); font-size: 13px; margin-top: 8px;">当前项目：${projectName}</div>
+                <div style="color: var(--text-secondary); font-size: 13px; margin-top: 8px;">当前范围：${tokenStatsState.scope === 'current' ? `当前项目 · ${projectName}` : '全部项目'}</div>
             </div>
             <div class="token-stats-filters" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+                <select id="filter-scope" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); min-width: 130px;">
+                    <option value="all" ${tokenStatsState.scope !== 'current' ? 'selected' : ''}>全部项目</option>
+                    <option value="current" ${tokenStatsState.scope === 'current' ? 'selected' : ''}>当前项目</option>
+                </select>
                 <select id="filter-model" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); min-width: 190px;">
                     <option value="">全部模型</option>
                     ${tokenStatsState.availableModels.map(model => {
@@ -152,7 +158,10 @@ function renderTokenStatsHeader() {
                         return `<option value="${safeModel}" ${tokenStatsState.filterModel === model ? 'selected' : ''}>${safeModel}</option>`;
                     }).join('')}
                 </select>
-                <button id="reset-token-stats" style="padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); color: #ef4444; cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 13px;" title="清空当前项目统计数据">
+                <button id="cleanup-token-stats" style="padding: 8px 14px; border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.45); background: rgba(59, 130, 246, 0.1); color: #60a5fa; cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 13px;" title="清理已删除项目留下的统计记录">
+                    <i class="ri-filter-3-line"></i> 清理
+                </button>
+                <button id="reset-token-stats" style="padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); color: #ef4444; cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 13px;" title="清空全部统计数据">
                     <i class="ri-delete-bin-line"></i> 重置
                 </button>
             </div>
@@ -209,13 +218,36 @@ async function renderTokenStats() {
         });
     });
 
+    document.getElementById('filter-scope').addEventListener('change', async event => {
+        tokenStatsState.scope = event.target.value === 'current' ? 'current' : 'all';
+        tokenStatsState.filterModel = '';
+        await loadTokenStatsFilters();
+        renderTokenStats();
+    });
+
     document.getElementById('filter-model').addEventListener('change', event => {
         tokenStatsState.filterModel = event.target.value;
         loadTokenStatsContent();
     });
 
+    document.getElementById('cleanup-token-stats').addEventListener('click', async () => {
+        try {
+            const res = await fetch(normalizeApiUrl('/api/token-stats/cleanup-orphans'), { method: 'POST' });
+            const result = await res.json();
+            if (result.success) {
+                showToast(`已清理 ${result.deleted_count || 0} 条无效项目统计记录`, 'success');
+                await loadTokenStatsFilters();
+                await loadTokenStatsContent();
+            } else {
+                showToast('清理失败: ' + (result.error || '未知错误'), 'error');
+            }
+        } catch (e) {
+            showToast('清理失败: ' + e.message, 'error');
+        }
+    });
+
     document.getElementById('reset-token-stats').addEventListener('click', async () => {
-        if (!confirm('确定要清空当前项目的Token统计数据吗？此操作不可恢复。')) {
+        if (!confirm('确定要清空全部Token统计数据吗？此操作不可恢复。')) {
             return;
         }
 
@@ -223,7 +255,7 @@ async function renderTokenStats() {
             const res = await fetch(normalizeApiUrl('/api/token-stats/reset'), { method: 'POST' });
             const result = await res.json();
             if (result.success) {
-                showToast(`已重置当前项目统计数据，共清空 ${result.deleted_count || 0} 条记录`, 'success');
+                showToast(`已重置全部统计数据，共清空 ${result.deleted_count || 0} 条记录`, 'success');
                 await loadTokenStatsFilters();
                 await loadTokenStatsContent();
             } else {

@@ -17,6 +17,8 @@ from typing import Optional, Dict, Any, List
 
 import threading
 
+from ..constants import get_data_dir
+
 logger = logging.getLogger(__name__)
 
 _PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -71,7 +73,7 @@ class ChatSessionStore:
 
     def __init__(self, storage_dir: Optional[Path] = None):
         if storage_dir is None:
-            storage_dir = Path(__file__).parent.parent / "data" / "chat_sessions"
+            storage_dir = get_data_dir() / "chat_sessions"
 
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)

@@ -16,6 +16,9 @@ function resetGlobals() {
   window.apiCall = vi.fn();
   window.showToast = vi.fn();
   window.loadProjects = vi.fn().mockResolvedValue(undefined);
+  window.loadCurrentProjectData = vi.fn().mockResolvedValue(undefined);
+  window.renderNavPanel = vi.fn();
+  window.renderMultiAgentWriteNavPanel = vi.fn();
   window.loadSavedSettings = vi.fn().mockResolvedValue(undefined);
   window.restoreSidebarState = vi.fn();
   window.checkGlobalAPIConfig = vi.fn().mockResolvedValue(undefined);
@@ -233,14 +236,70 @@ describe('copilot slash command prompts', () => {
     expect(button).not.toBeNull();
 
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
 
     expect(window.apiCall).toHaveBeenCalledWith('/api/v1/contract/confirm', 'POST', expect.objectContaining({
       contract_id: 'contract-2',
       approved: true
     }));
+    expect(window.loadCurrentProjectData).toHaveBeenCalled();
+    expect(window.renderNavPanel).toHaveBeenCalled();
     expect(window.store.currentTaskPool?.metadata?.contract_id).toBe('contract-2');
+    expect(document.body.textContent).toContain('任务池摘要');
+  });
+
+  it('resumes instead of re-confirming an already confirmed creation contract', async () => {
+    window.apiCall.mockResolvedValueOnce({
+      creation_contract: {
+        contract_id: 'contract-confirmed',
+        user_confirmed: true,
+        scope: { novel_type: '玄幻' }
+      },
+      task_pool: {
+        tasks: [
+          { title: '生成世界观', status: 'completed', candidate_agents: ['Worldbuilder'] },
+          { title: '创作第1章', status: 'completed', candidate_agents: ['ChapterWriter'] }
+        ],
+        metadata: {
+          contract_id: 'contract-confirmed',
+          source: 'contract_confirmation'
+        }
+      },
+      project_ready_execution: {
+        executed_task_count: 1,
+        stop_reason: ''
+      }
+    });
+
+    const html = window.renderCreationContractCard({
+      contract_id: 'contract-confirmed',
+      user_confirmed: true,
+      scope: { novel_type: '玄幻' },
+      constraints: {},
+      deliverables: [],
+      task_graph: []
+    });
+    window.appendMessage(html, 'ai');
+
+    const button = document.querySelector('.copilot-contract-confirm-btn');
+    expect(button?.textContent).toContain('继续执行任务池');
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(window.apiCall).toHaveBeenCalledTimes(1);
+    expect(window.apiCall).toHaveBeenCalledWith('/api/v1/contract/resume', 'POST', expect.objectContaining({
+      session_id: 'copilot',
+      max_tasks: 7,
+      max_chapter_tasks: 2,
+      approve_chapter_settings: true
+    }));
+    expect(window.store.currentTaskPool?.metadata?.contract_id).toBe('contract-confirmed');
+    expect(document.body.textContent).toContain('已继续执行任务池');
     expect(document.body.textContent).toContain('任务池摘要');
   });
 });

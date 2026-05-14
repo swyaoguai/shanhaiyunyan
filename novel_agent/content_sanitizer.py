@@ -11,6 +11,9 @@ _INTERNAL_HTML_COMMENT_RE = re.compile(
     r"<!--\s*(?:PLOT_THREAD|THREAD_STATE|INTERNAL|SYSTEM)[\s\S]*?-->",
     flags=re.IGNORECASE,
 )
+_INTERNAL_AUTHOR_LINE_RE = re.compile(
+    r"(?im)^\s*(?:作者|author)\s*[:：]\s*(?:AI\s*助手|AI\s*创作|人工智能助手)\s*$"
+)
 
 _STRUCTURED_LABELS = {
     "abilities": "能力",
@@ -80,6 +83,7 @@ def strip_internal_author_markers(text: Any) -> str:
     if not value:
         return ""
     value = _INTERNAL_HTML_COMMENT_RE.sub("", value)
+    value = _INTERNAL_AUTHOR_LINE_RE.sub("", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return localize_structured_labels(value.strip())
 

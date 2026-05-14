@@ -48,4 +48,20 @@ describe('outline knowledge overview', () => {
     expect(item.volume_plan).toContain('吴迪入秘境，获得噬器能力。');
     expect(item.volume_plan).not.toContain('第1章 不应出现');
   });
+
+  it('does not mirror the same text into global outline and volume plan', () => {
+    const { buildOutlineOverviewItem } = loadKnowledgeHelpers();
+    const sameText = '书名：《归墟录》\n简介：旧城追凶。\n故事梗概：林渡回城查案。';
+    const item = buildOutlineOverviewItem([
+      {
+        title: '主线大纲',
+        summary: sameText,
+        global_outline: sameText,
+        volume_plan: sameText,
+      },
+    ]);
+
+    expect(item.summary).toBe(sameText);
+    expect(item.volume_plan).toBe('');
+  });
 });

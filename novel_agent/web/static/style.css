@@ -5584,3 +5584,198 @@ a.app-back-button:focus-visible {
     animation: copilot-sub-agent-pulse-anim 1.4s ease-in-out infinite;
     display: inline-block;
 }
+
+/* ===== 通用按钮样式系统 ===== */
+
+.app-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 16px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 14px;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.app-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--accent-color);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.app-btn:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.app-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* 主要按钮 - 紫色渐变 */
+.app-btn-primary {
+    background: linear-gradient(135deg, #8b5cf6, #6366f1);
+    border: none;
+    color: white;
+}
+
+.app-btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #7c3aed, #4f46e5);
+    border: none;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
+
+/* 成功按钮 - 绿色渐变 */
+.app-btn-success {
+    background: linear-gradient(135deg, #22c55e, #10b981);
+    border: none;
+    color: white;
+}
+
+.app-btn-success:hover:not(:disabled) {
+    background: linear-gradient(135deg, #16a34a, #059669);
+    border: none;
+    box-shadow: 0 4px 16px rgba(34, 197, 94, 0.4);
+}
+
+/* 危险按钮 */
+.app-btn-danger {
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #ef4444;
+}
+
+.app-btn-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.25);
+    border-color: rgba(239, 68, 68, 0.6);
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+
+/* 警告按钮 */
+.app-btn-warning {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    color: #f59e0b;
+}
+
+.app-btn-warning:hover:not(:disabled) {
+    background: rgba(245, 158, 11, 0.25);
+    border-color: rgba(245, 158, 11, 0.6);
+    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);
+}
+
+/* 蓝色按钮 */
+.app-btn-blue {
+    background: rgba(59, 130, 246, 0.16);
+    border: 1px solid rgba(59, 130, 246, 0.38);
+    color: #93c5fd;
+}
+
+.app-btn-blue:hover:not(:disabled) {
+    background: rgba(59, 130, 246, 0.28);
+    border-color: rgba(59, 130, 246, 0.6);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+}
+
+/* 青色按钮 */
+.app-btn-cyan {
+    background: rgba(14, 165, 233, 0.16);
+    border: 1px solid rgba(14, 165, 233, 0.38);
+    color: #7dd3fc;
+}
+
+.app-btn-cyan:hover:not(:disabled) {
+    background: rgba(14, 165, 233, 0.28);
+    border-color: rgba(14, 165, 233, 0.6);
+    box-shadow: 0 4px 12px rgba(14, 165, 233, 0.2);
+}
+
+/* 绿色边框按钮 */
+.app-btn-green {
+    background: rgba(34, 197, 94, 0.18);
+    border: 1px solid rgba(34, 197, 94, 0.4);
+    color: #22c55e;
+}
+
+.app-btn-green:hover:not(:disabled) {
+    background: rgba(34, 197, 94, 0.28);
+    border-color: rgba(34, 197, 94, 0.6);
+    box-shadow: 0 4px 12px rgba(34, 197, 94, 0.2);
+}
+
+/* 蓝紫色按钮 */
+.app-btn-violet {
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid rgba(139, 92, 246, 0.4);
+    color: #a78bfa;
+}
+
+.app-btn-violet:hover:not(:disabled) {
+    background: rgba(139, 92, 246, 0.25);
+    border-color: rgba(139, 92, 246, 0.6);
+    box-shadow: 0 4px 12px rgba(139, 92, 246, 0.2);
+}
+
+/* 幽灵按钮 - 无边框 */
+.app-btn-ghost {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+}
+
+.app-btn-ghost:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+    border: none;
+}
+
+/* 小尺寸按钮 */
+.app-btn-sm {
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+}
+
+/* 全宽按钮 */
+.app-btn-block {
+    width: 100%;
+}
+
+/* 图标按钮 */
+.app-btn-icon {
+    padding: 10px;
+    min-width: 40px;
+    min-height: 40px;
+}
+
+/* 按钮组容器 */
+.app-btn-group {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.app-btn-group-flex {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: stretch;
+}
+
+.app-btn-group-flex .app-btn {
+    flex: 1;
+    min-width: 120px;
+}

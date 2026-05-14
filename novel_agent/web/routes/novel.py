@@ -16,7 +16,8 @@ from ..models.requests import (
     CreateNovelRequest,
     GenerateWorldRequest,
     GenerateOutlineRequest,
-    WriteChapterRequest
+    ResumeCreationFlowRequest,
+    WriteChapterRequest,
 )
 from ..dependencies import get_coordinator, get_router_agent
 from ...agents import RouterAgent
@@ -80,7 +81,7 @@ def _load_create_session_context(request: CreateNovelRequest) -> Dict[str, Any]:
     for key in ("novel_type", "theme", "requirements", "protagonist", "plot_idea"):
         if str(collected_info.get(key) or "").strip():
             merged_requirements[key] = normalized[key]
-    for key in ("volume_count", "chapters_per_volume"):
+    for key in ("volume_count", "chapters_per_volume", "target_word_count", "target_words_per_chapter", "target_words_per_chapter_source"):
         if collected_info.get(key) not in (None, ""):
             merged_requirements[key] = normalized[key]
 
@@ -364,6 +365,40 @@ async def confirm_creation_contract(request: ConfirmCreationContractRequest):
             "message": "已拒绝当前合同草案",
         })
 
+    existing_pool = coordinator.project_manager.load_project_state("task_pool", default={})
+    persisted_contract = coordinator.project_manager.load_project_state("creation_contract", default={})
+    pool_metadata = existing_pool.get("metadata", {}) if isinstance(existing_pool, dict) else {}
+    existing_tasks = existing_pool.get("tasks", []) if isinstance(existing_pool, dict) else []
+    pool_contract_id = str(pool_metadata.get("contract_id") or "").strip()
+    persisted_contract_id = (
+        str(persisted_contract.get("contract_id") or "").strip()
+        if isinstance(persisted_contract, dict)
+        else ""
+    )
+    already_confirmed = (
+        bool(payload.get("user_confirmed"))
+        or (isinstance(persisted_contract, dict) and bool(persisted_contract.get("user_confirmed")))
+    )
+    same_runtime_contract = bool(existing_tasks) and (
+        (payload_contract_id and pool_contract_id == payload_contract_id)
+        or (request_contract_id and pool_contract_id == request_contract_id)
+        or (payload_contract_id and persisted_contract_id == payload_contract_id)
+    )
+    if same_runtime_contract and already_confirmed:
+        ready_task_result = await coordinator.execute_project_ready_tasks(
+            max_tasks=7,
+            max_chapter_tasks=2,
+        )
+        return JSONResponse({
+            "success": True,
+            "approved": True,
+            "creation_contract": persisted_contract if isinstance(persisted_contract, dict) and persisted_contract else payload,
+            "task_pool": ready_task_result.get("task_pool", existing_pool),
+            "collab_execution_trace": coordinator.project_manager.load_project_state("collab_execution_trace", default={}),
+            "project_ready_task_execution": ready_task_result,
+            "message": "合同已确认过，已沿用现有任务池继续执行。",
+        })
+
     result = coordinator.initialize_task_pool_from_contract(payload, approved=True)
     ready_task_result = await coordinator.execute_project_ready_tasks(
         max_tasks=7,
@@ -376,7 +411,105 @@ async def confirm_creation_contract(request: ConfirmCreationContractRequest):
         "task_pool": ready_task_result.get("task_pool", result.get("task_pool", {})),
         "collab_execution_trace": coordinator.project_manager.load_project_state("collab_execution_trace", default={}),
         "project_ready_task_execution": ready_task_result,
-        "message": "合同已确认，正式任务池已初始化，并已尝试执行首批任务与连续章节试点",
+        "message": "合同已确认，正式任务池已初始化，并已尝试执行首批可执行任务",
+    })
+
+
+@router.post("/contract/resume")
+async def resume_creation_flow(request: ResumeCreationFlowRequest):
+    """
+    续跑创作流程。
+
+    适用于因 review_required 被打断（例如章纲设定生成后等用户审阅）
+    或因 max_tasks/max_chapter_tasks 限额被截断后，用户审阅完成准备
+    继续创作的场景。
+
+    与 /contract/confirm 不同：本接口不会重新初始化任务池，
+    直接从已有的 runtime task pool 中调度下一批 ready tasks，
+    保留之前已完成任务的进度。
+    """
+    coordinator = get_coordinator()
+    if not coordinator:
+        raise HTTPException(status_code=500, detail="Coordinator not initialized")
+
+    contract_payload = coordinator.project_manager.load_project_state(
+        "creation_contract", default={}
+    )
+    if not isinstance(contract_payload, dict) or not contract_payload:
+        raise HTTPException(
+            status_code=400,
+            detail="当前项目尚未确认创作合同，无法续跑。请先通过聊天发起创作并确认合同。",
+        )
+
+    existing_pool = coordinator.project_manager.load_project_state("task_pool", default={})
+    if not isinstance(existing_pool, dict) or not existing_pool.get("tasks"):
+        raise HTTPException(
+            status_code=400,
+            detail="当前项目没有可续跑的任务池。请先通过 /contract/confirm 初始化任务池。",
+        )
+
+    max_tasks = max(1, int(request.max_tasks or 7))
+    max_chapter_tasks = max(0, int(request.max_chapter_tasks or 0))
+
+    review_state = coordinator.project_manager.load_project_state(
+        "chapter_settings_review", default={}
+    )
+    if not isinstance(review_state, dict):
+        review_state = {}
+    if bool(request.approve_chapter_settings):
+        approve_review = getattr(coordinator, "approve_chapter_settings_review", None)
+        if callable(approve_review):
+            review_state = approve_review()
+        else:
+            review_state.update({
+                "approved": True,
+                "approved_at": "",
+                "status": "approved",
+            })
+            coordinator.project_manager.save_project_state(
+                "chapter_settings_review", review_state
+            )
+
+    ready_task_result = await coordinator.execute_project_ready_tasks(
+        max_tasks=max_tasks,
+        max_chapter_tasks=max_chapter_tasks,
+    )
+
+    project_ready_execution = (
+        ready_task_result.get("project_ready_execution") or {}
+        if isinstance(ready_task_result, dict)
+        else {}
+    )
+    stop_reason = str(project_ready_execution.get("stop_reason") or "").strip()
+    executed_count = int(project_ready_execution.get("executed_task_count") or 0)
+
+    if stop_reason == "review_required":
+        message = f"已续跑 {executed_count} 个任务，仍在审阅断点上。请再次审阅后调用本接口继续。"
+    elif stop_reason == "chapter_settings_review_required":
+        message = "章纲设定尚未确认，已暂停正文创作，不会提前创建正文章节文件。"
+    elif stop_reason in {"max_tasks_reached", "max_chapter_tasks_reached"}:
+        message = f"已续跑 {executed_count} 个任务，达到本次批量上限。可再次调用本接口继续。"
+    elif stop_reason == "task_failed":
+        message = f"已续跑 {executed_count} 个任务，最后一个任务失败，请检查任务池状态。"
+    elif stop_reason == "":
+        message = f"已续跑 {executed_count} 个任务，任务池暂无新的就绪任务。"
+    else:
+        message = f"已续跑 {executed_count} 个任务，停止原因：{stop_reason}。"
+
+    return JSONResponse({
+        "success": True,
+        "creation_contract": contract_payload,
+        "task_pool": ready_task_result.get("task_pool", existing_pool),
+        "collab_execution_trace": coordinator.project_manager.load_project_state(
+            "collab_execution_trace", default={}
+        ),
+        "project_ready_task_execution": ready_task_result,
+        "project_ready_execution": project_ready_execution,
+        "stop_reason": stop_reason,
+        "stopped_on_task_type": str(project_ready_execution.get("stopped_on_task_type") or "").strip(),
+        "executed_task_count": executed_count,
+        "chapter_settings_review": review_state,
+        "message": message,
     })
 
 

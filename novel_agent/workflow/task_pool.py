@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .contracts import TaskDefinition
+from .contracts import TaskDefinition, TaskDependency
 
 
 def _now_iso() -> str:
@@ -114,6 +114,7 @@ class TaskPool:
         status: str = TaskStatus.PENDING,
         priority: int = 50,
         depends_on: Optional[List[str]] = None,
+        dependencies: Optional[List[Any]] = None,
         inputs: Optional[Dict[str, Any]] = None,
         expected_outputs: Optional[List[str]] = None,
         candidate_agents: Optional[List[str]] = None,
@@ -131,6 +132,13 @@ class TaskPool:
                 str(item).strip()
                 for item in (depends_on or [])
                 if str(item).strip()
+            ],
+            dependencies=[
+                item
+                if isinstance(item, TaskDependency)
+                else TaskDependency.from_dict(item)
+                for item in (dependencies or [])
+                if isinstance(item, (TaskDependency, dict))
             ],
             inputs=dict(inputs or {}),
             expected_outputs=[

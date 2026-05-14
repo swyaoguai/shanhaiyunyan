@@ -328,13 +328,16 @@ const BUILTIN_KNOWLEDGE_SCHEMAS = {
         ],
     },
     characters: {
-        summaryKeys: ['role', 'identity', 'personality', 'goals'],
+        summaryKeys: ['role', 'identity', 'abilities', 'inventory', 'development_history'],
         fields: [
             { key: 'name', label: '姓名', type: 'text', required: true },
             { key: 'role', label: '角色定位', type: 'select', options: ['主角', '配角', '反派', '导师', '盟友', '其他'] },
             { key: 'identity', label: '身份', type: 'text' },
             { key: 'description', label: '一句话简介', type: 'textarea', rows: 3 },
             { key: 'personality', label: '性格标签', type: 'list', placeholder: '每行一个，或用逗号分隔' },
+            { key: 'abilities', label: '技能/能力', type: 'list', placeholder: '每行一个，或用逗号分隔' },
+            { key: 'inventory', label: '持有物/道具', type: 'list', placeholder: '每行一个，或用逗号分隔' },
+            { key: 'development_history', label: '成长记录', type: 'event_list', rows: 5, placeholder: '例如：第4章 领悟御风术' },
             { key: 'goals', label: '目标', type: 'list', placeholder: '每行一个，或用逗号分隔' },
             { key: 'relationships', label: '人物关系', type: 'relation_map', placeholder: '格式：对象：关系，每行一条' },
             { key: 'notes', label: '备注', type: 'textarea', rows: 3 },
@@ -360,13 +363,17 @@ const BUILTIN_KNOWLEDGE_SCHEMAS = {
         ],
     },
     items: {
-        summaryKeys: ['item_type', 'owner', 'description'],
+        summaryKeys: ['item_type', 'status', 'owner', 'effects'],
         fields: [
             { key: 'name', label: '名称', type: 'text', required: true },
             { key: 'item_type', label: '类别', type: 'select', options: ['未分类', '武器', '法宝', '道具', '装备', '资源', '线索', '其他'] },
             { key: 'description', label: '简介', type: 'textarea', rows: 3 },
-            { key: 'details', label: '作用', type: 'textarea', rows: 3 },
+            { key: 'effects', label: '能力/作用', type: 'list', placeholder: '每行一个效果或限制' },
+            { key: 'status', label: '状态', type: 'select', options: ['未登场', '已出现', '已获得', '已消耗', '遗失', '封存'] },
             { key: 'owner', label: '当前持有者', type: 'text' },
+            { key: 'acquired_chapter', label: '获得章节', type: 'number' },
+            { key: 'details', label: '详细设定', type: 'textarea', rows: 3 },
+            { key: 'history', label: '流转记录', type: 'event_list', rows: 4, placeholder: '例如：第6章 谢昭从密室取得玄铁令' },
             { key: 'notes', label: '备注', type: 'textarea', rows: 3 },
         ],
     },
@@ -434,6 +441,19 @@ function getFirstOutlineText(items, keys) {
     return '';
 }
 
+function normalizeOutlineCompareText(value) {
+    return String(value || '')
+        .replace(/\s+/g, '')
+        .replace(/[【】《》「」『』，。；：、,.!！?？:;"'“”‘’()[\]{}\-—_]/g, '')
+        .toLowerCase();
+}
+
+function outlineTextsMatch(left, right) {
+    const leftText = normalizeOutlineCompareText(left);
+    const rightText = normalizeOutlineCompareText(right);
+    return Boolean(leftText && rightText && leftText === rightText);
+}
+
 function formatOutlineVolumePlanFromVolumes(volumes) {
     if (!Array.isArray(volumes) || !volumes.length) return '';
     const lines = ['【分卷规划】'];
@@ -466,7 +486,8 @@ function formatOutlineVolumePlanFromVolumes(volumes) {
 
 function getOutlineVolumePlan(items) {
     const existing = getFirstOutlineText(items, ['volume_plan']);
-    if (existing) return existing;
+    const globalOutline = getFirstOutlineText(items, ['global_outline', 'standard_outline', 'full_outline']);
+    if (existing && !outlineTextsMatch(existing, globalOutline)) return existing;
     for (const item of items) {
         if (!item || typeof item !== 'object') continue;
         const volumePlan = formatOutlineVolumePlanFromVolumes(item.volumes);
@@ -524,10 +545,26 @@ function localizeGeneratedSchemaLabels(value) {
         .replace(/(^|[；;，,\n]\s*)power\s+system\s*[:：]\s*/gi, '$1力量体系：');
 }
 
+function formatListEntryValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value !== 'object') return String(value);
+    const chapter = value.chapter_number || value.chapter || '';
+    const title = String(value.title || value.name || value.event || value.description || value.detail || '').trim();
+    const description = String(value.description || value.detail || value.notes || '').trim();
+    const prefix = chapter ? `第${chapter}章 ` : '';
+    if (title && description && description !== title) {
+        return `${prefix}${title}：${description}`;
+    }
+    return `${prefix}${title || JSON.stringify(value)}`.trim();
+}
+
 function formatSchemaFieldValue(field, value) {
     if (value === null || value === undefined) return '';
     if (field.type === 'list') {
-        return localizeGeneratedSchemaLabels(Array.isArray(value) ? value.join('\n') : value);
+        return localizeGeneratedSchemaLabels(Array.isArray(value) ? value.map(formatListEntryValue).join('\n') : value);
+    }
+    if (field.type === 'event_list') {
+        return localizeGeneratedSchemaLabels(Array.isArray(value) ? value.map(formatListEntryValue).join('\n') : value);
     }
     if (field.type === 'relation_map') {
         if (typeof value === 'string') return localizeGeneratedSchemaLabels(value);
@@ -567,6 +604,23 @@ function parseSchemaFieldValue(field, rawValue) {
             ? text.split(/[\n,，、]+/).map(item => item.trim()).filter(Boolean)
             : [];
     }
+    if (field.type === 'event_list') {
+        if (!text) return [];
+        return text
+            .split(/\n+/)
+            .map(line => line.trim())
+            .filter(Boolean)
+            .map(line => {
+                const chapterMatch = line.match(/^第?(\d+)章?\s*[：:、\-—]?\s*(.*)$/);
+                const titleText = (chapterMatch ? chapterMatch[2] : line).trim();
+                return {
+                    chapter_number: chapterMatch ? Number.parseInt(chapterMatch[1], 10) : 0,
+                    event_type: 'note',
+                    title: titleText.split(/[：:]/)[0].trim().slice(0, 40) || titleText.slice(0, 40),
+                    description: titleText,
+                };
+            });
+    }
     if (field.type === 'relation_map') {
         return text;
     }
@@ -579,7 +633,7 @@ function buildSchemaFieldHtml(field, value, prefix) {
     const commonStyle = 'width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;';
     const renderedValue = formatSchemaFieldValue(field, value);
     const placeholder = field.placeholder || '';
-    if (field.type === 'textarea' || field.type === 'list' || field.type === 'relation_map') {
+    if (field.type === 'textarea' || field.type === 'list' || field.type === 'event_list' || field.type === 'relation_map') {
         return `
             <div style="margin-bottom: 20px;">
                 <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${label}</label>
@@ -639,7 +693,7 @@ function buildKnowledgeItemSummary(item, category) {
             if (opt) value = opt.label;
         }
         const text = localizeGeneratedSchemaLabels(
-            Array.isArray(value) ? value.join('、') : (typeof value === 'object' ? JSON.stringify(value) : String(value))
+            Array.isArray(value) ? value.map(formatListEntryValue).join('、') : (typeof value === 'object' ? JSON.stringify(value) : String(value))
         );
         if (text.trim()) lines.push(text.trim());
         if (lines.length >= 3) break;

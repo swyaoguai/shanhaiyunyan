@@ -25,6 +25,14 @@ class ConfirmCreationContractRequest(BaseModel):
     contract_payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ResumeCreationFlowRequest(BaseModel):
+    """续跑创作流程：在断点（如章纲设定后）等用户审阅，再让任务池继续执行。"""
+    session_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]{0,64}$")
+    max_tasks: int = 7
+    max_chapter_tasks: int = 2
+    approve_chapter_settings: bool = False
+
+
 class GenerateWorldRequest(BaseModel):
     novel_type: str = ""
     theme: str = ""

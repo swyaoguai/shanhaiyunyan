@@ -207,6 +207,20 @@ class TestTokenStatsStore:
         assert project_a_summary["call_count"] == 0
         assert project_b_summary["total_tokens"] == 150
 
+    def test_cleanup_project_records_not_in_keeps_current_and_legacy(self, store):
+        """测试清理已删除项目统计时保留现存项目和旧版全局记录"""
+        store.record("Agent1", "gpt-4", project_id="project-a", tokens_in=100, tokens_out=200, success=True, method="test", duration=1.0)
+        store.record("Agent2", "gpt-4", project_id="deleted-project", tokens_in=50, tokens_out=100, success=True, method="test", duration=0.5)
+        store.record("Agent3", "gpt-4", project_id="", tokens_in=10, tokens_out=20, success=True, method="legacy", duration=0.2)
+
+        deleted_count = store.cleanup_project_records_not_in(["project-a"])
+
+        assert deleted_count == 1
+        assert store.get_summary(days=7, project_id="project-a")["total_tokens"] == 300
+        assert store.get_summary(days=7, project_id="deleted-project")["call_count"] == 0
+        assert store.get_summary(days=7, project_id="")["total_tokens"] == 30
+        assert store.get_summary(days=7)["total_tokens"] == 330
+
     def test_legacy_schema_backfills_current_project(self, temp_db, monkeypatch):
         """测试旧数据库增加项目字段时回填当前项目"""
         conn = sqlite3.connect(temp_db)

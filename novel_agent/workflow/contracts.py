@@ -305,6 +305,7 @@ def build_default_creation_contract(
         metadata={
             "draft": not user_confirmed,
             "created_from": "legacy_orchestrated_flow",
+            "pause_after_chapter_settings": True,
         },
     )
     return contract
@@ -442,6 +443,10 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
                 **({"autonomous_brief": autonomous_brief} if autonomous_brief else {}),
                 **discussion_inputs,
             },
+            # 章纲设定生成完后必须停下来等用户审阅，
+            # 否则一旦章纲偏题，后续所有章节正文都会跟着错。
+            review_required=True,
+            metadata={"stop_on_review_required": True},
         ),
     ]
 

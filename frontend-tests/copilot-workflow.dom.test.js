@@ -33,6 +33,7 @@ beforeAll(() => {
   loadBrowserScript('novel_agent/web/static/app-utils.js');
   loadBrowserScript('novel_agent/web/static/app-core.js');
   loadBrowserScript('novel_agent/web/static/continuous_write.js');
+  loadBrowserScript('novel_agent/web/static/app-workflow-auto-save.js');
 });
 
 beforeEach(() => {
@@ -74,9 +75,70 @@ beforeEach(() => {
   window.multiAgentWriteState = window.multiAgentWriteState || { activeView: 'chapters', collabTraceFilters: { stage: 'all', type: 'all' } };
   window.multiAgentWriteState.activeView = 'chapters';
   window.multiAgentWriteState.collabTraceFilters = { stage: 'all', type: 'all' };
+  window.store.projectData = {
+    characters: [],
+    outline: [],
+    worldbuilding: [],
+    items: [],
+    eventlines: [],
+    outline_settings: [],
+    detail_settings: [],
+    chapter_settings: [],
+    custom_knowledge: []
+  };
 });
 
 describe('copilot workflow panel regressions', () => {
+  it('refreshes chapter settings project data when workflow file kind is chapter_settings', async () => {
+    window.refreshCurrentModule = vi.fn().mockResolvedValue(undefined);
+    window.apiCall.mockImplementation(async (url) => {
+      if (url === '/api/project-data/chapter_settings') {
+        return { data: [{ chapter_number: 1, name: '赐婚', description: '赐婚开始' }] };
+      }
+      return { data: [] };
+    });
+
+    await window.handleWorkflowAutoSave({
+      updated_files: [
+        {
+          path: 'C:/novel/project/chapter_settings.json',
+          label: '章纲设定',
+          kind: 'chapter_settings',
+          status: 'updated'
+        }
+      ]
+    });
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/project-data/chapter_settings', 'GET');
+    expect(window.store.projectData.chapter_settings).toHaveLength(1);
+    expect(window.showToast).not.toHaveBeenCalled();
+  });
+
+  it('falls back to filename-based refresh for old chapter_settings file records', async () => {
+    window.refreshCurrentModule = vi.fn().mockResolvedValue(undefined);
+    window.apiCall.mockImplementation(async (url) => {
+      if (url === '/api/project-data/chapter_settings') {
+        return { data: [{ chapter_number: 2, name: '新婚夜', description: '新婚夜分房' }] };
+      }
+      return { data: [] };
+    });
+
+    await window.handleWorkflowAutoSave({
+      updated_files: [
+        {
+          path: 'C:/novel/project/chapter_settings.json',
+          label: 'chapter_settings.json',
+          kind: 'file',
+          status: 'updated'
+        }
+      ]
+    });
+
+    expect(window.apiCall).toHaveBeenCalledWith('/api/project-data/chapter_settings', 'GET');
+    expect(window.store.projectData.chapter_settings[0].chapter_number).toBe(2);
+    expect(window.showToast).not.toHaveBeenCalled();
+  });
+
   it('loads and saves the user-facing creative mode selector', async () => {
     window.apiCall.mockResolvedValueOnce({ success: true, data: { mode: 'execute' } });
 
@@ -223,6 +285,10 @@ describe('copilot workflow panel regressions', () => {
         quality_rules: ['避免AI腔']
       },
       deliverables: ['worldbuilding.json'],
+      task_graph_preview: [
+        { title: '生成世界观', task_type: 'build_world', preview_status: 'reuse' },
+        { title: '章节写作', task_type: 'write_chapter', preview_status: 'pending' }
+      ],
       task_graph: [
         { title: '上下文规划', task_type: 'context_plan' }
       ]
@@ -243,7 +309,44 @@ describe('copilot workflow panel regressions', () => {
     expect(document.body.textContent).toContain('世界观设定');
     expect(document.body.textContent).not.toContain('计划产物worldbuilding.json');
     expect(document.body.textContent).toContain('任务池摘要');
+    expect(document.body.textContent).toContain('生成世界观（已完成，将复用）');
+    expect(document.body.textContent).toContain('章纲生成完后暂停由我审阅');
     expect(document.querySelector('.copilot-contract-confirm-btn')).not.toBeNull();
+  });
+
+  it('renders runtime task status on confirmed contract cards', () => {
+    window.store.currentTaskPool = {
+      metadata: { contract_id: 'contract-runtime-status' },
+      tasks: [
+        { title: '生成世界观', task_type: 'build_world', status: 'completed' },
+        {
+          title: '生成角色档案',
+          task_type: 'build_characters',
+          status: 'failed',
+          metadata: { error: '角色卡草稿质量不足，暂不保存：角色缺少 name' }
+        },
+        { title: '生成大纲', task_type: 'build_outline', status: 'pending' }
+      ]
+    };
+
+    const contractHtml = window.renderCreationContractCard({
+      contract_id: 'contract-runtime-status',
+      user_confirmed: true,
+      scope: { novel_type: '古代言情', theme: '古代甜宠' },
+      constraints: {},
+      deliverables: [],
+      task_graph_preview: [
+        { title: '生成世界观', task_type: 'build_world', preview_status: 'pending' }
+      ]
+    });
+    window.appendMessage(contractHtml, 'ai');
+
+    const cardText = document.querySelector('.copilot-contract-card')?.textContent || '';
+    expect(cardText).toContain('任务状态');
+    expect(cardText).toContain('生成世界观（已完成）');
+    expect(cardText).toContain('生成角色档案（执行失败：角色卡草稿质量不足，暂不保存：角色缺少 name）');
+    expect(cardText).toContain('生成大纲（等待中）');
+    expect(cardText).not.toContain('任务预览');
   });
 
   it('derives realtime workflow text from runtime status when the workflow snapshot is idle', () => {
@@ -738,5 +841,143 @@ describe('copilot workflow panel regressions', () => {
 
     window.stopNovelCollabRuntimePolling();
     vi.useRealTimers();
+  });
+
+  it('shows a review resume button and continues the formal creation task pool', async () => {
+    loadBrowserScript('novel_agent/web/static/continuous_write.js');
+    window.store.currentModule = 'write';
+    const initialTaskPool = {
+      tasks: [
+        {
+          task_id: 'task-settings',
+          title: '生成章纲设定',
+          task_type: 'chapter_settings',
+          status: 'completed',
+          candidate_agents: ['ChapterSettingBuilder'],
+          assigned_agent: 'ChapterSettingBuilder',
+          result_ref: 'chapter_settings.json',
+          inputs: {}
+        },
+        {
+          task_id: 'task-write-1',
+          title: '创作第1章',
+          task_type: 'write_chapter',
+          status: 'pending',
+          candidate_agents: ['ChapterWriter'],
+          assigned_agent: '',
+          result_ref: '',
+          inputs: { chapter_number: 1 }
+        }
+      ],
+      metadata: { contract_id: 'contract-review' }
+    };
+    const initialTrace = {
+      status: 'running',
+      events: [{ type: 'project_ready_execution_cycle', task_type: 'chapter_settings' }]
+    };
+    const initialExecution = {
+      stop_reason: 'review_required',
+      stopped_on_task_type: 'chapter_settings',
+      executed_task_count: 4,
+      chapter_tasks_executed: 0
+    };
+    const resumedTaskPool = {
+      tasks: [
+        initialTaskPool.tasks[0],
+        {
+          ...initialTaskPool.tasks[1],
+          status: 'completed',
+          assigned_agent: 'ChapterWriter',
+          result_ref: 'chapters/001.md'
+        }
+      ],
+      metadata: {
+        contract_id: 'contract-review',
+        project_ready_execution: {
+          stop_reason: '',
+          stopped_on_task_type: '',
+          executed_task_count: 1,
+          chapter_tasks_executed: 1
+        }
+      }
+    };
+
+    window.apiCall.mockResolvedValueOnce({
+      success: true,
+      task_pool: resumedTaskPool,
+      collab_execution_trace: { status: 'running', events: [{ type: 'task_completed', task_type: 'write_chapter' }] },
+      project_ready_execution: resumedTaskPool.metadata.project_ready_execution,
+      message: '已续跑 1 个任务，任务池暂无新的就绪任务。'
+    });
+
+    window.renderCollabTaskPoolWorkspace(initialTaskPool, initialTrace, initialExecution);
+
+    const button = document.getElementById('collab-resume-creation-flow-btn');
+    expect(button?.textContent).toContain('已检查章纲，继续创作正文');
+
+    button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(window.apiCall).toHaveBeenCalledWith(
+      '/api/v1/contract/resume',
+      'POST',
+      expect.objectContaining({
+        max_tasks: 7,
+        max_chapter_tasks: 2,
+        approve_chapter_settings: true
+      })
+    );
+    expect(window.store.currentTaskPool.tasks[1].status).toBe('completed');
+    expect(document.getElementById('main-view')?.textContent).toContain('创作第1章');
+    expect(document.getElementById('main-view')?.textContent).toContain('已完成');
+    expect(document.getElementById('copilot-messages')?.textContent).toContain('已续跑 1 个任务');
+  });
+
+  it('keeps the chapter-settings approval button after guarded resume blocks正文 writing', async () => {
+    loadBrowserScript('novel_agent/web/static/continuous_write.js');
+    window.store.currentModule = 'write';
+    const taskPool = {
+      tasks: [
+        {
+          task_id: 'task-settings',
+          title: '生成章纲设定',
+          task_type: 'chapter_settings',
+          status: 'completed',
+          assigned_agent: 'ChapterSettingBuilder',
+          result_ref: 'chapter_settings.json',
+          inputs: {}
+        },
+        {
+          task_id: 'task-write-1',
+          title: '创作第1章',
+          task_type: 'write_chapter',
+          status: 'blocked',
+          assigned_agent: '',
+          result_ref: '',
+          inputs: { chapter_number: 1 },
+          metadata: { blocked_reason: '章纲设定尚未确认，已阻止提前创建正文章节文件' }
+        }
+      ],
+      metadata: {
+        contract_id: 'contract-review',
+        project_ready_execution: {
+          stop_reason: 'chapter_settings_review_required',
+          stopped_on_task_type: 'write_chapter',
+          executed_task_count: 0,
+          chapter_tasks_executed: 0
+        }
+      }
+    };
+
+    window.renderCollabTaskPoolWorkspace(
+      taskPool,
+      { status: 'running', events: [] },
+      taskPool.metadata.project_ready_execution
+    );
+
+    expect(document.getElementById('main-view')?.textContent).toContain('章纲设定还没有确认');
+    const button = document.getElementById('collab-resume-creation-flow-btn');
+    expect(button?.textContent).toContain('已检查章纲，继续创作正文');
   });
 });

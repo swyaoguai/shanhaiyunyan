@@ -4,6 +4,8 @@ import pytest
 
 from novel_agent.agents import base_agent as base_agent_module
 from novel_agent.agents.chapter_writer import ChapterWriterAgent
+from novel_agent.wiki.wiki_compat import WikiCompatLayer
+from novel_agent.wiki.wiki_types import Frontmatter, PageType, WikiPage
 
 
 class _FakeAsyncOpenAI:
@@ -89,3 +91,35 @@ async def test_chapter_prompt_includes_semantic_recall_block(monkeypatch):
     assert '<context_block source="semantic_recall">' in captured["prompt"]
     assert "上一章秦川得到青铜钥匙" in captured["prompt"]
     assert "当前章节草稿不应注入" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_wiki_context_retrieves_previous_chapter_summaries(monkeypatch, tmp_path):
+    monkeypatch.setattr(base_agent_module, "AsyncOpenAI", _FakeAsyncOpenAI)
+    compat = WikiCompatLayer(tmp_path)
+    compat.store.ensure_dirs()
+    compat.store.save_page(WikiPage(
+        frontmatter=Frontmatter(
+            page_type=PageType.CHAPTER,
+            title="第1章摘要",
+            tags=["chapter_summary"],
+            chapter_number=1,
+        ),
+        body="# 第1章摘要\n秦川得到青铜钥匙，并得知内城戒严。",
+    ))
+    compat.store.save_page(WikiPage(
+        frontmatter=Frontmatter(
+            page_type=PageType.CHAPTER,
+            title="第2章摘要",
+            tags=["chapter_summary"],
+            chapter_number=2,
+        ),
+        body="# 第2章摘要\n当前章节摘要不应注入。",
+    ))
+
+    agent = ChapterWriterAgent()
+    context = await agent._get_wiki_context("秦川 青铜钥匙 内城", chapter_number=2, project_dir=tmp_path)
+    block = agent._format_wiki_context(context)
+
+    assert "秦川得到青铜钥匙" in block
+    assert "当前章节摘要不应注入" not in block

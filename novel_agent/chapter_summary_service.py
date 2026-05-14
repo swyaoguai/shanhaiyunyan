@@ -96,7 +96,8 @@ def save_chapter_summary_to_library(
         from .library_service import get_library_service
         from .library_types import EntryType, LibraryEntry, SourceType, _now_iso
 
-        svc = get_library_service(project_dir)
+        resolved_project_dir = _resolve_project_dir(project_dir)
+        svc = get_library_service(resolved_project_dir)
         if svc.is_degraded:
             return False
 
@@ -134,7 +135,13 @@ def save_chapter_summary_to_library(
         normalized_summary.setdefault("title", str(title))
         normalized_summary.setdefault("vector_text", saved.summary or summary_text)
         normalized_summary.setdefault("links", links)
-        _write_chapter_summary_markdown(project_dir, saved, normalized_summary)
+        _write_chapter_summary_markdown(resolved_project_dir, saved, normalized_summary)
+        _write_chapter_summary_wiki(
+            resolved_project_dir,
+            saved,
+            normalized_summary,
+            store=getattr(svc, "_store", None),
+        )
         return True
     except Exception as e:
         logger.warning(f"save_chapter_summary_to_library failed: {e}")
@@ -323,6 +330,17 @@ def _normalize_links(val: Any) -> List[str]:
     return list(dict.fromkeys(links))
 
 
+def _resolve_project_dir(project_dir: Optional[Path]) -> Optional[Path]:
+    if project_dir:
+        return Path(project_dir)
+    try:
+        from .project_manager import get_project_manager
+        pm = get_project_manager()
+        return pm.get_project_data_path("outline").parent
+    except Exception:
+        return None
+
+
 def _markdown_for_summary(entry: Any, summary_dict: Dict[str, Any]) -> str:
     title = str(getattr(entry, "title", "") or summary_dict.get("title") or "").strip()
     chapter_number = summary_dict.get("chapter_number") or summary_dict.get("chapter") or ""
@@ -359,3 +377,42 @@ def _write_chapter_summary_markdown(project_dir: Optional[Path], entry: Any, sum
         file_path.write_text(content, encoding="utf-8")
     except Exception as exc:
         logger.warning(f"write markdown summary failed: {exc}")
+
+
+def _write_chapter_summary_wiki(
+    project_dir: Optional[Path],
+    entry: Any,
+    summary_dict: Dict[str, Any],
+    *,
+    store: Any = None,
+) -> None:
+    """把章节摘要写成 Wiki 章节页，供后续章节写作检索。"""
+    if not project_dir:
+        return
+    try:
+        from .wiki.wiki_types import Frontmatter, PageType, WikiPage
+
+        title = str(getattr(entry, "title", "") or summary_dict.get("title") or "").strip()
+        chapter_number = int(summary_dict.get("chapter_number") or 0)
+        body = _markdown_for_summary(entry, summary_dict)
+        characters = _as_list(summary_dict.get("appearing_characters"))
+        key_events = _as_list(summary_dict.get("key_events"))
+        summary_text = str(summary_dict.get("summary_text") or "").strip()
+        links = _normalize_links(summary_dict.get("links") or [])
+        frontmatter = Frontmatter(
+            page_type=PageType.CHAPTER,
+            title=title or f"第{chapter_number}章摘要",
+            sources=[f"chapter_{chapter_number}"] if chapter_number else [],
+            tags=["auto_summary", "chapter_summary"],
+            chapter_number=chapter_number or None,
+            entities=list(dict.fromkeys(characters + [link.strip("[]") for link in links])),
+            word_count=len(summary_text) + sum(len(item) for item in key_events),
+        )
+        if store is None:
+            from .wiki.wiki_compat import WikiCompatLayer
+            compat = WikiCompatLayer(Path(project_dir))
+            store = compat.store
+        store.ensure_dirs()
+        store.save_page(WikiPage(frontmatter=frontmatter, body=body))
+    except Exception as exc:
+        logger.warning(f"write wiki summary failed: {exc}")

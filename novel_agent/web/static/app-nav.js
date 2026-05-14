@@ -960,7 +960,29 @@ function renderFeedbackPage() {
                     <li>在B站视频下方留言评论</li>
                     <li>通过B站私信联系我</li>
                     <li>联系QQ：973389590</li>
+                    <li>联系邮箱：<a href="mailto:swjiarui@126.com" style="color: var(--accent-color); text-decoration: none;">swjiarui@126.com</a></li>
                 </ul>
+            </div>
+
+            <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 16px; padding: 24px; margin-bottom: 24px;">
+                <h3 style="color: var(--text-primary); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-file-list-3-line" style="color: #60a5fa;"></i>
+                    问题日志
+                </h3>
+                <p style="color: var(--text-secondary); font-size: 14px; line-height: 1.8; margin-bottom: 16px;">
+                    遇到异常时，可以把后台运行日志复制或导出为 TXT，一起发到邮箱，方便定位问题。
+                </p>
+                <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                    <button id="copy-support-logs" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; background: rgba(59, 130, 246, 0.18); border: 1px solid rgba(59, 130, 246, 0.45); color: var(--text-primary); border-radius: 8px; cursor: pointer;">
+                        <i class="ri-file-copy-line"></i>
+                        一键复制日志
+                    </button>
+                    <button id="export-support-logs" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">
+                        <i class="ri-download-line"></i>
+                        导出 TXT
+                    </button>
+                </div>
+                <div id="support-log-status" style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);"></div>
             </div>
             
             <div style="background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 16px; padding: 24px;">
@@ -980,6 +1002,49 @@ function renderFeedbackPage() {
             </div>
         </div>
     `;
+
+    bindFeedbackLogActions();
+}
+
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+}
+
+function bindFeedbackLogActions() {
+    const copyButton = document.getElementById('copy-support-logs');
+    const exportButton = document.getElementById('export-support-logs');
+    const status = document.getElementById('support-log-status');
+
+    copyButton?.addEventListener('click', async () => {
+        try {
+            if (status) status.textContent = '正在读取后台日志...';
+            const response = await fetch(normalizeApiUrl('/api/diagnostics/logs'), { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const text = await response.text();
+            await copyTextToClipboard(text);
+            if (status) status.textContent = `已复制 ${text.length.toLocaleString()} 个字符的日志内容`;
+            showToast('后台日志已复制', 'success');
+        } catch (error) {
+            if (status) status.textContent = `读取失败：${error.message}`;
+            showToast(`日志复制失败：${error.message}`, 'error');
+        }
+    });
+
+    exportButton?.addEventListener('click', () => {
+        window.location.href = normalizeApiUrl('/api/diagnostics/logs/export');
+    });
 }
 
 function renderVersionPage() {

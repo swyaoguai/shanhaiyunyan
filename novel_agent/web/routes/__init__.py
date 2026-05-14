@@ -28,6 +28,7 @@ from .novel_to_script import router as novel_to_script_router
 from .skills import router as skills_router
 from .wiki import router as wiki_router
 from .runtime import router as runtime_router
+from .diagnostics import router as diagnostics_router
 from ..api.backup import router as backup_router
 from ..api.resources import router as resources_router
 from ..api.auto_backup import router as auto_backup_router
@@ -70,6 +71,7 @@ def register_routes(app: FastAPI, use_versioned_api: bool = True) -> None:
         (skills_router, "Skills管理"),
         (wiki_router, "Wiki知识系统"),
         (runtime_router, "运行时"),
+        (diagnostics_router, "诊断日志"),
         (backup_router, "备份管理"),
         (resources_router, "资料库管理"),
         (auto_backup_router, "自动备份"),

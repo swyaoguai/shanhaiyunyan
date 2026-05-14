@@ -28,6 +28,8 @@ class Character:
     appearance: str = ""
     personality: List[str] = field(default_factory=list)
     abilities: List[str] = field(default_factory=list)
+    inventory: List[str] = field(default_factory=list)
+    development_history: List[Dict[str, Any]] = field(default_factory=list)
     background: str = ""
     motivation: str = ""
     goals: List[str] = field(default_factory=list)
@@ -88,6 +90,7 @@ class CharacterManager:
             return {}
 
         updates: Dict[str, List[str]] = {}
+        changed = False
         sentences = [item.strip() for item in re.split(r"(?<=[。！？!?])", text) if item.strip()]
         names = sorted(self.characters.keys(), key=len, reverse=True)
         trigger_pattern = re.compile(r"(学会了?|习得了?|掌握了?|领悟了?|练成了?|觉醒了?|获得了?|参透了?|突破了?)")
@@ -108,12 +111,67 @@ class CharacterManager:
                 if ability not in character.abilities:
                     character.abilities.append(ability)
                     updates.setdefault(name, []).append(ability)
+                    changed = True
                 note = f"第{chapter_number}章获得/掌握：{ability}" if chapter_number else f"获得/掌握：{ability}"
                 if note not in character.notes:
                     character.notes = (character.notes + "\n" + note).strip() if character.notes else note
+                    changed = True
+                if self._append_development_event(
+                    character,
+                    {
+                        "chapter_number": chapter_number,
+                        "event_type": "ability",
+                        "title": ability,
+                        "description": note,
+                    },
+                ):
+                    changed = True
 
-        if updates:
+        item_updates = self._sync_inventory_from_text(text, chapter_number=chapter_number)
+        if item_updates:
+            changed = True
+
+        if changed:
             self._save_characters()
+        return updates
+
+    def _sync_inventory_from_text(self, content: str, chapter_number: int = 0) -> Dict[str, List[str]]:
+        """从正文中同步明确写出的角色持有物/道具事件。"""
+        if not content or not self.characters:
+            return {}
+
+        updates: Dict[str, List[str]] = {}
+        sentences = [item.strip() for item in re.split(r"(?<=[。！？!?])", content) if item.strip()]
+        names = sorted(self.characters.keys(), key=len, reverse=True)
+        trigger_pattern = re.compile(r"(?:获得了?|得到了?|拿到了?|拾得|夺得|持有|佩戴|装备|带着|握住)")
+
+        for sentence in sentences:
+            if not trigger_pattern.search(sentence):
+                continue
+            matched_names = [name for name in names if name and name in sentence]
+            if not matched_names:
+                continue
+            item_name = self._extract_item_name_from_sentence(sentence)
+            if not item_name:
+                continue
+            for name in matched_names:
+                character = self.characters.get(name)
+                if not character:
+                    continue
+                if item_name not in character.inventory:
+                    character.inventory.append(item_name)
+                    updates.setdefault(name, []).append(item_name)
+                note = f"第{chapter_number}章获得/持有：{item_name}" if chapter_number else f"获得/持有：{item_name}"
+                if self._append_development_event(
+                    character,
+                    {
+                        "chapter_number": chapter_number,
+                        "event_type": "item",
+                        "title": item_name,
+                        "description": note,
+                    },
+                ):
+                    updates.setdefault(name, [])
         return updates
 
     @staticmethod
@@ -133,6 +191,47 @@ class CharacterManager:
             return match.group(1).strip("，,。；;、 的了")
         fallback = re.split(r"[，,。；;、\s]", tail, maxsplit=1)[0].strip("的了")
         return fallback[:16] if len(fallback) >= 2 else ""
+
+    @staticmethod
+    def _extract_item_name_from_sentence(sentence: str) -> str:
+        text = str(sentence or "")
+        trigger = re.search(r"(?:获得了?|得到了?|拿到了?|拾得|夺得|持有|佩戴|装备|带着|握住)", text)
+        if not trigger:
+            return ""
+        tail = text[trigger.end():]
+        tail = re.sub(r"^[的了一件一枚一把一柄一个一只新的\s，,：:]+", "", tail)
+        suffix_pattern = (
+            r"([\u4e00-\u9fa5A-Za-z0-9·]{2,18}?"
+            r"(?:剑|刀|枪|弓|令|令牌|玉佩|玉簪|簪|戒|戒指|珠|丹|符|符箓|印|书|卷|卷轴|甲|衣|袍|冠|钥匙|匣|盒|镜|灯|铃|鼎|炉|药|器|法宝|装备|道具))"
+        )
+        match = re.search(suffix_pattern, tail)
+        if match:
+            return match.group(1).strip("，,。；;、 的了")
+        return ""
+
+    @staticmethod
+    def _append_development_event(character: Character, event: Dict[str, Any]) -> bool:
+        title = str(event.get("title") or "").strip()
+        event_type = str(event.get("event_type") or "").strip()
+        chapter_number = CharacterManager._safe_int(event.get("chapter_number"), 0)
+        if not title:
+            return False
+        for existing in character.development_history:
+            if not isinstance(existing, dict):
+                continue
+            if (
+                str(existing.get("title") or "").strip() == title
+                and str(existing.get("event_type") or "").strip() == event_type
+                and CharacterManager._safe_int(existing.get("chapter_number"), 0) == chapter_number
+            ):
+                return False
+        character.development_history.append({
+            "chapter_number": chapter_number,
+            "event_type": event_type or "note",
+            "title": title,
+            "description": str(event.get("description") or title).strip(),
+        })
+        return True
     
     def get_all_characters(self) -> List[Character]:
         """获取所有角色"""
@@ -169,14 +268,31 @@ class CharacterManager:
                 if char.relationships else
                 "未设定"
             )
+            abilities = "、".join(char.abilities[:6]) if char.abilities else "未设定"
+            inventory = "、".join(char.inventory[:6]) if char.inventory else "未设定"
+            latest_growth = "未记录"
+            if char.development_history:
+                latest_items = []
+                for event in char.development_history[-3:]:
+                    if not isinstance(event, dict):
+                        continue
+                    chapter = self._safe_int(event.get("chapter_number"), 0)
+                    title = str(event.get("title") or "").strip()
+                    if title:
+                        latest_items.append(f"第{chapter}章 {title}" if chapter else title)
+                if latest_items:
+                    latest_growth = "、".join(latest_items)
             status_tag = f"\n- 状态：{char.status}" if char.status != "active" else ""
             info = f"""【{char.name}】
 - 定位：{char.role}
 - 身份：{char.identity or char.occupation or "未设定"}
 - 简介：{char.description}
 - 性格：{personality}
+- 技能/能力：{abilities}
+- 持有物：{inventory}
 - 目标：{goals}
 - 关系：{relationships}
+- 近期成长：{latest_growth}
 - 成长线：{char.arc}{status_tag}"""
             result.append(info)
         
@@ -277,6 +393,43 @@ class CharacterManager:
             return result
         return {}
 
+    @staticmethod
+    def _normalize_development_history(value: Any) -> List[Dict[str, Any]]:
+        """统一角色成长记录格式。"""
+        result: List[Dict[str, Any]] = []
+
+        def add_event(raw: Any) -> None:
+            if isinstance(raw, dict):
+                title = str(raw.get("title") or raw.get("name") or raw.get("event") or "").strip()
+                description = str(raw.get("description") or raw.get("detail") or raw.get("notes") or title).strip()
+                if not title and description:
+                    title = description[:40]
+                if not title:
+                    return
+                result.append({
+                    "chapter_number": CharacterManager._safe_int(raw.get("chapter_number") or raw.get("chapter"), 0),
+                    "event_type": str(raw.get("event_type") or raw.get("type") or "note").strip() or "note",
+                    "title": title,
+                    "description": description,
+                })
+                return
+            text = str(raw or "").strip()
+            if text:
+                result.append({
+                    "chapter_number": 0,
+                    "event_type": "note",
+                    "title": text[:40],
+                    "description": text,
+                })
+
+        if isinstance(value, list):
+            for item in value:
+                add_event(item)
+        elif isinstance(value, str):
+            for line in value.splitlines():
+                add_event(line)
+        return result
+
     def _coerce_character_data(self, raw: Any, fallback_name: str = "") -> Optional[Dict[str, Any]]:
         """兼容旧版列表结构并标准化角色数据。"""
         if not isinstance(raw, dict):
@@ -299,7 +452,19 @@ class CharacterManager:
             "occupation": str(raw.get("occupation") or raw.get("profession") or raw.get("job") or "").strip(),
             "appearance": str(raw.get("appearance") or raw.get("look") or "").strip(),
             "personality": self._split_text_list(raw.get("personality") or raw.get("traits")),
-            "abilities": self._split_text_list(raw.get("abilities")),
+            "abilities": self._split_text_list(raw.get("abilities") or raw.get("skills") or raw.get("skillset")),
+            "inventory": self._split_text_list(
+                raw.get("inventory")
+                or raw.get("item_refs")
+                or raw.get("items")
+                or raw.get("possessions")
+            ),
+            "development_history": self._normalize_development_history(
+                raw.get("development_history")
+                or raw.get("growth_history")
+                or raw.get("growth_stages")
+                or raw.get("development")
+            ),
             "background": str(raw.get("background") or "").strip(),
             "motivation": str(raw.get("motivation") or raw.get("drive") or "").strip(),
             "goals": self._split_text_list(raw.get("goals") or raw.get("goal")),

@@ -143,9 +143,28 @@ class RoutingPolicy:
             if str(item.get("agent_name") or "").strip()
         ]
 
-        # 优先使用能力注册表给出的候选，规则表只用于在候选中挑选首选项。
-        # 如果没有候选，不把 preferred_agent_name 当作“隐式可执行者”，避免绕过注册表。
         preferred = str(rule.preferred_agent_name or "").strip()
+        fixed_agent_name = str(fallback_agent_name or "").strip()
+
+        if rule.allow_fixed_agent and fixed_agent_name and fixed_agent_name == preferred:
+            names = list(candidate_names or [])
+            if fixed_agent_name not in names:
+                names.insert(0, fixed_agent_name)
+            return RouteDecision(
+                agent_name=fixed_agent_name,
+                route_reason=(
+                    f"matched explicit route {task_type}"
+                    + (f"@{stage}" if stage else "")
+                    + f" via fixed preferred agent {fixed_agent_name}"
+                ),
+                candidate_source="fixed_route_rule",
+                candidate_names=names,
+                required_context_keys=list(rule.required_context_keys or []),
+                fallback_agent_names=[fixed_agent_name],
+            )
+
+        # 优先使用能力注册表给出的候选，规则表只用于在候选中挑选首选项。
+        # 如果没有候选，再尝试 fixed fallback，避免普通动态任务绕过注册表。
         if candidate_names:
             selected_agent_name = preferred if preferred in candidate_names else candidate_names[0]
             return RouteDecision(
@@ -162,7 +181,6 @@ class RoutingPolicy:
             )
 
         # 最后尝试 fallback_agent_name
-        fixed_agent_name = str(fallback_agent_name or "").strip()
         if rule.allow_fixed_agent and fixed_agent_name:
             return RouteDecision(
                 agent_name=fixed_agent_name,

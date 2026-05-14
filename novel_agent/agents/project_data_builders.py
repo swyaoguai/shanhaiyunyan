@@ -25,6 +25,7 @@ class _ProjectDataBuilderAgent(BaseAgent):
     extra_rules = ""
     llm_max_tokens = 3600
     generation_attempts = 2
+    minimum_response_chars = 0
 
     def __init__(self, name: str):
         super().__init__(name=name, prompt_file=None)
@@ -69,12 +70,15 @@ class _ProjectDataBuilderAgent(BaseAgent):
 
     def _build_prompt(self, input_data: Dict[str, Any]) -> str:
         outline_rows = input_data.get("outline_rows")
+        outline_overview_rows = input_data.get("outline_overview_rows")
         eventlines = input_data.get("eventlines")
         return (
             f"## 当前任务\n生成{self.output_label}\n\n"
             f"## 用户请求\n{str(input_data.get('user_request') or '').strip() or '无'}\n\n"
             f"## 最近讨论摘要\n{str(input_data.get('recent_discussion') or '').strip() or '无'}\n\n"
             f"## 世界观摘要\n{str(input_data.get('world_summary') or '').strip() or '无'}\n\n"
+            f"## 角色资料\n{json.dumps(input_data.get('characters'), ensure_ascii=False, indent=2) if isinstance(input_data.get('characters'), list) else str(input_data.get('characters') or '无')}\n\n"
+            f"## 全书/分卷概览（只作一致性约束，不要当成逐章清单复制）\n{json.dumps(outline_overview_rows, ensure_ascii=False, indent=2) if isinstance(outline_overview_rows, list) else '[]'}\n\n"
             f"## 大纲资料\n{json.dumps(outline_rows, ensure_ascii=False, indent=2) if isinstance(outline_rows, list) else '[]'}\n\n"
             f"## 事件线资料\n{json.dumps(eventlines, ensure_ascii=False, indent=2) if isinstance(eventlines, list) else '[]'}\n\n"
             f"请输出 JSON，对象格式为：{{\"{self.output_key}\": [...]}}"
@@ -170,6 +174,9 @@ class _ProjectDataBuilderAgent(BaseAgent):
         response_text = str(response or "")
         if not response_text.strip():
             return None, response_text, ["LLM 返回空内容"]
+        min_chars = max(0, int(getattr(self, "minimum_response_chars", 0) or 0))
+        if min_chars and len(response_text.strip()) < min_chars:
+            return None, response_text, [f"LLM 返回内容过短（{len(response_text.strip())} 字符，至少需要 {min_chars} 字符）"]
 
         json_text = self._extract_json_text(response_text)
         validation = StructuredOutputValidator.validate_json_output(json_text, required_fields=[self.output_key])
@@ -319,6 +326,8 @@ class DetailOutlineBuilderAgent(_ProjectDataBuilderAgent):
 class ChapterSettingBuilderAgent(_ProjectDataBuilderAgent):
     output_label = "章纲设定"
     output_key = "chapter_settings"
+    minimum_response_chars = 100
+    batch_size = 5
     extra_rules = (
         "每条章纲至少包含：name、description、chapter_number、chapter_goal、key_event、ending_hook。\n"
         "章纲应体现可执行写作目标、关键事件和章末钩子。\n"
@@ -331,11 +340,154 @@ class ChapterSettingBuilderAgent(_ProjectDataBuilderAgent):
         super().__init__(name="ChapterSettingBuilder")
 
     async def execute(self, input_data: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        result = await super().execute(input_data, context=context)
+        result = await self._execute_in_batches(input_data, context=context) or await super().execute(input_data, context=context)
         rows = result.get("rows")
         if result.get("success") and isinstance(rows, list):
-            result["rows"] = self._enrich_rows_with_eventlines(rows, input_data)
+            consistent_rows, consistency_issues = self._replace_inconsistent_character_rows(rows, input_data)
+            completed_rows = self._ensure_chapter_coverage(consistent_rows, input_data)
+            if consistency_issues:
+                result["character_consistency_fallback_used"] = True
+                result["fallback_used"] = True
+                result["validation_issues"] = [
+                    *(result.get("validation_issues") or []),
+                    *consistency_issues,
+                ]
+                result["response_message"] = (
+                    result.get("response_message")
+                    or "章纲生成器输出疑似替换已确认角色，已根据大纲种子生成一致性兜底章纲。"
+                )
+            if len(completed_rows) > len(rows):
+                result["coverage_fallback_used"] = True
+                result["response_message"] = (
+                    result.get("response_message")
+                    or "章纲生成器只返回了部分章节，已根据大纲补齐缺失章纲。"
+                )
+            outline_issues = self._check_chapter_outline_consistency(completed_rows, input_data)
+            if outline_issues:
+                result["validation_issues"] = [
+                    *(result.get("validation_issues") or []),
+                    *outline_issues,
+                ]
+                logger.warning(
+                    "[%s] 章纲一致性检查发现问题：%s",
+                    self.name, "; ".join(outline_issues),
+                )
+            result["rows"] = self._enrich_rows_with_eventlines(completed_rows, input_data)
         return result
+
+    @staticmethod
+    def _is_outline_overview_row(row: Dict[str, Any]) -> bool:
+        title = str(row.get("title") or row.get("name") or "").strip()
+        return (
+            title == "主线大纲"
+            or bool(row.get("global_outline"))
+            or bool(row.get("volume_plan"))
+            or bool(row.get("volumes"))
+        )
+
+    def _rows_for_chapter_batch(
+        self,
+        input_data: Dict[str, Any],
+        chapter_numbers: List[int],
+    ) -> List[Dict[str, Any]]:
+        return [
+            self._outline_source_for_chapter(input_data, chapter_number)
+            for chapter_number in chapter_numbers
+        ]
+
+    async def _execute_in_batches(
+        self,
+        input_data: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        expected_numbers = self._expected_chapter_numbers([], input_data)
+        batch_size = max(1, int(getattr(self, "batch_size", 5) or 5))
+        if len(expected_numbers) <= batch_size:
+            return None
+
+        all_rows: List[Dict[str, Any]] = []
+        validation_issues: List[str] = []
+        raw_responses: List[str] = []
+        fallback_used = False
+        coverage_fallback_used = False
+        base_request = str(input_data.get("user_request") or "生成章纲").strip()
+
+        for start in range(0, len(expected_numbers), batch_size):
+            batch_numbers = expected_numbers[start:start + batch_size]
+            if not batch_numbers:
+                continue
+            batch_input = dict(input_data)
+            batch_input["outline_rows"] = self._rows_for_chapter_batch(input_data, batch_numbers)
+            batch_input["user_request"] = (
+                f"{base_request}\n"
+                f"本批只生成第{batch_numbers[0]}章到第{batch_numbers[-1]}章，"
+                "不要输出本批范围之外的章节。"
+                "必须严格围绕本批“大纲资料”中每条 chapter_number/title/summary 扩写；"
+                "不得重启剧情、不得新增另一套第1章开局、不得改名替换世界观或角色。"
+            )
+            batch_result = await _ProjectDataBuilderAgent.execute(self, batch_input, context=context)
+            rows = batch_result.get("rows") if isinstance(batch_result, dict) else []
+            if not batch_result.get("success") or not isinstance(rows, list) or not rows:
+                return None
+
+            batch_number_set = set(batch_numbers)
+            filtered_rows = [
+                row for index, row in enumerate(rows, start=1)
+                if isinstance(row, dict)
+                and (
+                    self._coerce_chapter_number(
+                        row.get("chapter_number"),
+                        batch_numbers[min(index - 1, len(batch_numbers) - 1)],
+                    )
+                    in batch_number_set
+                )
+            ]
+            if filtered_rows:
+                filtered_rows, consistency_issues = self._replace_inconsistent_character_rows(filtered_rows, batch_input)
+                if consistency_issues:
+                    fallback_used = True
+                    validation_issues.extend(consistency_issues)
+            if filtered_rows:
+                all_rows.extend(filtered_rows)
+            else:
+                fallback_used = True
+                issue = (
+                    f"LLM 返回的章节号不在本批范围第{batch_numbers[0]}-"
+                    f"{batch_numbers[-1]}章内，已丢弃越界行并用本批大纲兜底。"
+                )
+                validation_issues.append(issue)
+                logger.warning("[%s] %s", self.name, issue)
+                all_rows.extend(self._build_fallback_rows(batch_input))
+            fallback_used = fallback_used or bool(batch_result.get("fallback_used"))
+            validation_issues.extend(str(item) for item in batch_result.get("validation_issues") or [] if str(item).strip())
+            raw_response = str(batch_result.get("raw_response") or "").strip()
+            if raw_response:
+                raw_responses.append(raw_response)
+
+        normalized_rows = self._normalize_rows(all_rows)
+        if not normalized_rows:
+            return None
+        normalized_rows, consistency_issues = self._replace_inconsistent_character_rows(normalized_rows, input_data)
+        if consistency_issues:
+            fallback_used = True
+            validation_issues.extend(consistency_issues)
+        completed_rows = self._ensure_chapter_coverage(normalized_rows, input_data)
+        coverage_fallback_used = len(completed_rows) > len(normalized_rows)
+        response_message = ""
+        if fallback_used or coverage_fallback_used:
+            response_message = "章纲生成采用分批执行，部分章节由本地兜底补齐，请审阅后再继续正文。"
+
+        return {
+            "success": True,
+            "agent": self.name,
+            "rows": self._enrich_rows_with_eventlines(completed_rows, input_data),
+            "fallback_used": fallback_used,
+            "coverage_fallback_used": coverage_fallback_used,
+            "response_message": response_message,
+            "validation_issues": validation_issues,
+            "raw_response": "\n\n".join(raw_responses),
+            "batch_count": (len(expected_numbers) + batch_size - 1) // batch_size,
+        }
 
     def _build_fallback_row(self, row: Dict[str, Any], chapter_number: int) -> Dict[str, Any]:
         base = super()._build_fallback_row(row, chapter_number)
@@ -359,7 +511,13 @@ class ChapterSettingBuilderAgent(_ProjectDataBuilderAgent):
             total_chapters = max(0, int(input_data.get("total_chapters") or 0))
         except (TypeError, ValueError):
             total_chapters = 0
-        if total_chapters > len(outline_rows) and len(outline_rows) <= 1:
+        if (
+            total_chapters > len(outline_rows)
+            and len(outline_rows) <= 1
+            and self._is_outline_overview_row(
+                outline_rows[0] if outline_rows and isinstance(outline_rows[0], dict) else {}
+            )
+        ):
             source_row = outline_rows[0] if outline_rows and isinstance(outline_rows[0], dict) else {}
             overview = self._stringify_outline_field(
                 source_row,
@@ -398,6 +556,329 @@ class ChapterSettingBuilderAgent(_ProjectDataBuilderAgent):
             )
             fallback_rows.append(self._build_fallback_row(item, chapter_number))
         return self._enrich_rows_with_eventlines(self._normalize_rows(fallback_rows), input_data)
+
+    @staticmethod
+    def _canonical_character_names(input_data: Dict[str, Any]) -> List[str]:
+        names: List[str] = []
+
+        def add_name(value: Any) -> None:
+            name = str(value or "").strip()
+            if not name or name in names:
+                return
+            if name in {"主角", "男主", "女主", "角色", "人物", "配角", "反派"}:
+                return
+            names.append(name)
+
+        for key in ("locked_character_names", "canonical_character_names"):
+            value = input_data.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    add_name(item)
+            elif isinstance(value, str):
+                for item in re.split(r"[,，、/\s]+", value):
+                    add_name(item)
+
+        characters = input_data.get("characters")
+        if isinstance(characters, dict) and isinstance(characters.get("characters"), list):
+            characters = characters.get("characters")
+        if isinstance(characters, dict):
+            for key, value in characters.items():
+                if isinstance(value, dict):
+                    add_name(value.get("name") or key)
+                else:
+                    add_name(key)
+        elif isinstance(characters, list):
+            for item in characters:
+                if isinstance(item, dict):
+                    add_name(item.get("name"))
+
+        return names
+
+    @staticmethod
+    def _chapter_setting_text(row: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in ("name", "title", "description", "chapter_goal", "key_event", "ending_hook"):
+            value = row.get(key)
+            if isinstance(value, (dict, list)):
+                parts.append(json.dumps(value, ensure_ascii=False))
+            elif value not in (None, ""):
+                parts.append(str(value))
+        return "\n".join(parts)
+
+    @staticmethod
+    def _extract_referenced_person_names(text: str) -> List[str]:
+        try:
+            from .character_builder import CharacterBuilderAgent
+            looks_like_name = CharacterBuilderAgent._looks_like_chinese_person_name
+        except Exception:
+            looks_like_name = lambda value: bool(re.fullmatch(r"[\u4e00-\u9fff]{2,4}", str(value or "").strip()))
+
+        names: List[str] = []
+
+        def add_name(value: Any) -> None:
+            name = str(value or "").strip()
+            if name and name not in names and looks_like_name(name):
+                names.append(name)
+
+        patterns = (
+            r"(?:女主|男主|主角|庶女|夫人|妻子|丈夫|将军|姑娘|世子|王爷)([\u4e00-\u9fff]{2,4})",
+            r"([\u4e00-\u9fff]{2,4})(?:与|和|同)([\u4e00-\u9fff]{2,4})(?=在|因|从|于|一同|共同|新婚|回门|暗生|并肩|相守|，|。|、|$)",
+            r"([\u4e00-\u9fff]{2,4})(?=被迫|替嫁|嫁入|嫁给|回门|新婚|入府|发现|暗生|携手|并肩)",
+            r"(?:嫁给|嫁入|娶|护住|守护|试探)(?:冷面将军|镇北将军|世子|王爷|将军)?([\u4e00-\u9fff]{2,4})",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                for group in match.groups():
+                    add_name(group)
+        return names
+
+    def _row_replaces_locked_characters(
+        self,
+        row: Dict[str, Any],
+        locked_names: List[str],
+    ) -> tuple[bool, List[str]]:
+        text = self._chapter_setting_text(row)
+        if not text or not locked_names:
+            return False, []
+        if any(name and name in text for name in locked_names):
+            return False, []
+
+        referenced_names = [
+            name for name in self._extract_referenced_person_names(text)
+            if name not in locked_names
+        ]
+        if len(referenced_names) >= 2:
+            return True, referenced_names
+        if referenced_names and re.search(r"(女主|男主|主角|妻子|丈夫|夫妇|夫妻|新婚|婚约)", text):
+            return True, referenced_names
+        return False, referenced_names
+
+    def _replace_inconsistent_character_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        input_data: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
+        locked_names = self._canonical_character_names(input_data)
+        if len(locked_names) < 2:
+            return rows, []
+
+        corrected: List[Dict[str, Any]] = []
+        issues: List[str] = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            chapter_number = self._coerce_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            should_replace, referenced_names = self._row_replaces_locked_characters(row, locked_names)
+            if should_replace:
+                corrected.append(
+                    self._build_fallback_row(
+                        self._outline_source_for_chapter(input_data, chapter_number),
+                        chapter_number,
+                    )
+                )
+                issues.append(
+                    f"第{chapter_number}章疑似替换已确认角色："
+                    f"{'、'.join(referenced_names)}；已按大纲种子兜底。"
+                )
+                continue
+            corrected.append(row)
+        return corrected, issues
+
+    def _check_chapter_outline_consistency(
+        self,
+        rows: List[Dict[str, Any]],
+        input_data: Dict[str, Any],
+    ) -> List[str]:
+        issues: List[str] = []
+        if not rows:
+            return issues
+
+        titles: List[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("name") or row.get("title") or "").strip()
+            if title and title in titles:
+                issues.append(f"章纲存在重复标题「{title}」")
+            elif title:
+                titles.append(title)
+
+        locked_names = self._canonical_character_names(input_data)
+        if locked_names:
+            combined_text = "\n".join(self._chapter_setting_text(r) for r in rows if isinstance(r, dict))
+            if not any(name in combined_text for name in locked_names):
+                issues.append(
+                    f"所有章纲均未提及任何已确认角色（{', '.join(locked_names[:5])}）"
+                )
+
+        outline_rows = input_data.get("outline_rows")
+        if isinstance(outline_rows, list):
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict) or index >= len(outline_rows):
+                    continue
+                outline_row = outline_rows[index]
+                if not isinstance(outline_row, dict):
+                    continue
+                outline_summary = str(outline_row.get("summary") or outline_row.get("description") or "").strip()
+                if len(outline_summary) < 10:
+                    continue
+                keywords = [
+                    w for w in re.split(r"[，。、；\s]+", outline_summary)
+                    if len(w) >= 2
+                ][:8]
+                if not keywords:
+                    continue
+                setting_text = self._chapter_setting_text(row)
+                if not any(kw in setting_text for kw in keywords):
+                    chapter_num = self._coerce_chapter_number(
+                        row.get("chapter_number") or row.get("chapter"),
+                        index + 1,
+                    )
+                    issues.append(
+                        f"第{chapter_num}章章纲与大纲关键词无重叠，可能偏离大纲"
+                    )
+
+        return issues
+
+    def _expected_chapter_numbers(self, rows: List[Dict[str, Any]], input_data: Dict[str, Any]) -> List[int]:
+        try:
+            total_chapters = max(0, int(input_data.get("total_chapters") or 0))
+        except (TypeError, ValueError):
+            total_chapters = 0
+        if total_chapters:
+            return list(range(1, total_chapters + 1))
+
+        outline_rows = input_data.get("outline_rows")
+        if isinstance(outline_rows, list) and outline_rows:
+            chapter_numbers = [
+                self._coerce_chapter_number(
+                    row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                    index,
+                )
+                for index, row in enumerate(outline_rows, start=1)
+                if isinstance(row, dict)
+            ]
+            if chapter_numbers:
+                return sorted({number for number in chapter_numbers if number > 0})
+
+        row_numbers = [
+            self._coerce_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            for index, row in enumerate(rows, start=1)
+            if isinstance(row, dict)
+        ]
+        return sorted({number for number in row_numbers if number > 0})
+
+    def _outline_source_for_chapter(
+        self,
+        input_data: Dict[str, Any],
+        chapter_number: int,
+    ) -> Dict[str, Any]:
+        outline_rows = input_data.get("outline_rows")
+        if not isinstance(outline_rows, list) or not outline_rows:
+            return {
+                "chapter_number": chapter_number,
+                "title": f"第{chapter_number}章",
+                "summary": f"依据全书大纲推进第{chapter_number}章剧情",
+            }
+
+        for index, row in enumerate(outline_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            number = self._coerce_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            if number == chapter_number:
+                return dict(row)
+
+        if len(outline_rows) == 1 and isinstance(outline_rows[0], dict):
+            source_row = dict(outline_rows[0])
+        elif 0 < chapter_number <= len(outline_rows) and isinstance(outline_rows[chapter_number - 1], dict):
+            source_row = dict(outline_rows[chapter_number - 1])
+        else:
+            source_row = {}
+
+        return {
+            **source_row,
+            "chapter_number": chapter_number,
+            "title": source_row.get("title") or source_row.get("name") or f"第{chapter_number}章",
+            "summary": self._stringify_outline_field(
+                source_row,
+                "summary",
+                "global_outline",
+                "story_synopsis",
+                "volume_plan",
+                "description",
+                "content",
+            ) or f"依据全书大纲推进第{chapter_number}章剧情",
+        }
+
+    def _ensure_chapter_coverage(
+        self,
+        rows: List[Dict[str, Any]],
+        input_data: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        normalized: Dict[int, Dict[str, Any]] = {}
+        duplicate_numbers: List[int] = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            copied = dict(row)
+            chapter_number = self._coerce_chapter_number(
+                copied.get("chapter_number") or copied.get("chapter") or copied.get("number"),
+                index,
+            )
+            copied["chapter_number"] = chapter_number
+            copied["name"] = str(copied.get("name") or copied.get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+            copied["description"] = str(
+                copied.get("description")
+                or copied.get("chapter_goal")
+                or copied.get("key_event")
+                or f"{copied['name']} 待根据章节大纲细化"
+            ).strip()
+            if chapter_number in normalized:
+                duplicate_numbers.append(chapter_number)
+                existing = normalized[chapter_number]
+                existing_text = " ".join(
+                    str(existing.get(key) or "")
+                    for key in ("description", "chapter_goal", "key_event", "ending_hook")
+                )
+                copied_text = " ".join(
+                    str(copied.get(key) or "")
+                    for key in ("description", "chapter_goal", "key_event", "ending_hook")
+                )
+                if len(copied_text.strip()) > len(existing_text.strip()):
+                    normalized[chapter_number] = copied
+                continue
+            normalized[chapter_number] = copied
+
+        if duplicate_numbers:
+            logger.warning(
+                "[%s] Dropped duplicate chapter setting rows for chapters: %s",
+                self.name,
+                sorted(set(duplicate_numbers)),
+            )
+
+        expected_numbers = self._expected_chapter_numbers(list(normalized.values()), input_data)
+        for chapter_number in expected_numbers:
+            if chapter_number in normalized:
+                continue
+            normalized[chapter_number] = self._build_fallback_row(
+                self._outline_source_for_chapter(input_data, chapter_number),
+                chapter_number,
+            )
+
+        return [
+            normalized[number]
+            for number in sorted(normalized)
+            if number > 0
+        ]
 
     def _enrich_rows_with_eventlines(
         self,

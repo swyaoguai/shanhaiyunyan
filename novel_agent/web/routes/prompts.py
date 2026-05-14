@@ -4,12 +4,15 @@
 包含Agent提示词的查询、保存、删除和重载功能。
 """
 
+import re
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..models.requests import SavePromptRequest
 
 router = APIRouter()
+PROMPT_TASK_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff.-]{1,80}$")
 
 
 def _ensure_prompt_agent_visible(pm, agent_type: str, *, include_advanced: bool = False) -> None:
@@ -17,6 +20,13 @@ def _ensure_prompt_agent_visible(pm, agent_type: str, *, include_advanced: bool 
     is_visible = pm.is_user_visible_agent(normalized) or (include_advanced and pm.is_advanced_agent(normalized))
     if not normalized or normalized.startswith('_') or not is_visible:
         raise HTTPException(status_code=404, detail=f"普通设置中不可访问的Agent类型: {agent_type}")
+
+
+def _ensure_prompt_task_name(task_name: str) -> str:
+    normalized = str(task_name or "").strip()
+    if not PROMPT_TASK_NAME_RE.match(normalized):
+        raise HTTPException(status_code=400, detail="任务提示词名称只能包含中英文、数字、下划线、短横线和点号，长度不超过80个字符")
+    return normalized
 
 
 @router.get("/prompts")
@@ -82,6 +92,7 @@ async def get_task_prompt(agent_type: str, task_name: str, include_advanced: boo
     
     pm = get_prompt_manager()
     _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
+    task_name = _ensure_prompt_task_name(task_name)
     
     try:
         prompt = pm.get_task_prompt(agent_type, task_name)
@@ -111,6 +122,7 @@ async def save_custom_prompt(agent_type: str, task_name: str, request: SavePromp
     
     pm = get_prompt_manager()
     _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
+    task_name = _ensure_prompt_task_name(task_name)
     
     try:
         pm.save_custom_prompt(agent_type, task_name, request.content)
@@ -129,6 +141,7 @@ async def delete_custom_prompt(agent_type: str, task_name: str, include_advanced
     
     pm = get_prompt_manager()
     _ensure_prompt_agent_visible(pm, agent_type, include_advanced=include_advanced)
+    task_name = _ensure_prompt_task_name(task_name)
     
     try:
         pm.delete_custom_prompt(agent_type, task_name)

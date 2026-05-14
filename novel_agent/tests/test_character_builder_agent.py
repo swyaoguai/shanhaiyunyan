@@ -140,3 +140,98 @@ async def test_character_builder_autonomous_mode_prompts_model_to_fill_blanks(bu
     assert result["success"] is True
     assert result["characters"][0]["name"] == "沈知棠"
     assert "不要因为姓名/身份/剧情细节未给出而返回 missing_info" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_character_builder_retries_when_locked_world_names_are_replaced(builder, monkeypatch):
+    calls = 0
+    captured_prompts = []
+
+    async def _fake_call_llm(messages, temperature=None, max_tokens=None, stream=False, enable_retry=True):
+        nonlocal calls
+        calls += 1
+        captured_prompts.append(messages[-1]["content"])
+        if calls == 1:
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "confidence": 0.8,
+                    "missing_info": [],
+                    "characters": [
+                        {
+                            "name": "沈清婉",
+                            "role": "女主角",
+                            "identity": "太傅府庶女",
+                            "description": "温婉坚韧的古代甜宠女主。",
+                            "personality": ["温婉", "坚韧"],
+                            "goals": ["寻找良缘"],
+                            "relationships": {"赵恒": "最终归宿"},
+                            "notes": "错误改名版本",
+                        },
+                        {
+                            "name": "赵恒",
+                            "role": "男主角",
+                            "identity": "镇南王世子",
+                            "description": "外冷内热的权贵男主。",
+                            "personality": ["冷峻", "深情"],
+                            "goals": ["守护女主"],
+                            "relationships": {"沈清婉": "妻子"},
+                            "notes": "错误改名版本",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "status": "ok",
+                "confidence": 0.93,
+                "missing_info": [],
+                "characters": [
+                    {
+                        "name": "沈清悦",
+                        "role": "女主角",
+                        "identity": "被迫替嫁的庶女",
+                        "description": "聪慧庶女，被迫替嫡姐嫁给镇北将军陆砚。",
+                        "personality": ["外柔内刚", "聪慧通透"],
+                        "goals": ["在婚姻中获得尊重", "与陆砚相知相守"],
+                        "relationships": {"陆砚": "丈夫"},
+                        "notes": "沿用世界观已确认姓名",
+                    },
+                    {
+                        "name": "陆砚",
+                        "role": "男主角",
+                        "identity": "镇北将军",
+                        "description": "冷面将军，私下极尽宠溺沈清悦。",
+                        "personality": ["外冷内热", "护短深情"],
+                        "goals": ["守护沈清悦", "化解朝堂猜忌"],
+                        "relationships": {"沈清悦": "妻子"},
+                        "notes": "沿用世界观已确认姓名",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(builder, "call_llm", _fake_call_llm)
+    result = await builder.execute(
+        {
+            "novel_type": "古代言情",
+            "theme": "古代甜宠",
+            "request_mode": "autonomous_draft",
+            "ai_autonomy_requested": True,
+            "world": {
+                "world_name": "锦绣长安",
+                "core_concept": "聪慧庶女嫁入将军府，冷面将军私下极尽宠溺。",
+                "story_hooks": [
+                    "主线：庶女沈清悦被迫替嫡姐嫁给冷面将军陆砚，新婚夜发现对方外冷内热。"
+                ],
+            },
+        }
+    )
+
+    assert result["success"] is True
+    assert calls == 2
+    assert [character["name"] for character in result["characters"]] == ["沈清悦", "陆砚"]
+    assert "已确认角色名锁定" in captured_prompts[0]
+    assert "必须使用已确认角色名：沈清悦、陆砚" in captured_prompts[1]

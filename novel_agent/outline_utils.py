@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -207,7 +208,6 @@ def get_outline_volumes(payload: Any) -> List[Dict[str, Any]]:
                 row.get("volume_number")
                 or row.get("volume_title")
                 or row.get("volume_summary")
-                or row.get("volume_plan")
             )
         ]
     return []
@@ -267,8 +267,19 @@ def _chapter_summary_from_outline_entry(entry: Dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Extract executable per-chapter rows from raw, overview, or legacy outlines."""
+def extract_outline_chapter_rows(
+    payload: Any,
+    *,
+    timestamp: Optional[str] = None,
+    promote_volume_beats: bool = False,
+) -> List[Dict[str, Any]]:
+    """Extract executable per-chapter rows from explicit chapter outlines.
+
+    Volume-level key events are intentionally *not* promoted by default. The
+    Outliner owns whole-book and volume planning, while chapter settings own
+    executable per-chapter planning. Call ``derive_chapter_seed_rows_from_outline``
+    when a chapter-setting task explicitly needs seed rows from volume beats.
+    """
     data = normalize_outline_payload(payload)
     now = timestamp or datetime.now().isoformat()
     rows: List[Dict[str, Any]] = []
@@ -326,16 +337,12 @@ def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = Non
                     next_number += 1
                 continue
 
-            # Fallback: when the outline only carries volume-level beats
-            # (key_events/story_beats/major_events), promote each beat to a
-            # chapter row so downstream chapter-setting and chapter-writing
-            # tasks can plan per chapter instead of replaying the global synopsis.
             beats = (
                 volume.get("key_events")
                 or volume.get("story_beats")
                 or volume.get("major_events")
             )
-            if isinstance(beats, list) and beats:
+            if promote_volume_beats and isinstance(beats, list) and beats:
                 for beat in beats:
                     if isinstance(beat, dict):
                         append_chapter(beat, next_number, volume_title=volume_title)
@@ -372,7 +379,11 @@ def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = Non
 
             nested_rows = []
             if row.get("volumes") or row.get("chapters"):
-                nested_rows = extract_outline_chapter_rows(row, timestamp=now)
+                nested_rows = extract_outline_chapter_rows(
+                    row,
+                    timestamp=now,
+                    promote_volume_beats=promote_volume_beats,
+                )
             if nested_rows:
                 rows.extend(nested_rows)
                 next_number = max(
@@ -402,6 +413,24 @@ def extract_outline_chapter_rows(payload: Any, *, timestamp: Optional[str] = Non
     return ordered
 
 
+def derive_chapter_seed_rows_from_outline(
+    payload: Any,
+    *,
+    timestamp: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Derive chapter-setting seed rows from an outline payload.
+
+    This is the explicit bridge between Outliner and ChapterSettingBuilder. It
+    keeps ``outline.json`` as a global/volume artifact while still allowing the
+    chapter-setting stage to use volume beats as rough seeds.
+    """
+    return extract_outline_chapter_rows(
+        payload,
+        timestamp=timestamp,
+        promote_volume_beats=True,
+    )
+
+
 def build_global_outline_text(payload: Any) -> str:
     data = normalize_outline_payload(payload)
 
@@ -414,6 +443,8 @@ def build_global_outline_text(payload: Any) -> str:
                 return text
         for row in data:
             if not isinstance(row, dict):
+                continue
+            if row.get("volume_plan") and not (row.get("summary") or row.get("description")):
                 continue
             text = strip_internal_author_markers(row.get("summary") or row.get("description"))
             if text and not is_pending_text(text):
@@ -429,7 +460,6 @@ def build_global_outline_text(payload: Any) -> str:
 
     sections = [
         ("书名", data.get("title") or data.get("novel_title")),
-        ("作者", data.get("author")),
         ("简介", data.get("intro") or data.get("theme")),
         ("故事梗概", data.get("story_synopsis") or data.get("synopsis") or data.get("main_plot")),
         ("一、【力量体系】", data.get("power_system")),
@@ -492,6 +522,10 @@ def format_outline_volume_plan(payload: Any) -> str:
                     text = strip_internal_author_markers(row.get("volume_plan"))
                     if text:
                         return text
+        if isinstance(data, dict):
+            text = strip_internal_author_markers(data.get("volume_plan"))
+            if text:
+                return text
         return ""
 
     lines: List[str] = ["【分卷规划】"]
@@ -543,6 +577,8 @@ def build_outline_overview_row(payload: Any, *, timestamp: Optional[str] = None)
     data = normalize_outline_payload(payload)
     global_outline = build_global_outline_text(data)
     volume_plan = format_outline_volume_plan(data)
+    if global_outline and volume_plan and _normalized_outline_text(global_outline) == _normalized_outline_text(volume_plan):
+        volume_plan = ""
     if not global_outline and not volume_plan:
         return {}
 
@@ -567,6 +603,13 @@ def build_outline_overview_row(payload: Any, *, timestamp: Optional[str] = None)
     if volumes:
         row["volumes"] = volumes
     return row
+
+
+def _normalized_outline_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[【】《》「」『』，。；：、,.!！?？:;\"'“”‘’()\[\]{}\-—_]", "", text)
+    return text.lower()
 
 
 def extract_eventlines_from_outline(payload: Any) -> List[Dict[str, Any]]:

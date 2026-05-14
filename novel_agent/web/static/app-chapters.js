@@ -15,13 +15,38 @@ function getStoredChapters() {
     return store.projectData.chapters;
 }
 
+function isChapterSettingsPlaceholder(chapter) {
+    if (!chapter || typeof chapter !== 'object') return false;
+    if (chapter.created_from === 'chapter_settings_placeholder') return true;
+    return chapter.source === 'chapter_settings' && !String(chapter.content || '').trim();
+}
+
+function getVisibleStoredChapters() {
+    return getStoredChapters().filter((chapter) => !isChapterSettingsPlaceholder(chapter));
+}
+
+function getStoredChapterIndexFromVisibleIndex(visibleIndex) {
+    const chapters = getStoredChapters();
+    let visibleCount = -1;
+    for (let index = 0; index < chapters.length; index += 1) {
+        if (isChapterSettingsPlaceholder(chapters[index])) {
+            continue;
+        }
+        visibleCount += 1;
+        if (visibleCount === visibleIndex) {
+            return index;
+        }
+    }
+    return -1;
+}
+
 function getChapterDisplayNumber(chapter, fallback) {
     const parsed = Number(chapter?.chapter_number || chapter?.chapter || fallback || 1);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : (fallback || 1);
 }
 
 function getNextStoredChapterNumber() {
-    const numbers = getStoredChapters()
+    const numbers = getVisibleStoredChapters()
         .map((chapter, index) => getChapterDisplayNumber(chapter, index + 1))
         .filter((number) => number > 0);
     return (numbers.length > 0 ? Math.max(...numbers) : 0) + 1;
@@ -45,47 +70,17 @@ function getChapterSettingPlaceholders() {
 }
 
 function getMultiAgentChapters() {
-    const chapters = getStoredChapters();
-    if (chapters.length > 0) {
-        return chapters;
-    }
-    return getChapterSettingPlaceholders();
+    return getVisibleStoredChapters();
 }
 
 function ensureChapterRecord(index) {
     const chapters = getStoredChapters();
-    if (chapters[index]) {
-        return chapters[index];
+    const storedIndex = getStoredChapterIndexFromVisibleIndex(index);
+    if (storedIndex >= 0 && chapters[storedIndex]) {
+        return chapters[storedIndex];
     }
 
-    const placeholders = getChapterSettingPlaceholders();
-    if (chapters.length === 0 && placeholders.length > 0) {
-        placeholders.forEach((placeholder) => {
-            chapters.push({
-                ...placeholder,
-                content: placeholder.content || '',
-                created_at: new Date().toISOString(),
-                created_from: 'chapter_settings_placeholder'
-            });
-        });
-    }
-    if (chapters[index]) {
-        return chapters[index];
-    }
-
-    const placeholder = placeholders[index];
-    if (!placeholder) {
-        return null;
-    }
-
-    const chapter = {
-        ...placeholder,
-        content: placeholder.content || '',
-        created_at: new Date().toISOString(),
-        created_from: placeholder.source === 'chapter_settings' ? 'chapter_settings_placeholder' : 'manual'
-    };
-    chapters[index] = chapter;
-    return chapter;
+    return null;
 }
 
 function addNewChapter() {
@@ -287,7 +282,9 @@ function deleteChapter(index) {
 
     const chapterNumber = getChapterDisplayNumber(chapter, index + 1);
     if (confirm(`确定要删除「${formatChapterDisplay(chapterNumber, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
-        getStoredChapters().splice(index, 1);
+        const storedIndex = getStoredChapterIndexFromVisibleIndex(index);
+        if (storedIndex < 0) return;
+        getStoredChapters().splice(storedIndex, 1);
         saveChaptersData();
         renderNavPanel('write'); // 刷新列表，传入正确的模块ID
 
@@ -471,7 +468,7 @@ async function saveOutlineData() {
 async function saveChaptersData() {
     try {
         await apiCall('/api/project-data/chapters', 'POST', {
-            data: getStoredChapters()
+            data: getVisibleStoredChapters()
         });
     } catch (e) {
         console.error('Failed to save chapters:', e);
