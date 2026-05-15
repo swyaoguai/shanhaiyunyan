@@ -34,6 +34,21 @@ ENV/
 *.code-workspace
 node_modules/
 
+# GitHub metadata/workflows
+.github/
+
+# Local development and test-only files
+frontend-tests/
+novel_agent/tests/
+novel_agent/knowledge_base/tests/
+skills/*/test*.py
+docs/reports/testing/
+START_TESTING.md
+pytest.ini
+requirements-dev.txt
+package.json
+package-lock.json
+
 # PyInstaller
 *.manifest
 *.spec

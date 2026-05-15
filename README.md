@@ -165,21 +165,6 @@ http://localhost:5656
 
 ## 常用命令
 
-后端测试：
-
-```bash
-pytest
-pytest novel_agent/tests
-pytest novel_agent/knowledge_base/tests
-```
-
-前端测试：
-
-```bash
-npm install
-npm run test:frontend
-```
-
 打包 Windows 便携版：
 
 ```bash
@@ -229,7 +214,6 @@ novel_agent/wiki/
 ├── build_portable.py
 ├── clean_for_release.py
 ├── requirements.txt
-├── package.json
 ├── novel_agent/
 │   ├── agents/
 │   ├── workflow/
@@ -240,7 +224,6 @@ novel_agent/wiki/
 │   ├── context/
 │   └── utils/
 ├── skills/
-├── frontend-tests/
 ├── docs/
 └── data/
 ```
@@ -259,6 +242,8 @@ data/
 ```
 
 这些数据包含你的项目内容、会话、统计和日志，默认被 `.gitignore` 忽略。公开仓库前不要提交 `.env`、`data/`、日志、构建产物或私人项目素材。
+
+本地开发用的测试目录、GitHub 工作流目录和测试配置可以保留在工作区，但默认不纳入公开仓库。
 
 ## Skills
 
