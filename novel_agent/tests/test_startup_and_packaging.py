@@ -199,8 +199,14 @@ def test_installer_build_creates_onedir_inno_flow_without_nodejs():
     assert '"include_nodejs": False' in content
     assert "--include-onnx" in content
     assert "installer_variant(include_onnx)" in content
-    assert 'suffix = "LocalModel" if include_onnx else "Lite"' in content
-    assert 'f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_{suffix}"' in content
+    assert 'suffix = "本地模型版" if include_onnx else "轻量版"' in content
+    assert 'f"{DISPLAY_NAME}_v{APP_VERSION}_安装包_{suffix}"' in content
+    assert "LEGACY_VARIANT_SETUP_EXE_PATHS" in content
+    assert "CHINESE_INNO_MESSAGES" in content
+    assert "SetupWindowTitle=安装 - %1" in content
+    assert "WizardSelectDir=选择安装位置" in content
+    assert "ButtonNext=下一步(&N) >" in content
+    assert "ButtonBrowse=浏览(&B)..." in content
     assert "DefaultDirName={{localappdata}}\\\\Programs\\\\ShanhaiYunyan" in content
     assert "OutputBaseFilename={output_base_name}" in content
     assert "pyinstaller_skill_dependency_args()" in content

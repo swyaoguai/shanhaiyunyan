@@ -41,6 +41,171 @@ PYINSTALLER_OUT_DIR = DIST_DIR / DISPLAY_NAME
 INSTALLER_DIR = ROOT_DIR / "installer"
 INNO_SCRIPT_PATH = INSTALLER_DIR / "ShanhaiYunyan.iss"
 LEGACY_SETUP_EXE_PATH = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup.exe"
+LEGACY_VARIANT_SETUP_EXE_PATHS = {
+    DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_Lite.exe",
+    DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_LocalModel.exe",
+}
+
+CHINESE_INNO_MESSAGES = r"""
+[Messages]
+SetupAppTitle=安装程序
+SetupWindowTitle=安装 - %1
+UninstallAppTitle=卸载程序
+UninstallAppFullTitle=%1 卸载
+InformationTitle=信息
+ConfirmTitle=确认
+ErrorTitle=错误
+SetupLdrStartupMessage=即将安装 %1。是否继续？
+LdrCannotCreateTemp=无法创建临时文件。安装已中止
+LdrCannotExecTemp=无法执行临时目录中的文件。安装已中止
+LastErrorMessage=%1。%n%n错误 %2：%3
+SetupFileMissing=安装目录中缺少文件 %1。请修复此问题或重新获取安装程序。
+SetupFileCorrupt=安装文件已损坏。请重新获取安装程序。
+SetupFileCorruptOrWrongVer=安装文件已损坏，或与当前安装程序版本不兼容。请修复此问题或重新获取安装程序。
+InvalidParameter=命令行参数无效：%n%n%1
+SetupAlreadyRunning=安装程序已经在运行。
+WindowsVersionNotSupported=此程序不支持当前 Windows 版本。
+AdminPrivilegesRequired=安装此程序需要以管理员身份登录。
+SetupAppRunningError=安装程序检测到 %1 正在运行。%n%n请关闭所有实例后单击“确定”继续，或单击“取消”退出。
+UninstallAppRunningError=卸载程序检测到 %1 正在运行。%n%n请关闭所有实例后单击“确定”继续，或单击“取消”退出。
+ExitSetupTitle=退出安装
+ExitSetupMessage=安装尚未完成。如果现在退出，程序将不会被安装。%n%n您可以稍后再次运行安装程序完成安装。%n%n确定退出安装吗？
+AboutSetupMenuItem=关于安装程序(&A)...
+AboutSetupTitle=关于安装程序
+ButtonBack=< 上一步(&B)
+ButtonNext=下一步(&N) >
+ButtonInstall=安装(&I)
+ButtonOK=确定
+ButtonCancel=取消
+ButtonYes=是(&Y)
+ButtonYesToAll=全部是(&A)
+ButtonNo=否(&N)
+ButtonNoToAll=全部否(&O)
+ButtonFinish=完成(&F)
+ButtonBrowse=浏览(&B)...
+ButtonWizardBrowse=浏览(&B)...
+ButtonNewFolder=新建文件夹(&M)
+SelectLanguageTitle=选择安装语言
+SelectLanguageLabel=请选择安装过程中使用的语言。
+ClickNext=单击“下一步”继续，或单击“取消”退出安装程序。
+BrowseDialogTitle=浏览文件夹
+BrowseDialogLabel=请在下面的列表中选择文件夹，然后单击“确定”。
+NewFolderName=新建文件夹
+WelcomeLabel1=欢迎使用 [name] 安装向导
+WelcomeLabel2=将在您的计算机上安装 [name/ver]。%n%n建议继续前关闭其他应用程序。
+WizardPassword=密码
+PasswordLabel1=此安装受密码保护。
+PasswordLabel3=请输入密码，然后单击“下一步”继续。密码区分大小写。
+PasswordEditLabel=密码(&P)：
+IncorrectPassword=输入的密码不正确，请重试。
+WizardLicense=许可协议
+LicenseLabel=请在继续前阅读以下重要信息。
+LicenseLabel3=请阅读以下许可协议。必须接受协议条款才能继续安装。
+LicenseAccepted=我接受协议(&A)
+LicenseNotAccepted=我不接受协议(&D)
+WizardInfoBefore=信息
+InfoBeforeLabel=请在继续前阅读以下重要信息。
+InfoBeforeClickLabel=准备好继续安装时，请单击“下一步”。
+WizardInfoAfter=信息
+InfoAfterLabel=请在继续前阅读以下重要信息。
+InfoAfterClickLabel=准备好继续安装时，请单击“下一步”。
+WizardSelectDir=选择安装位置
+SelectDirDesc=[name] 应安装到哪里？
+SelectDirLabel3=安装程序会将 [name] 安装到以下文件夹。
+SelectDirBrowseLabel=单击“下一步”继续。如需选择其他文件夹，请单击“浏览”。
+DiskSpaceGBLabel=至少需要 [gb] GB 可用磁盘空间。
+DiskSpaceMBLabel=至少需要 [mb] MB 可用磁盘空间。
+CannotInstallToNetworkDrive=安装程序不能安装到网络驱动器。
+CannotInstallToUNCPath=安装程序不能安装到 UNC 路径。
+InvalidPath=必须输入带盘符的完整路径，例如：%n%nC:\APP%n%n或 UNC 路径，例如：%n%n\\server\share
+InvalidDrive=选择的驱动器或 UNC 共享不存在或无法访问。请选择其他位置。
+DiskSpaceWarningTitle=磁盘空间不足
+DiskSpaceWarning=安装程序至少需要 %1 KB 可用空间，但所选驱动器只有 %2 KB 可用。%n%n是否仍要继续？
+DirNameTooLong=文件夹名称或路径过长。
+InvalidDirName=文件夹名称无效。
+DirExistsTitle=文件夹已存在
+DirExists=文件夹：%n%n%1%n%n已经存在。是否继续安装到该文件夹？
+DirDoesntExistTitle=文件夹不存在
+DirDoesntExist=文件夹：%n%n%1%n%n不存在。是否创建该文件夹？
+WizardSelectComponents=选择组件
+SelectComponentsDesc=要安装哪些组件？
+SelectComponentsLabel2=请选择要安装的组件，清除不需要安装的组件。准备好后单击“下一步”。
+FullInstallation=完整安装
+CompactInstallation=精简安装
+CustomInstallation=自定义安装
+ComponentsDiskSpaceGBLabel=当前选择至少需要 [gb] GB 磁盘空间。
+ComponentsDiskSpaceMBLabel=当前选择至少需要 [mb] MB 磁盘空间。
+WizardSelectTasks=选择附加任务
+SelectTasksDesc=需要执行哪些附加任务？
+SelectTasksLabel2=请选择安装 [name] 时需要执行的附加任务，然后单击“下一步”。
+WizardSelectProgramGroup=选择开始菜单文件夹
+SelectStartMenuFolderDesc=安装程序应将快捷方式放在哪里？
+SelectStartMenuFolderLabel3=安装程序将在以下开始菜单文件夹中创建快捷方式。
+SelectStartMenuFolderBrowseLabel=单击“下一步”继续。如需选择其他文件夹，请单击“浏览”。
+MustEnterGroupName=必须输入文件夹名称。
+GroupNameTooLong=文件夹名称或路径过长。
+InvalidGroupName=文件夹名称无效。
+NoProgramGroupCheck2=不创建开始菜单文件夹(&D)
+WizardReady=准备安装
+ReadyLabel1=安装程序已准备好开始在您的计算机上安装 [name]。
+ReadyLabel2a=单击“安装”继续安装，或单击“上一步”检查或更改设置。
+ReadyLabel2b=单击“安装”继续。
+ReadyMemoUserInfo=用户信息：
+ReadyMemoDir=安装位置：
+ReadyMemoType=安装类型：
+ReadyMemoComponents=选择的组件：
+ReadyMemoGroup=开始菜单文件夹：
+ReadyMemoTasks=附加任务：
+WizardPreparing=准备安装
+PreparingDesc=安装程序正在准备在您的计算机上安装 [name]。
+PreviousInstallNotCompleted=之前程序的安装/卸载尚未完成。需要重新启动计算机才能完成该操作。%n%n重新启动后，请再次运行安装程序完成 [name] 的安装。
+CannotContinue=安装程序无法继续。请单击“取消”退出。
+ApplicationsFound=以下应用程序正在使用安装程序需要更新的文件。建议允许安装程序自动关闭这些应用程序。
+ApplicationsFound2=以下应用程序正在使用安装程序需要更新的文件。建议允许安装程序自动关闭这些应用程序。安装完成后，安装程序会尝试重新启动这些应用程序。
+CloseApplications=自动关闭应用程序(&A)
+DontCloseApplications=不关闭应用程序(&D)
+ErrorCloseApplications=安装程序无法自动关闭所有应用程序。建议在继续前手动关闭正在使用待更新文件的应用程序。
+PrepareToInstallNeedsRestart=安装程序必须重新启动计算机。重新启动后，请再次运行安装程序完成 [name] 的安装。%n%n是否现在重新启动？
+WizardInstalling=正在安装
+InstallingLabel=请稍候，安装程序正在将 [name] 安装到您的计算机。
+FinishedHeadingLabel=正在完成 [name] 安装向导
+FinishedLabelNoIcons=安装程序已在您的计算机上安装 [name]。
+FinishedLabel=安装程序已在您的计算机上安装 [name]。可以通过已安装的快捷方式启动应用程序。
+ClickFinish=单击“完成”退出安装程序。
+FinishedRestartLabel=要完成 [name] 的安装，必须重新启动计算机。是否现在重新启动？
+FinishedRestartMessage=要完成 [name] 的安装，必须重新启动计算机。%n%n是否现在重新启动？
+ShowReadmeCheck=是，我要查看 README 文件
+YesRadio=是，立即重新启动计算机(&Y)
+NoRadio=否，稍后再重新启动计算机(&N)
+RunEntryExec=运行 %1
+RunEntryShellExec=查看 %1
+SetupAborted=安装未完成。%n%n请修复问题后再次运行安装程序。
+StatusClosingApplications=正在关闭应用程序...
+StatusCreateDirs=正在创建目录...
+StatusExtractFiles=正在解压文件...
+StatusDownloadFiles=正在下载文件...
+StatusCreateIcons=正在创建快捷方式...
+StatusCreateIniEntries=正在创建 INI 项...
+StatusCreateRegistryEntries=正在创建注册表项...
+StatusRegisterFiles=正在注册文件...
+StatusSavingUninstall=正在保存卸载信息...
+StatusRunProgram=正在完成安装...
+StatusRestartingApplications=正在重新启动应用程序...
+StatusRollback=正在回滚更改...
+ErrorExecutingProgram=无法执行文件：%n%1
+UninstallNotFound=文件 %1 不存在，无法卸载。
+UninstallOpenError=无法打开文件 %1，无法卸载。
+ConfirmUninstall=确定要完全移除 %1 及其所有组件吗？
+UninstallStatusLabel=请稍候，正在从您的计算机中移除 %1。
+UninstalledAll=%1 已成功从您的计算机中移除。
+UninstalledMost=%1 卸载完成。%n%n某些项目无法移除，可以手动删除。
+UninstalledAndNeedsRestart=要完成 %1 的卸载，必须重新启动计算机。%n%n是否现在重新启动？
+UninstallDataCorrupted=文件 %1 已损坏，无法卸载。
+WizardUninstalling=卸载状态
+StatusUninstalling=正在卸载 %1...
+ShutdownBlockReasonInstallingApp=正在安装 %1。
+ShutdownBlockReasonUninstallingApp=正在卸载 %1。
+"""
 
 
 def installer_variant(include_onnx: bool) -> str:
@@ -52,8 +217,8 @@ def installer_variant_label(include_onnx: bool) -> str:
 
 
 def setup_base_name(include_onnx: bool) -> str:
-    suffix = "LocalModel" if include_onnx else "Lite"
-    return f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_{suffix}"
+    suffix = "本地模型版" if include_onnx else "轻量版"
+    return f"{DISPLAY_NAME}_v{APP_VERSION}_安装包_{suffix}"
 
 
 def setup_exe_path(include_onnx: bool) -> Path:
@@ -77,7 +242,7 @@ def clean_installer_artifacts(include_onnx: bool = False) -> bool:
         if path.exists():
             _safe_rmtree(path)
             print(f"[OK] 删除 {path.relative_to(ROOT_DIR)}")
-    for setup_path in {setup_exe_path(include_onnx), LEGACY_SETUP_EXE_PATH}:
+    for setup_path in {setup_exe_path(include_onnx), LEGACY_SETUP_EXE_PATH, *LEGACY_VARIANT_SETUP_EXE_PATHS}:
         if setup_path.exists():
             setup_path.unlink()
             print(f"[OK] 删除 {setup_path.relative_to(ROOT_DIR)}")
@@ -357,6 +522,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Run]
 Filename: "{{cmd}}"; Parameters: "/C if not exist ""{{app}}\\.env"" copy ""{{app}}\\.env.example"" ""{{app}}\\.env"""; Flags: runhidden
 Filename: "{{app}}\\{{#MyAppExeName}}"; Description: "启动 {{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+{CHINESE_INNO_MESSAGES}
 '''
     INNO_SCRIPT_PATH.write_text(script, encoding="utf-8")
     print(f"[OK] 脚本: {INNO_SCRIPT_PATH.relative_to(ROOT_DIR)}")
