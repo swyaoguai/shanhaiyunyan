@@ -40,8 +40,24 @@ APP_DIR = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_App"
 PYINSTALLER_OUT_DIR = DIST_DIR / DISPLAY_NAME
 INSTALLER_DIR = ROOT_DIR / "installer"
 INNO_SCRIPT_PATH = INSTALLER_DIR / "ShanhaiYunyan.iss"
-SETUP_BASE_NAME = f"{DISPLAY_NAME}_v{APP_VERSION}_Setup"
-SETUP_EXE_PATH = DIST_DIR / f"{SETUP_BASE_NAME}.exe"
+LEGACY_SETUP_EXE_PATH = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup.exe"
+
+
+def installer_variant(include_onnx: bool) -> str:
+    return "local_model" if include_onnx else "lite"
+
+
+def installer_variant_label(include_onnx: bool) -> str:
+    return "本地模型版" if include_onnx else "轻量版"
+
+
+def setup_base_name(include_onnx: bool) -> str:
+    suffix = "LocalModel" if include_onnx else "Lite"
+    return f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_{suffix}"
+
+
+def setup_exe_path(include_onnx: bool) -> Path:
+    return DIST_DIR / f"{setup_base_name(include_onnx)}.exe"
 
 
 def _safe_rmtree(path: Path) -> None:
@@ -49,7 +65,7 @@ def _safe_rmtree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def clean_installer_artifacts() -> bool:
+def clean_installer_artifacts(include_onnx: bool = False) -> bool:
     """Remove only installer-related build outputs."""
     print("\n[清理] 清理安装包构建产物...")
     for path in (
@@ -61,9 +77,10 @@ def clean_installer_artifacts() -> bool:
         if path.exists():
             _safe_rmtree(path)
             print(f"[OK] 删除 {path.relative_to(ROOT_DIR)}")
-    if SETUP_EXE_PATH.exists():
-        SETUP_EXE_PATH.unlink()
-        print(f"[OK] 删除 {SETUP_EXE_PATH.relative_to(ROOT_DIR)}")
+    for setup_path in {setup_exe_path(include_onnx), LEGACY_SETUP_EXE_PATH}:
+        if setup_path.exists():
+            setup_path.unlink()
+            print(f"[OK] 删除 {setup_path.relative_to(ROOT_DIR)}")
     return True
 
 
@@ -261,6 +278,8 @@ def write_installer_manifest(include_onnx: bool) -> None:
     manifest = {
         "version": APP_VERSION,
         "build_time": datetime.now().isoformat(),
+        "installer_variant": installer_variant(include_onnx),
+        "installer_variant_label": installer_variant_label(include_onnx),
         "include_nodejs": False,
         "include_onnx": include_onnx,
         "app_dir": str(APP_DIR),
@@ -284,14 +303,17 @@ def _inno_path(path: Path) -> str:
     return str(path.resolve())
 
 
-def write_inno_script() -> bool:
+def write_inno_script(include_onnx: bool = False) -> bool:
     """Write the Inno Setup script used to compile the final installer."""
     print("\n[安装包] 生成 Inno Setup 脚本...")
     INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
     app_source = _inno_path(APP_DIR)
     output_dir = _inno_path(DIST_DIR)
+    flavor_label = installer_variant_label(include_onnx)
+    output_base_name = setup_base_name(include_onnx)
     script = f'''#define MyAppName "{DISPLAY_NAME}"
 #define MyAppVersion "{APP_VERSION}"
+#define MyInstallerFlavor "{flavor_label}"
 #define MyAppExeName "{DISPLAY_NAME}.exe"
 #define SourceDir "{app_source}"
 
@@ -299,12 +321,13 @@ def write_inno_script() -> bool:
 AppId={{{{F10F6C34-26F1-451F-9C41-650D29F5918D}}}}
 AppName={{#MyAppName}}
 AppVersion={{#MyAppVersion}}
+AppVerName={{#MyAppName}} {{#MyAppVersion}} {{#MyInstallerFlavor}}
 AppPublisher=山海云烟
 DefaultDirName={{localappdata}}\\Programs\\ShanhaiYunyan
 DefaultGroupName={{#MyAppName}}
 DisableProgramGroupPage=yes
 OutputDir={output_dir}
-OutputBaseFilename={SETUP_BASE_NAME}
+OutputBaseFilename={output_base_name}
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -354,7 +377,7 @@ def find_iscc() -> str | None:
     return None
 
 
-def compile_inno_installer(skip_compile: bool = False) -> bool:
+def compile_inno_installer(include_onnx: bool = False, skip_compile: bool = False) -> bool:
     """Compile Setup.exe when Inno Setup is installed."""
     if skip_compile:
         print("[跳过] 已按参数跳过 Inno Setup 编译")
@@ -370,16 +393,17 @@ def compile_inno_installer(skip_compile: bool = False) -> bool:
     if result.returncode != 0:
         print("[X] Inno Setup 编译失败")
         return False
-    if not SETUP_EXE_PATH.exists():
-        print(f"[X] 未找到安装包: {SETUP_EXE_PATH}")
+    expected_setup = setup_exe_path(include_onnx)
+    if not expected_setup.exists():
+        print(f"[X] 未找到安装包: {expected_setup}")
         return False
-    print(f"[OK] 安装包: {SETUP_EXE_PATH.relative_to(ROOT_DIR)}")
-    print(f"     大小: {SETUP_EXE_PATH.stat().st_size / (1024 * 1024):.1f} MB")
-    print(f"     SHA256: {calculate_file_hash(SETUP_EXE_PATH, 'sha256')}")
+    print(f"[OK] 安装包: {expected_setup.relative_to(ROOT_DIR)}")
+    print(f"     大小: {expected_setup.stat().st_size / (1024 * 1024):.1f} MB")
+    print(f"     SHA256: {calculate_file_hash(expected_setup, 'sha256')}")
     return True
 
 
-def print_summary() -> None:
+def print_summary(include_onnx: bool = False) -> None:
     print("\n" + "=" * 60)
     print("安装包构建摘要")
     print("=" * 60)
@@ -387,9 +411,10 @@ def print_summary() -> None:
         total_size = sum(path.stat().st_size for path in APP_DIR.rglob("*") if path.is_file())
         print(f"应用目录: {APP_DIR}")
         print(f"应用目录大小: {total_size / (1024 * 1024):.1f} MB")
-    if SETUP_EXE_PATH.exists():
-        print(f"安装包: {SETUP_EXE_PATH}")
-        print(f"安装包大小: {SETUP_EXE_PATH.stat().st_size / (1024 * 1024):.1f} MB")
+    expected_setup = setup_exe_path(include_onnx)
+    if expected_setup.exists():
+        print(f"安装包: {expected_setup}")
+        print(f"安装包大小: {expected_setup.stat().st_size / (1024 * 1024):.1f} MB")
     else:
         print(f"Inno 脚本: {INNO_SCRIPT_PATH}")
         print("安装包未编译：请安装 Inno Setup 后重新运行本脚本。")
@@ -410,6 +435,7 @@ def main() -> int:
     print("默认不内置 Node.js，也不内置本地 ONNX 模型。")
     if args.include_onnx:
         print("[选项] 本次会内置本地 ONNX 模型。")
+    print(f"[版本] 输出安装包后缀: {setup_base_name(args.include_onnx)}.exe")
 
     if not check_requirements():
         return 1
@@ -420,12 +446,12 @@ def main() -> int:
             return 0
 
     steps = [
-        ("清理安装包产物", clean_installer_artifacts),
+        ("清理安装包产物", lambda: clean_installer_artifacts(include_onnx=args.include_onnx)),
         ("准备发布数据", prepare_release_data),
         ("PyInstaller onedir 构建", run_pyinstaller_onedir),
         ("创建应用目录结构", lambda: populate_app_layout(include_onnx=args.include_onnx)),
-        ("生成 Inno Setup 脚本", write_inno_script),
-        ("编译安装包", lambda: compile_inno_installer(skip_compile=args.skip_compile)),
+        ("生成 Inno Setup 脚本", lambda: write_inno_script(include_onnx=args.include_onnx)),
+        ("编译安装包", lambda: compile_inno_installer(include_onnx=args.include_onnx, skip_compile=args.skip_compile)),
     ]
     for name, func in steps:
         print(f"\n{'=' * 60}")
@@ -435,7 +461,7 @@ def main() -> int:
             print(f"\n[X] {name} 失败，构建中止")
             return 1
 
-    print_summary()
+    print_summary(include_onnx=args.include_onnx)
     print("\n构建流程完成。")
     return 0
 

@@ -198,7 +198,11 @@ def test_installer_build_creates_onedir_inno_flow_without_nodejs():
     assert '"--onefile"' not in content
     assert '"include_nodejs": False' in content
     assert "--include-onnx" in content
+    assert "installer_variant(include_onnx)" in content
+    assert 'suffix = "LocalModel" if include_onnx else "Lite"' in content
+    assert 'f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_{suffix}"' in content
     assert "DefaultDirName={{localappdata}}\\\\Programs\\\\ShanhaiYunyan" in content
+    assert "OutputBaseFilename={output_base_name}" in content
     assert "pyinstaller_skill_dependency_args()" in content
     assert "pyinstaller_optional_exclude_args()" in content
     assert "Inno Setup" in content
