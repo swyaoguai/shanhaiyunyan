@@ -12,9 +12,7 @@ Web应用主模块（重构版）
 """
 
 import asyncio
-import json
 import logging
-import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -93,33 +91,24 @@ async def _setup_knowledge_base_for_router(router_agent: RouterAgent) -> None:
         return
     
     try:
-        from ..knowledge_base import KnowledgeBase
         from ..knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE, CHROMA_IMPORT_ERROR
+        from ..knowledge_runtime import (
+            create_project_knowledge_base,
+            has_embedding_config,
+            load_knowledge_base_settings,
+        )
         
         if not CHROMA_AVAILABLE:
             logger.error(f"[Router] ChromaDB不可用: {CHROMA_IMPORT_ERROR}")
             return
         
-        config_path = get_data_dir() / "knowledge_base_config.json"
-        
-        has_embedding_config = False
-        if config_path.exists():
-            try:
-                kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                provider = str(kb_config.get("embedding_provider") or "api").lower()
-                has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
-                if provider in {"local", "local_onnx"}:
-                    has_embedding_config = bool(kb_config.get("onnx_model_dir"))
-            except Exception:
-                pass
-        else:
-            provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
-            has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
-            if provider in {"local", "local_onnx"}:
-                has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
-        
-        if has_embedding_config:
-            kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
+        kb_settings = load_knowledge_base_settings(get_data_dir())
+        if has_embedding_config(kb_settings):
+            kb = create_project_knowledge_base(
+                pm.current_project_id,
+                data_dir=get_data_dir(),
+                use_mock_embeddings=False,
+            )
             router_agent.set_knowledge_base(kb)
 
             from .dependencies import get_coordinator

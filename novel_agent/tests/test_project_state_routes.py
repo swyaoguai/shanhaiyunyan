@@ -128,6 +128,29 @@ def test_chapter_summary_config_roundtrip(client_with_project: TestClient):
     assert get_resp.json()["auto_summary_enabled"] is True
 
 
+def test_chapter_knowledge_sync_config_roundtrip(client_with_project: TestClient):
+    initial_resp = client_with_project.get("/api/chapter-knowledge-sync-config")
+    assert initial_resp.status_code == 200
+    assert initial_resp.json()["auto_vector_sync_enabled"] is True
+
+    save_resp = client_with_project.post(
+        "/api/chapter-knowledge-sync-config",
+        json={
+            "auto_vector_sync_enabled": False,
+            "sync_on_edit_enabled": False,
+            "sync_on_delete_enabled": True,
+        },
+    )
+    assert save_resp.status_code == 200
+    assert save_resp.json()["success"] is True
+    assert save_resp.json()["auto_vector_sync_enabled"] is False
+    assert save_resp.json()["sync_on_edit_enabled"] is False
+
+    get_resp = client_with_project.get("/api/chapter-knowledge-sync-config")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["sync_on_delete_enabled"] is True
+
+
 def test_project_state_batch_set_and_get(client_with_project: TestClient):
     states = {
         "knowledge_data_eventlines": [{"id": "1", "name": "事件A"}],

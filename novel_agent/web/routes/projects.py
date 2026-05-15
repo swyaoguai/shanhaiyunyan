@@ -956,6 +956,7 @@ async def save_project_data(data_type: str, request: Request):
         except Exception as e:
             logger.debug(f"[Projects] Library sync on save: {e}")
 
+        chapter_knowledge_sync = None
         if data_type == "chapters":
             try:
                 from ...novel_import_service import get_novel_import_service
@@ -971,8 +972,25 @@ async def save_project_data(data_type: str, request: Request):
                 )
             except Exception as exc:
                 logger.warning(f"[Projects] Failed to refresh collaborative memory: {exc}")
+            try:
+                from ...chapter_knowledge_sync import ChapterKnowledgeSyncService
 
-        return JSONResponse({"success": True})
+                chapter_knowledge_sync = ChapterKnowledgeSyncService(pm).sync_chapters(
+                    _normalize_outline_rows(payload_to_save, collapse_overview=False),
+                    trigger="edit",
+                )
+            except Exception as exc:
+                logger.warning(f"[Projects] Failed to sync chapter knowledge: {exc}")
+                chapter_knowledge_sync = {
+                    "success": False,
+                    "status": "failed",
+                    "errors": [str(exc)],
+                }
+
+        response_payload = {"success": True}
+        if chapter_knowledge_sync is not None:
+            response_payload["chapter_knowledge_sync"] = chapter_knowledge_sync
+        return JSONResponse(response_payload)
     except ValueError as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
 
@@ -1200,6 +1218,14 @@ async def import_novel_to_collab_mode(
         chapters=memory_chapters,
         source_file=parsed["filename"],
     )
+    chapter_knowledge_sync = None
+    try:
+        from ...chapter_knowledge_sync import ChapterKnowledgeSyncService
+
+        chapter_knowledge_sync = ChapterKnowledgeSyncService(pm).sync_chapters(chapters, trigger="import")
+    except Exception as exc:
+        logger.warning(f"[Projects] Failed to sync imported chapters to knowledge base: {exc}")
+        chapter_knowledge_sync = {"success": False, "status": "failed", "errors": [str(exc)]}
 
     return JSONResponse(
         {
@@ -1216,6 +1242,7 @@ async def import_novel_to_collab_mode(
                 "issue_cards": len(memory.get("issue_cards", [])),
                 "edit_tasks": len(memory.get("edit_tasks", [])),
             },
+            "chapter_knowledge_sync": chapter_knowledge_sync,
         }
     )
 
@@ -1336,6 +1363,53 @@ async def set_chapter_summary_config(request: Request):
     enabled = bool(body.get("auto_summary_enabled", False))
     set_auto_summary_enabled(pm.current_project_id, enabled)
     return JSONResponse({"success": True, "auto_summary_enabled": enabled})
+
+
+@router.get("/chapter-knowledge-sync-config")
+async def get_chapter_knowledge_sync_config_route():
+    from ...chapter_knowledge_sync import get_chapter_knowledge_sync_config
+    from ...project_manager import get_project_manager
+
+    pm = get_project_manager()
+    try:
+        _require_current_project(pm)
+    except ValueError:
+        return JSONResponse({
+            "auto_vector_sync_enabled": True,
+            "sync_on_edit_enabled": True,
+            "sync_on_delete_enabled": True,
+        })
+    return JSONResponse(get_chapter_knowledge_sync_config(pm.current_project_id))
+
+
+@router.post("/chapter-knowledge-sync-config")
+async def set_chapter_knowledge_sync_config_route(request: Request):
+    from ...chapter_knowledge_sync import set_chapter_knowledge_sync_config
+    from ...project_manager import get_project_manager
+
+    pm = get_project_manager()
+    try:
+        _require_current_project(pm)
+    except ValueError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    body = await request.json()
+    config = set_chapter_knowledge_sync_config(pm.current_project_id, body)
+    return JSONResponse({"success": True, **config})
+
+
+@router.post("/chapter-knowledge-sync/rebuild")
+async def rebuild_chapter_knowledge_sync():
+    from ...chapter_knowledge_sync import ChapterKnowledgeSyncService
+    from ...project_manager import get_project_manager
+
+    pm = get_project_manager()
+    try:
+        _require_current_project(pm)
+    except ValueError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    result = ChapterKnowledgeSyncService(pm).sync_chapters(force=True, delete_missing=True)
+    status_code = 200 if result.get("success") else 503
+    return JSONResponse(result, status_code=status_code)
 
 
 @router.get("/projects/backup/export")

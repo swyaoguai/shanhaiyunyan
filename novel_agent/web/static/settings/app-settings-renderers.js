@@ -693,7 +693,7 @@ async function loadKnowledgeBaseSettings() {
     content.innerHTML = renderSettingsLoadingState();
 
     try {
-        const { config, stats, chapterSummaryConfig } = await fetchKnowledgeBaseSettingsData();
+        const { config, stats, chapterSummaryConfig, chapterSyncConfig } = await fetchKnowledgeBaseSettingsData();
         const embeddingProvider = String(config.embedding_provider || 'api').toLowerCase();
         const isLocalProvider = embeddingProvider === 'local_onnx' || embeddingProvider === 'local';
         const hasApiKey = Boolean(config.siliconflow_api_key_set || (config.siliconflow_api_key && config.siliconflow_api_key.length > 10));
@@ -705,6 +705,9 @@ async function loadKnowledgeBaseSettings() {
         const localModelName = config.onnx_model_metadata?.model_id || config.onnx_model_metadata?.base_model || '本地模型包';
         const localModelDim = config.onnx_model_metadata?.embedding_dim || '';
         const autoSummaryEnabled = Boolean(chapterSummaryConfig?.auto_summary_enabled);
+        const autoVectorSyncEnabled = chapterSyncConfig?.auto_vector_sync_enabled !== false;
+        const syncOnEditEnabled = chapterSyncConfig?.sync_on_edit_enabled !== false;
+        const syncOnDeleteEnabled = chapterSyncConfig?.sync_on_delete_enabled !== false;
         const hasActiveProject = Boolean(
             typeof getActiveProjectId === 'function'
                 ? getActiveProjectId()
@@ -843,6 +846,37 @@ async function loadKnowledgeBaseSettings() {
                             <span class="settings-status-text">${hasActiveProject ? (autoSummaryEnabled ? '已启用' : '未启用') : '请先选择项目后再配置'}</span>
                         </label>
                     </div>
+                </div>
+
+                <div class="setting-section settings-section-panel settings-section-panel--spacious">
+                    <div class="settings-section-header">
+                        <h3 class="settings-section-title">
+                            <i class="ri-node-tree" style="color: #10b981;"></i>
+                            章节知识同步
+                            <span class="settings-badge ${autoVectorSyncEnabled ? 'settings-badge--success' : 'settings-badge--muted'}" id="cks-status-badge" style="margin-left: 8px;">${autoVectorSyncEnabled ? '自动同步' : '手动同步'}</span>
+                        </h3>
+                        <button id="rebuild-chapter-knowledge-btn" class="settings-button settings-button--sm" ${hasActiveProject ? '' : 'disabled'}>
+                            <i class="ri-refresh-line"></i> 重建全文索引
+                        </button>
+                    </div>
+                    <p class="settings-note">
+                        正文全文进入向量库用于查找原文细节；章节摘要进入 Wiki 用于剧情关系和伏笔关联。
+                    </p>
+                    <div class="settings-stack" style="margin-top: 12px;">
+                        <label class="settings-checkbox-label" style="${hasActiveProject ? '' : 'opacity: 0.6;'}">
+                            <input type="checkbox" id="cks-auto-vector-sync-toggle" class="settings-checkbox" ${autoVectorSyncEnabled ? 'checked' : ''} ${hasActiveProject ? '' : 'disabled'}>
+                            <span class="settings-status-text">写完/导入章节后同步正文全文向量</span>
+                        </label>
+                        <label class="settings-checkbox-label" style="${hasActiveProject ? '' : 'opacity: 0.6;'}">
+                            <input type="checkbox" id="cks-sync-edit-toggle" class="settings-checkbox" ${syncOnEditEnabled ? 'checked' : ''} ${hasActiveProject ? '' : 'disabled'}>
+                            <span class="settings-status-text">编辑章节后更新对应索引</span>
+                        </label>
+                        <label class="settings-checkbox-label" style="${hasActiveProject ? '' : 'opacity: 0.6;'}">
+                            <input type="checkbox" id="cks-sync-delete-toggle" class="settings-checkbox" ${syncOnDeleteEnabled ? 'checked' : ''} ${hasActiveProject ? '' : 'disabled'}>
+                            <span class="settings-status-text">删除章节后清理对应索引</span>
+                        </label>
+                    </div>
+                    <div id="chapter-knowledge-sync-result" style="display: none; margin-top: 12px;"></div>
                 </div>
 
                 <div class="setting-section settings-section-panel settings-section-panel--spacious">

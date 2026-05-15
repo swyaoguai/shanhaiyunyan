@@ -358,6 +358,20 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         lines = [f"{k}={v}" for k, v in env_content.items()]
         _atomic_write_text(env_path, "\n".join(lines), old_content=old_env_content)
 
+        try:
+            import os as _os
+
+            for key, value in env_content.items():
+                _os.environ[key] = value
+            from ...knowledge_runtime import sync_knowledge_runtime_to_router
+            from ...project_manager import get_project_manager
+
+            pm = get_project_manager()
+            if pm.current_project_id:
+                sync_knowledge_runtime_to_router(pm.current_project_id, data_dir=pm.data_dir)
+        except Exception as exc:
+            logger.warning(f"[Knowledge] 运行态知识库刷新失败: {exc}")
+
         return JSONResponse({"success": True, "message": "知识库配置已保存"})
     except Exception as e:
         logger.error(f"[Knowledge] 保存知识库配置失败: {e}")
@@ -677,9 +691,9 @@ async def save_infinite_summary(request: dict):
         )
 
     try:
-        from ...knowledge_base import KnowledgeBase
+        from ...knowledge_runtime import create_project_knowledge_base
 
-        kb = KnowledgeBase(project_id=project_id, use_mock_embeddings=False)
+        kb = create_project_knowledge_base(project_id, data_dir=pm.data_dir, use_mock_embeddings=False)
         result = kb.add_chapter(
             chapter_id=chapter_id,
             title=chapter_title,

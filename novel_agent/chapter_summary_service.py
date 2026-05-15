@@ -18,7 +18,11 @@ SUMMARY_SCHEMA = {
     "summary_text": "200字以内的章节摘要",
     "key_events": "本章关键事件列表，每项不超过20字",
     "appearing_characters": "本章出场角色列表",
+    "character_state_changes": "角色状态变化列表，例如关系、能力、立场、情绪变化",
+    "foreshadowing": "本章埋下或推进的伏笔/线索列表",
+    "open_threads": "本章结束后仍未解决、后续需要回收的剧情线列表",
     "ending_hook": "本章结尾留下的悬念/钩子",
+    "links": "与角色、地点、物品、势力或事件线相关的 Wiki 双链标题列表",
 }
 
 
@@ -43,6 +47,7 @@ async def generate_chapter_summary(
 
     system_prompt = (
         "你是一个小说创作助手，负责为已完成的章节生成结构化摘要。"
+        "摘要会写入 Wiki，供后续章节自动检索和剧情回填使用，必须特别标出伏笔和未回收线索。"
         "严格按 JSON 格式输出，不要添加任何解释或额外内容。"
         f"输出格式要求：\n{schema_desc}"
     )
@@ -73,10 +78,13 @@ async def generate_chapter_summary(
             parsed["chapter_number"] = chapter_number
             parsed.setdefault("title", f"第{chapter_number}章摘要")
             parsed.setdefault("links", [])
-            parsed.setdefault("vector_text", f"第{chapter_number}章 {title} {parsed.get('summary_text', '')}")
             parsed.setdefault("appearing_characters", [])
             parsed.setdefault("key_events", [])
+            parsed.setdefault("character_state_changes", [])
+            parsed.setdefault("foreshadowing", [])
+            parsed.setdefault("open_threads", [])
             parsed.setdefault("ending_hook", "")
+            parsed.setdefault("vector_text", _build_summary_vector_text(chapter_number, title, parsed))
             return parsed
     except Exception as e:
         logger.warning(f"LLM summary generation failed: {e}")
@@ -106,6 +114,9 @@ def save_chapter_summary_to_library(
         links = _normalize_links(summary_dict.get("links") or [])
         characters = _as_list(summary_dict.get("appearing_characters"))
         key_events = _as_list(summary_dict.get("key_events"))
+        state_changes = _as_list(summary_dict.get("character_state_changes"))
+        foreshadowing = _as_list(summary_dict.get("foreshadowing"))
+        open_threads = _as_list(summary_dict.get("open_threads"))
         summary_text = str(summary_dict.get("summary_text", "") or "").strip()
 
         entry = LibraryEntry(
@@ -125,6 +136,9 @@ def save_chapter_summary_to_library(
                 "chapter_number": chapter_number,
                 "characters": characters,
                 "key_events": key_events,
+                "character_state_changes": state_changes,
+                "foreshadowing": foreshadowing,
+                "open_threads": open_threads,
             },
             created_at=_now_iso(),
             updated_at=_now_iso(),
@@ -164,6 +178,8 @@ async def index_chapter_summary_vector(project_dir: Optional[Path], summary_dict
                 "title": str(summary_dict.get("title") or "").strip(),
                 "links": _normalize_links(summary_dict.get("links") or []),
                 "appearing_characters": _as_list(summary_dict.get("appearing_characters")),
+                "foreshadowing": _as_list(summary_dict.get("foreshadowing")),
+                "open_threads": _as_list(summary_dict.get("open_threads")),
             },
         }
         vector_file = vector_dir / f"chapter_{chapter_number:03d}.json"
@@ -273,7 +289,11 @@ def _parse_summary_response(response: str) -> Optional[Dict[str, Any]]:
             "summary_text": _str(data.get("summary_text") or data.get("摘要") or data.get("章节摘要", "")),
             "key_events": _list(data.get("key_events") or data.get("关键事件", [])),
             "appearing_characters": _list(data.get("appearing_characters") or data.get("出场角色", [])),
+            "character_state_changes": _list(data.get("character_state_changes") or data.get("角色状态变化", [])),
+            "foreshadowing": _list(data.get("foreshadowing") or data.get("伏笔") or data.get("线索", [])),
+            "open_threads": _list(data.get("open_threads") or data.get("未回收线索") or data.get("遗留伏笔", [])),
             "ending_hook": _str(data.get("ending_hook") or data.get("结尾钩子", "")),
+            "links": _list(data.get("links") or data.get("关联", [])),
         }
         return result
     except (json.JSONDecodeError, ValueError):
@@ -289,9 +309,12 @@ def _fallback_summary(chapter_number: int, title: str, content: str) -> Dict[str
         "summary_text": summary_text,
         "key_events": [],
         "appearing_characters": [],
+        "character_state_changes": [],
+        "foreshadowing": [],
+        "open_threads": [],
         "ending_hook": "",
         "links": [],
-        "vector_text": f"第{chapter_number}章 {title} {summary_text}",
+        "vector_text": _build_summary_vector_text(chapter_number, title, {"summary_text": summary_text}),
     }
 
 
@@ -315,6 +338,29 @@ def _list(val: Any) -> List[str]:
 
 def _as_list(val: Any) -> List[str]:
     return _list(val)
+
+
+def _build_summary_vector_text(chapter_number: int, title: str, payload: Dict[str, Any]) -> str:
+    parts = [
+        f"第{chapter_number}章",
+        str(title or "").strip(),
+        str(payload.get("summary_text") or "").strip(),
+    ]
+    for label, key in (
+        ("关键事件", "key_events"),
+        ("角色状态变化", "character_state_changes"),
+        ("伏笔线索", "foreshadowing"),
+        ("待回收线索", "open_threads"),
+        ("结尾钩子", "ending_hook"),
+    ):
+        value = payload.get(key)
+        if isinstance(value, list):
+            text = "；".join(str(item).strip() for item in value if str(item).strip())
+        else:
+            text = str(value or "").strip()
+        if text:
+            parts.append(f"{label}: {text}")
+    return " ".join(part for part in parts if part).strip()
 
 
 def _normalize_links(val: Any) -> List[str]:
@@ -347,6 +393,9 @@ def _markdown_for_summary(entry: Any, summary_dict: Dict[str, Any]) -> str:
     summary_text = str(summary_dict.get("summary_text") or "").strip()
     key_events = _as_list(summary_dict.get("key_events"))
     characters = _as_list(summary_dict.get("appearing_characters"))
+    state_changes = _as_list(summary_dict.get("character_state_changes"))
+    foreshadowing = _as_list(summary_dict.get("foreshadowing"))
+    open_threads = _as_list(summary_dict.get("open_threads"))
     ending_hook = str(summary_dict.get("ending_hook") or "").strip()
     links = _normalize_links(summary_dict.get("links") or [])
 
@@ -357,6 +406,12 @@ def _markdown_for_summary(entry: Any, summary_dict: Dict[str, Any]) -> str:
         lines.extend(["", "## 角色", *[f"- {c if c.startswith('[[') else f'[[{c}]]'}" for c in characters]])
     if key_events:
         lines.extend(["", "## 关键事件", *[f"- {item}" for item in key_events]])
+    if state_changes:
+        lines.extend(["", "## 角色状态变化", *[f"- {item}" for item in state_changes]])
+    if foreshadowing:
+        lines.extend(["", "## 伏笔线索", *[f"- {item}" for item in foreshadowing]])
+    if open_threads:
+        lines.extend(["", "## 待回收线索", *[f"- {item}" for item in open_threads]])
     if ending_hook:
         lines.extend(["", "## 结尾钩子", ending_hook])
     if links:
@@ -397,6 +452,8 @@ def _write_chapter_summary_wiki(
         body = _markdown_for_summary(entry, summary_dict)
         characters = _as_list(summary_dict.get("appearing_characters"))
         key_events = _as_list(summary_dict.get("key_events"))
+        foreshadowing = _as_list(summary_dict.get("foreshadowing"))
+        open_threads = _as_list(summary_dict.get("open_threads"))
         summary_text = str(summary_dict.get("summary_text") or "").strip()
         links = _normalize_links(summary_dict.get("links") or [])
         frontmatter = Frontmatter(
@@ -406,7 +463,7 @@ def _write_chapter_summary_wiki(
             tags=["auto_summary", "chapter_summary"],
             chapter_number=chapter_number or None,
             entities=list(dict.fromkeys(characters + [link.strip("[]") for link in links])),
-            word_count=len(summary_text) + sum(len(item) for item in key_events),
+            word_count=len(summary_text) + sum(len(item) for item in key_events + foreshadowing + open_threads),
         )
         if store is None:
             from .wiki.wiki_compat import WikiCompatLayer

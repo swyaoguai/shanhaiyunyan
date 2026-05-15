@@ -1348,6 +1348,10 @@ class RouterAgent(BaseAgent):
         }
         
         try:
+            story_memory_result = await self._try_story_memory_action(message)
+            if story_memory_result:
+                return story_memory_result
+
             # 1. 分析意图（透明化，支持多意图拆分）
             result["routing_info"]["steps"].append({
                 "step": "intent_analysis",
@@ -1714,6 +1718,16 @@ class RouterAgent(BaseAgent):
         })
         
         return result
+
+    async def _try_story_memory_action(self, message: str) -> Optional[Dict[str, Any]]:
+        """Handle direct story-memory lookup/backfill requests before generic routing."""
+        try:
+            from ..story_memory_actions import handle_story_memory_request
+
+            return await handle_story_memory_request(self, message)
+        except Exception as exc:
+            logger.warning(f"[{self.name}] story memory action failed: {exc}")
+            return None
 
     @staticmethod
     def _delegated_task_status(delegated_result: Dict[str, Any]) -> str:

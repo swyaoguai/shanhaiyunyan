@@ -822,6 +822,76 @@ function bindKnowledgeBaseEvents() {
         }
     });
 
+    const collectChapterSyncPayload = () => ({
+        auto_vector_sync_enabled: Boolean(document.getElementById('cks-auto-vector-sync-toggle')?.checked),
+        sync_on_edit_enabled: Boolean(document.getElementById('cks-sync-edit-toggle')?.checked),
+        sync_on_delete_enabled: Boolean(document.getElementById('cks-sync-delete-toggle')?.checked)
+    });
+
+    const saveChapterSyncPayload = async (changedToggle) => {
+        const payload = collectChapterSyncPayload();
+        try {
+            const result = await saveChapterKnowledgeSyncConfig(payload);
+            const badge = document.getElementById('cks-status-badge');
+            if (badge) {
+                badge.textContent = result.auto_vector_sync_enabled ? '自动同步' : '手动同步';
+                badge.className = 'settings-badge ' + (result.auto_vector_sync_enabled ? 'settings-badge--success' : 'settings-badge--muted');
+            }
+            showToast('章节知识同步设置已保存');
+        } catch (e) {
+            if (changedToggle) changedToggle.checked = !changedToggle.checked;
+            showToast(`保存章节同步设置失败: ${e.message}`, 'error');
+        }
+    };
+
+    [
+        'cks-auto-vector-sync-toggle',
+        'cks-sync-edit-toggle',
+        'cks-sync-delete-toggle'
+    ].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', (event) => {
+            saveChapterSyncPayload(event.currentTarget);
+        });
+    });
+
+    document.getElementById('rebuild-chapter-knowledge-btn')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        const resultEl = document.getElementById('chapter-knowledge-sync-result');
+        if (!confirm('确定要按当前章节正文重建全文知识索引吗？')) {
+            return;
+        }
+        button.disabled = true;
+        button.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 重建中...';
+        if (resultEl) resultEl.style.display = 'none';
+        try {
+            const result = await rebuildChapterKnowledgeIndex();
+            const message = `已同步 ${result.synced || 0} 章，跳过 ${result.skipped || 0} 章，清理 ${result.deleted || 0} 条旧索引`;
+            if (resultEl) {
+                resultEl.innerHTML = `
+                    <div style="background: rgba(16,185,129,0.16); border: 1px solid rgba(16,185,129,0.45); border-radius: 8px; padding: 12px; color: #10b981;">
+                        <i class="ri-check-circle-line"></i> ${safeText(message)}
+                    </div>
+                `;
+                resultEl.style.display = 'block';
+            }
+            showToast(message);
+            setTimeout(() => loadKnowledgeBaseSettings(), 700);
+        } catch (e) {
+            if (resultEl) {
+                resultEl.innerHTML = `
+                    <div style="background: rgba(239,68,68,0.18); border: 1px solid rgba(239,68,68,0.45); border-radius: 8px; padding: 12px; color: #ef4444;">
+                        <i class="ri-error-warning-line"></i> 重建失败: ${safeErrorText(e)}
+                    </div>
+                `;
+                resultEl.style.display = 'block';
+            }
+            showToast(`重建失败: ${e.message}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.innerHTML = '<i class="ri-refresh-line"></i> 重建全文索引';
+        }
+    });
+
     document.getElementById('test-embedding-btn')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
         const resultEl = document.getElementById('embedding-test-result');

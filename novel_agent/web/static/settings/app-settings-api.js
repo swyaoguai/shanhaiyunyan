@@ -108,13 +108,18 @@ async function saveAgentConfig(agentId, payload) {
 }
 
 async function fetchKnowledgeBaseSettingsData() {
-    const [config, stats, chapterSummaryConfig] = await Promise.all([
+    const [config, stats, chapterSummaryConfig, chapterSyncConfig] = await Promise.all([
         apiCall('/api/knowledge-base/config'),
         apiCall('/api/knowledge-base/stats'),
-        apiCall('/api/chapter-summary-config').catch(() => ({ auto_summary_enabled: false }))
+        apiCall('/api/chapter-summary-config').catch(() => ({ auto_summary_enabled: false })),
+        apiCall('/api/chapter-knowledge-sync-config').catch(() => ({
+            auto_vector_sync_enabled: true,
+            sync_on_edit_enabled: true,
+            sync_on_delete_enabled: true
+        }))
     ]);
 
-    return { config, stats, chapterSummaryConfig };
+    return { config, stats, chapterSummaryConfig, chapterSyncConfig };
 }
 
 async function testKnowledgeBaseConnection(payload) {
@@ -146,6 +151,14 @@ async function clearKnowledgeBaseData(payload) {
     return apiCall('/api/knowledge-base/clear', 'POST', payload);
 }
 
+async function saveChapterKnowledgeSyncConfig(payload) {
+    return apiCall('/api/chapter-knowledge-sync-config', 'POST', payload);
+}
+
+async function rebuildChapterKnowledgeIndex() {
+    return apiCall('/api/chapter-knowledge-sync/rebuild', 'POST', {});
+}
+
 async function fetchSkillsSettingsData() {
     const skillsData = await apiCall('/api/skills', 'GET');
     return skillsData.skills || [];
@@ -175,6 +188,8 @@ window.testKnowledgeBaseConnection = testKnowledgeBaseConnection;
 window.saveKnowledgeBaseConfig = saveKnowledgeBaseConfig;
 window.installLocalOnnxPackage = installLocalOnnxPackage;
 window.clearKnowledgeBaseData = clearKnowledgeBaseData;
+window.saveChapterKnowledgeSyncConfig = saveChapterKnowledgeSyncConfig;
+window.rebuildChapterKnowledgeIndex = rebuildChapterKnowledgeIndex;
 window.fetchSkillsSettingsData = fetchSkillsSettingsData;
 window.deleteSkill = deleteSkill;
 window.saveSkillsConfig = saveSkillsConfig;

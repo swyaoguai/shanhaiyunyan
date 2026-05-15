@@ -478,13 +478,16 @@ class KnowledgeBaseMixin:
             return False
         
         try:
-            # 存储章节
-            self._knowledge_base.add_chapter(
+            from ..chapter_knowledge_sync import upsert_knowledge_base_chapter
+
+            # 存储章节。使用 upsert 避免同一章节被多次 add 后残留旧分块。
+            upsert_knowledge_base_chapter(
+                self._knowledge_base,
                 chapter_id=chapter_id,
                 title=title,
                 content=content,
                 chapter_number=chapter_number,
-                metadata=metadata or {}
+                metadata=metadata or {},
             )
             
             # 提取约束

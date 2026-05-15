@@ -2430,6 +2430,27 @@ async def chat(request: ChatRequest):
     targeted_command = prepared["targeted_command"]
     handled_control = prepared["handled_control"]
     creative_mode = _load_chat_creative_mode(getattr(request, "creative_mode", "auto"))
+    try:
+        from ...story_memory_actions import handle_story_memory_request
+
+        story_memory_result = await handle_story_memory_request(router_agent, processed_message)
+        if story_memory_result:
+            return JSONResponse({
+                "reply": _strip_visible_technical_markers(str(story_memory_result.get("response") or "")),
+                "is_complete": False,
+                "routed": True,
+                "routing_info": story_memory_result.get("routing_info"),
+                "delegated_result": story_memory_result.get("delegated_result"),
+                "routed_to": story_memory_result.get("routed_to"),
+                "routing": {
+                    "intent": "query_knowledge",
+                    "target_agent": "StoryMemory",
+                    "display": "故事记忆",
+                    "confidence": 0.98,
+                },
+            })
+    except Exception as exc:
+        logger.warning(f"[Chat] story memory action skipped: {exc}")
     if handled_control:
         if handled_control.get("resume_workflow"):
             return await _resume_creative_workflow_response(

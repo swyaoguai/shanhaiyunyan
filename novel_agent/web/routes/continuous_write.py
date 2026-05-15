@@ -5,9 +5,7 @@
 """
 
 import io
-import os
 import re
-import json
 import logging
 import asyncio
 import zipfile
@@ -30,7 +28,7 @@ from ..models.requests import (
     RegexReplaceRequest,
     ContinuousWriteExportRequest,
 )
-from ...constants import LLM_DEFAULTS, get_data_dir
+from ...constants import LLM_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +54,6 @@ def _wire_character_manager(writer, pm) -> None:
         logger.warning(f"[ContinuousWriter] CharacterManager初始化失败: {e}")
 _EXPORT_CHAPTER_HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s*)?第\s*\d+\s*章[^\n\r]*[\r\n]+")
 CONTINUOUS_WRITE_MAX_TOKENS_LIMIT = 8192
-
-
-def _knowledge_base_config_path() -> Path:
-    return get_data_dir() / "knowledge_base_config.json"
-
 
 def _safe_export_filename(name: str) -> str:
     cleaned = "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in (name or "").strip())
@@ -425,32 +418,19 @@ async def start_continuous_write(request: ContinuousWriteStartRequest):
     # 尝试配置知识库
     if pm.current_project_id:
         try:
-            from ...knowledge_base import KnowledgeBase
             from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE, CHROMA_IMPORT_ERROR
+            from ...knowledge_runtime import create_project_knowledge_base, has_embedding_config, load_knowledge_base_settings
             
             if not CHROMA_AVAILABLE:
                 logger.error(f"[ContinuousWriter] ChromaDB不可用: {CHROMA_IMPORT_ERROR}")
             else:
-                config_path = _knowledge_base_config_path()
-                
-                has_embedding_config = False
-                if config_path.exists():
-                    try:
-                        kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                        provider = str(kb_config.get("embedding_provider") or "api").lower()
-                        has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
-                        if provider in {"local", "local_onnx"}:
-                            has_embedding_config = bool(kb_config.get("onnx_model_dir"))
-                    except Exception as e:
-                        logger.warning(f"[ContinuousWriter] 读取知识库配置失败: {e}")
-                else:
-                    provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
-                    has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
-                    if provider in {"local", "local_onnx"}:
-                        has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
-                
-                if has_embedding_config:
-                    kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
+                kb_settings = load_knowledge_base_settings(pm.data_dir)
+                if has_embedding_config(kb_settings):
+                    kb = create_project_knowledge_base(
+                        pm.current_project_id,
+                        data_dir=pm.data_dir,
+                        use_mock_embeddings=False,
+                    )
                     writer.set_knowledge_base(kb)
                     logger.info("[ContinuousWriter] ✓ 知识库已配置（使用真实向量存储）")
                 else:
@@ -833,27 +813,16 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
     # 清理被删除章节的知识库数据
     if deleted_numbers and pm.current_project_id:
         try:
-            from ...knowledge_base import KnowledgeBase
             from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE
+            from ...knowledge_runtime import create_project_knowledge_base, has_embedding_config, load_knowledge_base_settings
             if CHROMA_AVAILABLE:
-                config_path = _knowledge_base_config_path()
-                has_embedding_config = False
-                if config_path.exists():
-                    try:
-                        kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-                        provider = str(kb_config.get("embedding_provider") or "api").lower()
-                        has_embedding_config = bool(kb_config.get("siliconflow_api_key"))
-                        if provider in {"local", "local_onnx"}:
-                            has_embedding_config = bool(kb_config.get("onnx_model_dir"))
-                    except Exception as e:
-                        logger.warning(f"[ContinuousWrite] 读取知识库配置失败: {e}")
-                else:
-                    provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
-                    has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
-                    if provider in {"local", "local_onnx"}:
-                        has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
-                if has_embedding_config:
-                    kb = KnowledgeBase(project_id=pm.current_project_id, use_mock_embeddings=False)
+                kb_settings = load_knowledge_base_settings(pm.data_dir)
+                if has_embedding_config(kb_settings):
+                    kb = create_project_knowledge_base(
+                        pm.current_project_id,
+                        data_dir=pm.data_dir,
+                        use_mock_embeddings=False,
+                    )
                     for num in deleted_numbers:
                         try:
                             kb.delete_chapter(f"chapter_{num}")

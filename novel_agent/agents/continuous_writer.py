@@ -1476,8 +1476,11 @@ class ContinuousWriter(BaseAgent):
             return
         
         try:
-            # 存储章节内容
-            self.knowledge_base.add_chapter(
+            from ..chapter_knowledge_sync import upsert_knowledge_base_chapter
+
+            # 存储章节内容。使用 upsert 避免重写章节时残留旧向量分块。
+            upsert_knowledge_base_chapter(
+                self.knowledge_base,
                 chapter_id=f"chapter_{chapter_data['chapter_number']}",
                 title=chapter_data["title"],
                 content=chapter_data["content"],
