@@ -1,288 +1,249 @@
 # 山海·云烟
 
-一个本地运行的中文 AI 小说创作工作台。
+<img src="./logo.png" alt="山海·云烟应用图标" width="96">
 
-它把“写小说”拆成几个真实可操作的工作区：项目、章节、资料库、Copilot、多 Agent 创作、无限续写、短篇创作、小说转剧本、知识库和 Wiki。应用默认跑在本机，数据默认写入仓库根目录下的 `data/`。
+山海·云烟是一个运行在本地的中文 AI 写作应用。它把小说创作过程拆成几个清楚的工作台：项目资料、章节正文、创作助手、多 Agent 流程、无限续写、短篇创作、小说转剧本、知识库和 Wiki。
 
-> 许可说明：本项目不是 MIT，也不是 OSI 意义上的开源项目。源码可见，允许非商业使用；商业使用、商业部署、SaaS 化、集成到收费产品或给客户交付，均需要事先取得书面授权。详见 [LICENSE](./LICENSE)。
+这个仓库提供的是本地应用源码。默认不提供云端账号、多用户权限、在线托管服务，也不面向公网部署。
 
-## 现在它能做什么
+## 适合谁
 
-### 写作项目
+- 想在本地整理小说项目资料的作者。
+- 想用大模型辅助长篇创作、续写和润色的人。
+- 想把角色、世界观、事件线、章纲、正文摘要集中管理的人。
+- 想把小说文本转换成剧本格式，或单独完成短篇创作流程的人。
+- 想研究一个本地 AI 写作工作台如何组织 Router、Agent、资料库和前端的人。
 
-- 创建和切换多个小说项目。
-- 管理章节、角色档案、世界观设定、物品、事件线、细纲、章纲和正文摘要。
-- 将项目资料保存为本地 JSON 数据。
-- 导入小说、导出备份、恢复备份。
+## 主要能力
 
-### Copilot
+### 项目资料
 
-- 在右侧面板和写作助手对话。
-- 支持流式回复、会话列表、模型切换。
-- 支持 `@` 引用角色、章节、世界观、设定等项目资料。
-- 可以让助手整理资料、续写、润色、生成角色或进入创作流程。
+每个小说项目都有独立的数据目录。项目内可以管理：
 
-### 多 Agent 创作
+- 大纲
+- 角色档案
+- 世界观设定
+- 道具物品
+- 事件线
+- 细纲设定
+- 章纲设定
+- 正文摘要
+- 自定义资料
 
-当前代码里实际存在并参与流程的创作角色包括：
+这些内容会保存到本地 `data/projects/<project_id>/`，不会默认上传到任何云服务。
 
-- `WorldbuilderAgent`：世界观构建。
-- `OutlinerAgent`：大纲规划。
-- `ChapterWriterAgent`：章节撰写。
-- `PolisherAgent`：文本润色。
-- `EvaluatorAgent`：质量评估。
-- `CharacterBuilderAgent`：角色档案生成。
-- `ChapterSettingBuilderAgent`：章纲设定生成。
-- `RouterAgent`：识别用户意图并把请求分发到对应流程。
-- `NovelCoordinator`：协调创作状态、检查点、上下文和各 Agent。
+### 创作助手
 
-这些能力主要通过 Web UI、Copilot 和 FastAPI 路由组合使用。
+右侧 Copilot 面板用于日常对话和创作操作。它支持：
+
+- 多轮对话
+- 流式输出
+- 会话管理
+- 快速切换模型
+- `@` 引用项目中的角色、章节和设定
+- 将创作结果同步回资料库或章节
+
+### 本地多 Agent 流程
+
+项目内的创作流程由本地 Router 和协调器组织，不实现 A2A 协议，也不预留对外互通层。
+
+当前主要角色包括：
+
+- `RouterAgent`：判断用户意图，决定进入聊天、资料生成、续写、润色或创作流程。
+- `NovelCoordinator`：管理创作状态、检查点、上下文和任务执行。
+- `WorldbuilderAgent`：生成世界观。
+- `OutlinerAgent`：生成大纲和结构。
+- `ChapterWriterAgent`：撰写章节。
+- `PolisherAgent`：润色文本。
+- `EvaluatorAgent`：评估质量与一致性。
+- `CharacterBuilderAgent`：生成角色档案。
+- `ChapterSettingBuilderAgent`：生成章纲。
 
 ### 无限续写
 
-- 新建或导入续写会话。
-- 基于当前上下文继续生成章节。
-- 用灵感、纠偏意见影响后续创作。
-- 停止、恢复、同步、重写章节。
-- 编辑章节内容。
-- 标记死亡角色，减少后续误用。
-- 导出 TXT、Markdown、DOCX。
+无限续写是单独的写作工作台，适合持续生成章节。它支持：
+
+- 新建或导入续写会话
+- 按上下文继续写
+- 按灵感或纠偏意见调整方向
+- 重写章节
+- 编辑章节
+- 标记死亡角色
+- 导出 TXT、Markdown、DOCX
 
 ### 短篇创作
 
-短篇模块是一个独立流程，不是简单聊天框。它包含：
+短篇创作不是一条简单提示词，而是分步骤流程：
 
-- 输入材料分析。
-- 融合方案生成和选择。
-- 梗概生成和选择。
-- 大纲生成、确认、占位修复。
-- 单章或全章生成。
-- 质量检查、连贯性复审、简单修复。
-- 标题和标签生成。
-- 成稿组装与导出。
+- 分析输入材料
+- 生成融合方案
+- 生成梗概
+- 生成大纲
+- 生成章节
+- 做质量检查和连贯性复审
+- 生成标题和标签
+- 组装并导出成稿
 
 ### 小说转剧本
 
-- 上传或导入小说文本。
-- 整体转换或按章节批次转换。
-- 对失败或不满意的批次重新转换。
-- 保存工作台状态。
-- 导出 TXT、Markdown、DOCX。
+小说转剧本工作台支持导入文本，按整体或章节批次转换，并可对不满意的批次重新转换。结果可以导出为 TXT、Markdown 或 DOCX。
 
-### 资料库、知识库、Wiki
+### 知识库与 Wiki
 
-这三个概念在项目里不是同一个东西：
+项目里有两套辅助知识能力：
 
-- 资料库：写作生产资料，如角色、世界观、事件线、章纲等。
-- 知识库：文档导入、分块、向量检索、全文检索和章节索引。
-- Wiki：页面化知识中心，支持页面、搜索、图谱、反向链接、lint、review 和 ingest。
+- 知识库：用于导入文档、分块、向量检索、全文检索和章节索引。
+- Wiki：用于页面化管理知识，支持页面编辑、搜索、图谱、反向链接、lint、review 和 ingest。
 
-知识库嵌入支持两种来源：
+知识库嵌入来源可以使用硅基流动 API，也可以安装本地 ONNX 模型包。
 
-- 硅基流动 API 嵌入模型。
-- 本地 ONNX 嵌入模型包。
+## 运行方式
 
-### 设置
-
-设置页目前包含：
-
-- 主题和背景。
-- 全局 API 配置。
-- 多 API 配置和模型列表。
-- 单 Agent 模型覆盖。
-- 知识库嵌入来源。
-- 正则替换规则。
-- Skills 和热点配置。
-- 备份、资源和写作相关配置。
-
-主流程支持的模型接口类型：
-
-- OpenAI Chat Completions 兼容接口。
-- OpenAI Responses 接口。
-- Anthropic Messages 接口。
-
-## 它不是什么
-
-- 它不是云服务，不提供多租户账号系统。
-- 它不是已经加固好的公网服务。
-- 它不是无需配置 API Key 的离线大模型应用。
-- 它不是纯前端项目，必须运行 Python 后端。
-- 它不是 MIT/Apache 这类宽松开源授权项目。
-
-如果要部署给多人或开放到公网，需要自行补认证、HTTPS、权限、反向代理、备份和安全审计。
-
-## 快速运行
-
-### 1. 安装 Python 依赖
+准备 Python 3.10 或更高版本。
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 准备配置文件
+复制环境变量文件：
 
 ```bash
 cp .env.example .env
 ```
 
-PowerShell：
+Windows PowerShell：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-最小配置：
+最小 API 配置示例：
 
 ```env
-OPENAI_API_KEY=你的 Key
+OPENAI_API_KEY=你的 API Key
 OPENAI_API_BASE=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4
 HOST=0.0.0.0
 PORT=5656
 ```
 
-也可以先启动应用，再进入「设置」添加 API 配置。
-
-### 3. 启动
+启动：
 
 ```bash
 python run.py
 ```
 
-Windows 也可以双击：
+Windows 也可以使用：
 
 ```text
 启动山海·云烟.bat
 ```
 
-默认访问：
+默认地址：
 
 ```text
 http://localhost:5656
 ```
 
-如果 `5656` 被占用，启动脚本会自动尝试后续端口，以终端显示的地址为准。
+如果端口被占用，启动脚本会自动寻找后续可用端口，请以终端输出为准。
 
-## 常用命令
+## 配置模型
 
-打包 Windows 便携版：
+可以在 `.env` 中写入基础配置，也可以启动后在「设置」里管理 API。
+
+当前主流程支持：
+
+- OpenAI Chat Completions 兼容接口
+- OpenAI Responses 接口
+- Anthropic Messages 接口
+
+设置页可以维护多个 API 配置、模型列表、激活配置，以及为不同 Agent 指定不同模型。
+
+## 打包
+
+Windows 便携版打包入口：
 
 ```bash
 pip install pyinstaller
 python build_portable.py
 ```
 
-## 代码入口
+打包脚本会复制静态资源、模板、提示词、Skills、干净的发布数据副本，并使用根目录的 `logo.ico` 作为应用图标。
+
+## 目录说明
 
 ```text
 run.py
-  启动入口。加载 .env，检查数据目录权限，寻找可用端口，启动 Uvicorn。
+  应用启动入口。
 
 novel_agent/web/app.py
-  FastAPI 应用工厂。注册中间件、静态资源、模板、生命周期和路由。
+  FastAPI 应用工厂。
 
 novel_agent/web/routes/
-  Web API 路由。包含创作、聊天、设置、项目、知识库、Wiki、短篇、小说转剧本等模块。
-
-novel_agent/web/templates/index.html
-  主页面壳。按顺序加载前端静态脚本。
+  Web API 路由。
 
 novel_agent/web/static/
-  原生 JavaScript 前端模块。没有 React/Vue。
+  原生 JavaScript 前端模块。
 
-novel_agent/workflow/coordinator.py
-  多 Agent 创作协调器。
+novel_agent/web/templates/index.html
+  主页面模板。
 
-novel_agent/agents/router_agent.py
-  Copilot 请求和创作请求的意图路由。
+novel_agent/agents/
+  Router、创作 Agent、LLM 客户端和消息总线。
 
-novel_agent/project_manager.py
-  多项目与项目数据文件管理。
+novel_agent/workflow/
+  创作协调器、任务池、工作流和运行状态。
 
 novel_agent/knowledge_base/
   向量检索、全文检索、元数据和混合检索。
 
 novel_agent/wiki/
-  Wiki 页面存储、图谱、检索、lint、review 和迁移。
-```
+  Wiki 页面、图谱、检索、审核和迁移。
 
-## 目录速览
+skills/
+  本地 Skill 目录。
 
-```text
-.
-├── run.py
-├── build_portable.py
-├── clean_for_release.py
-├── requirements.txt
-├── novel_agent/
-│   ├── agents/
-│   ├── workflow/
-│   ├── web/
-│   ├── knowledge_base/
-│   ├── wiki/
-│   ├── prompts/
-│   ├── context/
-│   └── utils/
-├── skills/
-├── docs/
-└── data/
-```
-
-## 本地数据
-
-默认数据位置：
-
-```text
 data/
-├── projects.json
-├── projects/<project_id>/
-├── stats/
-├── sessions/
-└── logs/
+  本地项目数据，默认不提交。
 ```
 
-这些数据包含你的项目内容、会话、统计和日志，默认被 `.gitignore` 忽略。公开仓库前不要提交 `.env`、`data/`、日志、构建产物或私人项目素材。
+## 本地数据与安全
 
-本地开发用的测试目录、GitHub 工作流目录和测试配置可以保留在工作区，但默认不纳入公开仓库。
+默认数据目录是 `data/`。这里会保存项目内容、章节、会话、统计、日志和知识库数据。
 
-## Skills
+不要把以下内容上传到公开仓库：
 
-仓库包含本地 `skills/` 目录。当前默认配置涉及：
+- `.env`
+- `data/`
+- 日志文件
+- 构建产物
+- 私人项目素材
+- 本地测试目录和测试配置
+- GitHub 个人访问令牌或其他凭证
 
-- `agent_reach`：网络搜索。
-- `trends_search`：热点趋势搜索。
+本应用默认面向本机单用户使用。如果要部署到局域网或公网，请自行增加认证、HTTPS、访问控制、备份和安全审计。
 
-Skills 会由后端扫描 `skills/<skill>/SKILL.md` 和脚本服务加载。是否可用取决于本地配置和依赖。
+## 许可
 
-## 打包说明
+本项目采用自定义非商业源码许可。
 
-`build_portable.py` 会：
+允许：
 
-- 准备干净的发布数据副本。
-- 使用 PyInstaller 打包 `run.py`。
-- 打包静态资源、模板、提示词和 Skills。
-- 使用 `logo.ico` 作为 Windows 图标。
-- 生成便携版目录和压缩包。
+- 个人学习
+- 研究
+- 评估
+- 非商业创作
+- 非商业目的下的修改和分发
 
-打包脚本不会把你的开发环境 `data/` 直接塞进发布包。
+禁止未经授权：
 
-## 贡献前先知道
+- 商业部署
+- 商业集成
+- SaaS 化提供
+- 用于客户项目
+- 用于收费内容生产服务
+- 打包售卖
 
-- 前端脚本加载顺序很重要，见 `novel_agent/web/templates/index.html`。
-- 修改设置功能时通常要同时看 `web/routes/settings.py` 和 `web/static/settings/*`。
-- 修改项目资料库时通常要同时看 `web/routes/projects.py`、`library_service` 和 `web/static/app-knowledge.js`。
-- 修改创作流程时通常要同时看 `RouterAgent`、`NovelCoordinator`、`workflow/` 和相关测试。
-- 写入 JSON 时优先使用项目内原子写入工具，避免运行中损坏数据。
+商业使用需要事先取得书面授权。完整条款见 [LICENSE](./LICENSE)。
 
-## 许可与商用
-
-本项目使用自定义非商业源码许可，完整条款见 [LICENSE](./LICENSE)。
-
-简单说：
-
-- 可以个人学习、研究、评估、非商业创作。
-- 可以为非商业目的复制、修改和分发，但必须保留许可证和署名。
-- 不可以未经授权用于商业部署、商业集成、SaaS、客户项目、付费内容生产服务或打包售卖。
-- 商业使用请先取得书面授权。
-
-第三方依赖、图标、字体、模型文件和外部 API 服务仍受其各自条款约束。
+第三方依赖、模型、图标、字体和外部 API 服务仍受其各自许可证或服务条款约束。
