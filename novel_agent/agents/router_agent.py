@@ -27,6 +27,7 @@ from ..content_sanitizer import strip_internal_author_markers
 from ..outline_utils import (
     build_outline_overview_row,
     derive_chapter_seed_rows_from_outline,
+    enrich_eventlines_with_character_participants,
     extract_outline_chapter_rows,
     extract_eventlines_from_outline,
     merge_eventline_rows,
@@ -3442,8 +3443,11 @@ class RouterAgent(BaseAgent):
             return {"eventline_count": 0, "status": "skipped"}
 
         pm = get_project_manager()
+        character_rows = pm.load_project_data("characters")
+        generated_rows = enrich_eventlines_with_character_participants(generated_rows, character_rows)
         existing_rows = pm.load_project_data("eventlines")
         merged_rows = merge_eventline_rows(existing_rows, generated_rows)
+        merged_rows = enrich_eventlines_with_character_participants(merged_rows, character_rows)
         if merged_rows != existing_rows:
             try:
                 from ..library_service import get_library_service

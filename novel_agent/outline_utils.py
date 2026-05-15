@@ -666,6 +666,49 @@ def merge_eventline_rows(
     return _dedupe_eventline_rows(merged)
 
 
+def enrich_eventlines_with_character_participants(
+    eventline_rows: Any,
+    character_rows: Any,
+) -> List[Dict[str, Any]]:
+    """Fill eventline participants by matching known character names in thread text.
+
+    This is intentionally conservative: it only uses names already present in
+    the project's character archive, and it appends missing matches without
+    removing anything the user has typed by hand.
+    """
+    rows = [dict(row) for row in eventline_rows if isinstance(row, dict)] if isinstance(eventline_rows, list) else []
+    character_names = _extract_character_names_for_eventlines(character_rows)
+    if not rows or not character_names:
+        return rows
+
+    enriched: List[Dict[str, Any]] = []
+    for row in rows:
+        participants = _split_eventline_participants(row.get("participants"))
+        search_text = "\n".join(
+            humanize_structured_value(row.get(key)).strip()
+            for key in (
+                "name",
+                "title",
+                "thread_title",
+                "description",
+                "summary",
+                "conflict",
+                "core_conflict",
+                "objective",
+                "content",
+                "notes",
+            )
+            if not _is_empty_project_value(row.get(key))
+        )
+        for name in character_names:
+            if name in search_text and name not in participants:
+                participants.append(name)
+        if participants:
+            row["participants"] = "、".join(participants)
+        enriched.append(row)
+    return enriched
+
+
 def _collect_outline_eventline_entries(data: Dict[str, Any]) -> List[Any]:
     collected: List[Any] = []
     for key in (
@@ -873,6 +916,58 @@ def _eventline_merge_keys(row: Dict[str, Any]) -> List[str]:
         if value and value not in keys:
             keys.append(value)
     return keys
+
+
+def _extract_character_names_for_eventlines(character_rows: Any) -> List[str]:
+    keyed_names: List[str] = []
+    if isinstance(character_rows, dict):
+        raw_characters = character_rows.get("characters")
+        if isinstance(raw_characters, dict):
+            keyed_names = [str(key).strip() for key in raw_characters.keys() if str(key).strip()]
+            rows = list(raw_characters.values())
+        elif isinstance(raw_characters, list):
+            rows = raw_characters
+        else:
+            if character_rows.get("name") or character_rows.get("character_name"):
+                rows = [character_rows]
+            else:
+                keyed_names = [str(key).strip() for key in character_rows.keys() if str(key).strip()]
+                rows = list(character_rows.values())
+    elif isinstance(character_rows, list):
+        rows = character_rows
+    else:
+        rows = []
+
+    names: List[str] = []
+    for name in keyed_names:
+        if name and name not in names:
+            names.append(name)
+    for row in rows:
+        if isinstance(row, str):
+            name = row.strip()
+        elif isinstance(row, dict):
+            name = str(row.get("name") or row.get("character_name") or "").strip()
+        else:
+            continue
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _split_eventline_participants(value: Any) -> List[str]:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        text = str(value or "").strip()
+        if not text or is_pending_text(text):
+            return []
+        parts = [part.strip() for part in re.split(r"[\n,，、;；]+", text) if part.strip()]
+
+    result: List[str] = []
+    for part in parts:
+        if part not in result:
+            result.append(part)
+    return result
 
 
 def _first_outline_text(source: Dict[str, Any], *keys: str) -> str:

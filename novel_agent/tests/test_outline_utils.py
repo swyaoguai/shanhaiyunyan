@@ -4,6 +4,7 @@ from novel_agent.outline_utils import (
     build_global_outline_text,
     build_outline_overview_row,
     derive_chapter_seed_rows_from_outline,
+    enrich_eventlines_with_character_participants,
     extract_eventlines_from_outline,
     extract_outline_chapter_rows,
     format_outline_volume_plan,
@@ -188,6 +189,36 @@ def test_eventlines_are_extracted_from_explicit_outline_threads():
     assert rows[0]["target_return_chapter"] == 5
     assert rows[0]["participants"] == "吴迪、秦掌柜"
     assert any(row.get("source_scope") == "volume_foreshadowing" for row in rows)
+
+
+def test_eventline_participants_are_inferred_from_character_archive():
+    rows = [
+        {
+            "name": "从联姻到真心",
+            "description": "谢昭与苏瑾从政治联姻的客气夫妻，逐步走向真心相爱。",
+        }
+    ]
+    characters = [{"name": "谢昭"}, {"name": "苏瑾"}]
+
+    enriched = enrich_eventlines_with_character_participants(rows, characters)
+
+    assert enriched[0]["participants"] == "谢昭、苏瑾"
+    assert "participants" not in rows[0]
+
+
+def test_eventline_participant_inference_preserves_manual_entries():
+    rows = [
+        {
+            "name": "苏家危机",
+            "description": "王太师党羽设计诬陷苏家，谢昭全力护妻。",
+            "participants": "苏瑾",
+        }
+    ]
+    characters = {"characters": {"谢昭": {"name": "谢昭"}, "苏瑾": {"name": "苏瑾"}}}
+
+    enriched = enrich_eventlines_with_character_participants(rows, characters)
+
+    assert enriched[0]["participants"] == "苏瑾、谢昭"
 
 
 def test_outline_eventline_merge_preserves_user_fields():

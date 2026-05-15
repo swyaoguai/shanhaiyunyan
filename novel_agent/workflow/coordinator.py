@@ -41,6 +41,7 @@ from ..content_sanitizer import strip_internal_author_markers
 from ..outline_utils import (
     build_outline_overview_row,
     derive_chapter_seed_rows_from_outline,
+    enrich_eventlines_with_character_participants,
     extract_outline_chapter_rows,
     extract_eventlines_from_outline,
     merge_eventline_rows,
@@ -350,8 +351,11 @@ class NovelCoordinator:
         if not generated_rows:
             return {"eventline_count": 0, "status": "skipped"}
 
+        character_rows = self.project_manager.load_project_data("characters")
+        generated_rows = enrich_eventlines_with_character_participants(generated_rows, character_rows)
         existing_rows = self.project_manager.load_project_data("eventlines")
         merged_rows = merge_eventline_rows(existing_rows, generated_rows)
+        merged_rows = enrich_eventlines_with_character_participants(merged_rows, character_rows)
         if merged_rows != existing_rows:
             self.project_manager.save_project_data("eventlines", merged_rows)
             self._sync_eventlines_to_library(merged_rows)
