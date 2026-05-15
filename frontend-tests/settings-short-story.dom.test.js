@@ -376,6 +376,125 @@ describe('settings DOM regressions', () => {
     });
   });
 
+  it('opens a categorized picker for fetched models instead of auto-adding them', async () => {
+    document.body.innerHTML = window.renderGlobalApiSettingsView({
+      configs: [],
+      activeConfig: null,
+      activeConfigId: '',
+      activeModel: '',
+      hasConfigs: false,
+      llmTimeouts: {},
+      shortStoryTimeouts: {},
+      llmRanges: {},
+      shortStoryRange: { min: 30, max: 600 }
+    });
+
+    window.apiCall = vi.fn(async (url, method, body) => {
+      if (url === '/api/models' && method === 'POST') {
+        expect(body).toMatchObject({
+          api_base: 'https://api.example.com/v1',
+          api_key: 'sk-one',
+          api_type: 'openai_chat'
+        });
+        return {
+          success: true,
+          models: ['gpt-5.4', 'claude-sonnet-4', 'deepseek-chat', 'gpt-5.4']
+        };
+      }
+      throw new Error(`Unexpected API call: ${url}`);
+    });
+    window.showToast = vi.fn();
+    window.eval('currentApiConfigs = []; editingConfigId = null;');
+
+    window.bindGlobalAPISettingsEvents({});
+    document.getElementById('add-new-config')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.getElementById('config-api-base').value = 'https://api.example.com/v1';
+    document.getElementById('config-api-key').value = 'sk-one';
+    document.getElementById('fetch-models-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(document.getElementById('fetched-model-picker')).not.toBeNull();
+    });
+
+    expect(document.querySelectorAll('#models-container .model-tag')).toHaveLength(0);
+    expect(document.body.textContent).toContain('OpenAI (1)');
+    expect(document.body.textContent).toContain('Anthropic (1)');
+    expect(document.body.textContent).toContain('DeepSeek (1)');
+    expect(document.body.textContent).toContain('新获取的模型 (3)');
+
+    document.querySelector('.model-picker-model-check[value="gpt-5.4"]')?.click();
+    document.getElementById('confirm-model-picker')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(Array.from(document.querySelectorAll('#models-container .model-tag')).map((node) => node.dataset.model))
+      .toStrictEqual(['gpt-5.4']);
+    expect(document.getElementById('fetched-model-picker')).toBeNull();
+  });
+
+  it('keeps existing fetched models out of the selectable add list', async () => {
+    const configs = [
+      {
+        id: 'cfg-existing',
+        name: '已有配置',
+        api_base: 'https://api.example.com/v1',
+        models: ['gpt-5.4'],
+        api_key_set: true
+      }
+    ];
+    document.body.innerHTML = window.renderGlobalApiSettingsView({
+      configs,
+      activeConfig: configs[0],
+      activeConfigId: 'cfg-existing',
+      activeModel: 'gpt-5.4',
+      hasConfigs: true,
+      llmTimeouts: {},
+      shortStoryTimeouts: {},
+      llmRanges: {},
+      shortStoryRange: { min: 30, max: 600 }
+    });
+
+    window.apiCall = vi.fn(async (url, method, body) => {
+      if (url === '/api/models' && method === 'POST') {
+        expect(body).toMatchObject({
+          config_id: 'cfg-existing',
+          api_base: 'https://api.example.com/v1',
+          api_key: '',
+          api_type: 'openai_chat'
+        });
+        return {
+          success: true,
+          models: ['gpt-5.4', 'gpt-5.5', 'claude-sonnet-4']
+        };
+      }
+      throw new Error(`Unexpected API call: ${url}`);
+    });
+    window.showToast = vi.fn();
+    window.eval(`currentApiConfigs = ${JSON.stringify(configs)}; editingConfigId = null;`);
+
+    window.bindGlobalAPISettingsEvents({});
+    document.querySelector('.edit-config-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.getElementById('fetch-models-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(document.getElementById('fetched-model-picker')).not.toBeNull();
+    });
+
+    expect(document.body.textContent).toContain('新获取的模型 (2)');
+    expect(document.body.textContent).toContain('已有的模型 (1)');
+    expect(Array.from(document.querySelectorAll('#models-container .model-tag')).map((node) => node.dataset.model))
+      .toStrictEqual(['gpt-5.4']);
+
+    document.querySelector('[data-model-picker-tab="existing"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(document.querySelector('.model-picker-model-check[value="gpt-5.4"]')?.disabled).toBe(true);
+    expect(document.body.textContent).toContain('已存在');
+
+    document.querySelector('[data-model-picker-tab="new"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.getElementById('model-picker-select-visible')?.click();
+    document.getElementById('confirm-model-picker')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(Array.from(document.querySelectorAll('#models-container .model-tag')).map((node) => node.dataset.model))
+      .toStrictEqual(['gpt-5.4', 'gpt-5.5', 'claude-sonnet-4']);
+  });
+
   it('renders colloquial test-result entry in API settings', () => {
     document.body.innerHTML = window.renderGlobalApiSettingsView({
       configs: [

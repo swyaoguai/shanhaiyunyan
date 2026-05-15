@@ -318,6 +318,236 @@ function buildConfigApiKeyEntries(keys) {
     }));
 }
 
+const MODEL_PROVIDER_GROUPS = [
+    {
+        key: 'anthropic',
+        label: 'Anthropic',
+        rank: 10,
+        test: (model) => model.includes('claude') || model.includes('anthropic')
+    },
+    {
+        key: 'gemini',
+        label: 'Gemini',
+        rank: 20,
+        test: (model) => model.includes('gemini') || model.includes('google/')
+    },
+    {
+        key: 'openai',
+        label: 'OpenAI',
+        rank: 30,
+        test: (model) => /(^|[/\[])(gpt|o[1345]|chatgpt|dall-e|text-embedding|whisper)/.test(model) || model.includes('openai')
+    },
+    {
+        key: 'deepseek',
+        label: 'DeepSeek',
+        rank: 40,
+        test: (model) => model.includes('deepseek')
+    },
+    {
+        key: 'zhipu',
+        label: '智谱',
+        rank: 50,
+        test: (model) => model.includes('zhipu') || model.includes('glm') || model.includes('chatglm')
+    },
+    {
+        key: 'moonshot',
+        label: 'Moonshot',
+        rank: 60,
+        test: (model) => model.includes('moonshot') || model.includes('kimi')
+    },
+    {
+        key: 'minimax',
+        label: 'MiniMax',
+        rank: 70,
+        test: (model) => model.includes('minimax') || model.includes('abab')
+    },
+    {
+        key: 'qwen',
+        label: '通义千问',
+        rank: 80,
+        test: (model) => model.includes('qwen') || model.includes('tongyi') || model.includes('dashscope')
+    },
+    {
+        key: 'meta',
+        label: 'Meta / Llama',
+        rank: 90,
+        test: (model) => model.includes('llama') || model.includes('meta-')
+    },
+    {
+        key: 'mistral',
+        label: 'Mistral',
+        rank: 100,
+        test: (model) => model.includes('mistral') || model.includes('mixtral') || model.includes('codestral')
+    },
+    {
+        key: 'xai',
+        label: 'xAI',
+        rank: 110,
+        test: (model) => model.includes('grok') || model.includes('xai')
+    }
+];
+
+const MODEL_PROVIDER_OTHER = { key: 'other', label: '其他', rank: 999 };
+
+function normalizeModelName(model) {
+    return String(model || '').trim();
+}
+
+function dedupeModelNames(models) {
+    const seen = new Set();
+    const result = [];
+    (models || []).forEach((model) => {
+        const modelName = normalizeModelName(model);
+        if (!modelName || seen.has(modelName)) return;
+        seen.add(modelName);
+        result.push(modelName);
+    });
+    return result;
+}
+
+function getModelProviderGroup(modelName) {
+    const lowerName = normalizeModelName(modelName).toLowerCase();
+    return MODEL_PROVIDER_GROUPS.find((group) => group.test(lowerName)) || MODEL_PROVIDER_OTHER;
+}
+
+function groupModelNames(models) {
+    const groups = new Map();
+    dedupeModelNames(models).forEach((model) => {
+        const provider = getModelProviderGroup(model);
+        if (!groups.has(provider.key)) {
+            groups.set(provider.key, {
+                key: provider.key,
+                label: provider.label,
+                rank: provider.rank,
+                models: []
+            });
+        }
+        groups.get(provider.key).models.push(model);
+    });
+
+    return Array.from(groups.values())
+        .map((group) => ({
+            ...group,
+            models: group.models.sort((a, b) => a.localeCompare(b, 'zh-CN', { sensitivity: 'base' }))
+        }))
+        .sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label, 'zh-CN'));
+}
+
+function createFetchedModelPickerState(fetchedModels, currentModels) {
+    const existingSet = new Set(dedupeModelNames(currentModels));
+    const newModels = [];
+    const existingModels = [];
+
+    dedupeModelNames(fetchedModels).forEach((model) => {
+        if (existingSet.has(model)) {
+            existingModels.push(model);
+        } else {
+            newModels.push(model);
+        }
+    });
+
+    return {
+        activeTab: 'new',
+        query: '',
+        selected: new Set(),
+        expanded: new Set(groupModelNames(newModels).map((group) => group.key)),
+        newModels,
+        existingModels
+    };
+}
+
+function renderFetchedModelPicker(state) {
+    const allModels = state.activeTab === 'existing' ? state.existingModels : state.newModels;
+    const query = normalizeModelName(state.query).toLowerCase();
+    const visibleModels = query
+        ? allModels.filter((model) => model.toLowerCase().includes(query))
+        : allModels;
+    const groups = groupModelNames(visibleModels);
+    const selectedVisibleCount = visibleModels.filter((model) => state.selected.has(model)).length;
+    const selectedCount = state.newModels.filter((model) => state.selected.has(model)).length;
+    const canSelect = state.activeTab === 'new';
+
+    return `
+        <div class="model-picker" id="fetched-model-picker">
+            <div class="model-picker-header">
+                <div>
+                    <h4 class="model-picker-title">选择模型</h4>
+                    <div class="model-picker-copy">获取到的模型不会自动加入配置，请按分类勾选需要加入待选列表的模型。</div>
+                </div>
+                <button type="button" class="settings-button settings-button--ghost settings-button--sm" id="close-model-picker" aria-label="关闭模型选择">
+                    <i class="ri-close-line"></i>
+                </button>
+            </div>
+
+            <div class="model-picker-tabs" role="tablist" aria-label="模型列表类型">
+                <button type="button" class="model-picker-tab ${state.activeTab === 'new' ? 'is-active' : ''}" data-model-picker-tab="new">
+                    新获取的模型 (${state.newModels.length})
+                </button>
+                <span class="model-picker-tab-divider">/</span>
+                <button type="button" class="model-picker-tab ${state.activeTab === 'existing' ? 'is-active' : ''}" data-model-picker-tab="existing">
+                    已有的模型 (${state.existingModels.length})
+                </button>
+            </div>
+
+            <label class="model-picker-search" for="model-picker-search-input">
+                <i class="ri-search-line"></i>
+                <input type="search" id="model-picker-search-input" value="${safeAttr(state.query)}" placeholder="搜索模型">
+            </label>
+
+            <div class="model-picker-body">
+                ${groups.length === 0 ? `
+                    <div class="settings-empty-state settings-empty-state--compact">
+                        <i class="ri-inbox-line settings-empty-icon settings-empty-icon--sm"></i>
+                        <p>${state.activeTab === 'new' ? '没有可添加的新模型' : '没有匹配的已有模型'}</p>
+                    </div>
+                ` : groups.map((group) => {
+                    const expanded = state.expanded.has(group.key);
+                    const selectedInGroup = group.models.filter((model) => state.selected.has(model)).length;
+                    const groupChecked = canSelect && group.models.length > 0 && selectedInGroup === group.models.length;
+                    const groupPartial = canSelect && selectedInGroup > 0 && selectedInGroup < group.models.length;
+                    return `
+                        <section class="model-picker-group" data-group-key="${safeAttr(group.key)}">
+                            <div class="model-picker-group-header">
+                                <button type="button" class="model-picker-collapse" data-model-picker-toggle="${safeAttr(group.key)}" aria-expanded="${expanded ? 'true' : 'false'}">
+                                    <span>${safeText(group.label)} (${group.models.length})</span>
+                                    <i class="${expanded ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'}"></i>
+                                </button>
+                                <label class="model-picker-check model-picker-group-check-label" title="${canSelect ? '选择此分类下的全部可见模型' : '已有模型不会重复添加'}">
+                                    <input type="checkbox" class="model-picker-group-check" data-model-picker-group="${safeAttr(group.key)}" ${groupChecked ? 'checked' : ''} ${groupPartial ? 'data-indeterminate="true"' : ''} ${canSelect ? '' : 'disabled'}>
+                                </label>
+                            </div>
+                            ${expanded ? `
+                                <div class="model-picker-options">
+                                    ${group.models.map((model) => `
+                                        <label class="model-picker-option ${canSelect ? '' : 'is-disabled'}">
+                                            <input type="checkbox" class="model-picker-model-check" value="${safeAttr(model)}" ${state.selected.has(model) ? 'checked' : ''} ${canSelect ? '' : 'disabled'}>
+                                            <span title="${safeAttr(model)}">${safeText(model)}</span>
+                                            ${canSelect ? '' : '<em>已存在</em>'}
+                                        </label>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
+                        </section>
+                    `;
+                }).join('')}
+            </div>
+
+            <div class="model-picker-footer">
+                <label class="model-picker-check model-picker-visible-check">
+                    <input type="checkbox" id="model-picker-select-visible" ${canSelect && visibleModels.length > 0 && selectedVisibleCount === visibleModels.length ? 'checked' : ''} ${canSelect ? '' : 'disabled'}>
+                    <span>${canSelect ? `已选择 ${selectedCount} / ${state.newModels.length}` : '已有模型不会重复添加'}</span>
+                </label>
+                <div class="model-picker-actions">
+                    <button type="button" class="settings-button" id="cancel-model-picker">取消</button>
+                    <button type="button" class="settings-button settings-button--primary" id="confirm-model-picker" ${selectedCount === 0 ? 'disabled' : ''}>
+                        确定
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function showConfigEditModal(configId = null) {
     const modal = document.getElementById('config-edit-modal');
     const contentEl = document.getElementById('config-edit-content');
@@ -379,6 +609,7 @@ function showConfigEditModal(configId = null) {
                     <button id="add-model-btn" style="padding: 10px 16px; background: rgba(59,130,246,0.2); border: 1px solid rgba(59,130,246,0.5); color: #60a5fa; border-radius: 6px; cursor: pointer;"><i class="ri-add-line"></i> 添加</button>
                     <button id="fetch-models-btn" style="padding: 10px 16px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;" title="从API获取模型列表"><i class="ri-download-line"></i> 获取</button>
                 </div>
+                <div id="fetched-model-picker-container"></div>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                 <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">温度参数</label><input type="number" id="config-temperature" value="${config?.temperature ?? 0.7}" min="0" max="2" step="0.1" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
@@ -394,6 +625,130 @@ function showConfigEditModal(configId = null) {
     modal.style.display = 'flex';
 
     let currentModels = config?.models ? [...config.models] : [];
+    let fetchedModelPickerState = null;
+
+    const closeFetchedModelPicker = () => {
+        fetchedModelPickerState = null;
+        modal.querySelector('.settings-modal-card')?.classList.remove('settings-modal-card--model-picker');
+        const pickerContainer = document.getElementById('fetched-model-picker-container');
+        if (pickerContainer) {
+            pickerContainer.innerHTML = '';
+        }
+    };
+
+    const bindFetchedModelPickerEvents = () => {
+        const pickerContainer = document.getElementById('fetched-model-picker-container');
+        if (!pickerContainer || !fetchedModelPickerState) return;
+
+        pickerContainer.querySelectorAll('.model-picker-group-check[data-indeterminate="true"]').forEach((checkbox) => {
+            checkbox.indeterminate = true;
+        });
+
+        pickerContainer.querySelectorAll('[data-model-picker-tab]').forEach((button) => {
+            button.addEventListener('click', () => {
+                fetchedModelPickerState.activeTab = button.dataset.modelPickerTab || 'new';
+                fetchedModelPickerState.query = '';
+                renderFetchedModelPickerIntoContainer();
+            });
+        });
+
+        pickerContainer.querySelector('#model-picker-search-input')?.addEventListener('input', (event) => {
+            fetchedModelPickerState.query = event.target.value || '';
+            renderFetchedModelPickerIntoContainer();
+            const searchInput = document.getElementById('model-picker-search-input');
+            if (searchInput) {
+                searchInput.focus();
+                searchInput.setSelectionRange(fetchedModelPickerState.query.length, fetchedModelPickerState.query.length);
+            }
+        });
+
+        pickerContainer.querySelectorAll('[data-model-picker-toggle]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const groupKey = button.dataset.modelPickerToggle;
+                if (!groupKey) return;
+                if (fetchedModelPickerState.expanded.has(groupKey)) {
+                    fetchedModelPickerState.expanded.delete(groupKey);
+                } else {
+                    fetchedModelPickerState.expanded.add(groupKey);
+                }
+                renderFetchedModelPickerIntoContainer();
+            });
+        });
+
+        pickerContainer.querySelectorAll('.model-picker-model-check').forEach((checkbox) => {
+            checkbox.addEventListener('change', () => {
+                const model = checkbox.value;
+                if (!model) return;
+                if (checkbox.checked) {
+                    fetchedModelPickerState.selected.add(model);
+                } else {
+                    fetchedModelPickerState.selected.delete(model);
+                }
+                renderFetchedModelPickerIntoContainer();
+            });
+        });
+
+        pickerContainer.querySelectorAll('.model-picker-group-check').forEach((checkbox) => {
+            checkbox.addEventListener('change', () => {
+                const groupKey = checkbox.dataset.modelPickerGroup;
+                if (!groupKey || fetchedModelPickerState.activeTab !== 'new') return;
+                const query = normalizeModelName(fetchedModelPickerState.query).toLowerCase();
+                const groupModels = fetchedModelPickerState.newModels.filter((model) => {
+                    const matchesQuery = !query || model.toLowerCase().includes(query);
+                    return matchesQuery && getModelProviderGroup(model).key === groupKey;
+                });
+                groupModels.forEach((model) => {
+                    if (checkbox.checked) {
+                        fetchedModelPickerState.selected.add(model);
+                    } else {
+                        fetchedModelPickerState.selected.delete(model);
+                    }
+                });
+                renderFetchedModelPickerIntoContainer();
+            });
+        });
+
+        pickerContainer.querySelector('#model-picker-select-visible')?.addEventListener('change', (event) => {
+            if (fetchedModelPickerState.activeTab !== 'new') return;
+            const query = normalizeModelName(fetchedModelPickerState.query).toLowerCase();
+            const visibleModels = query
+                ? fetchedModelPickerState.newModels.filter((model) => model.toLowerCase().includes(query))
+                : fetchedModelPickerState.newModels;
+            visibleModels.forEach((model) => {
+                if (event.target.checked) {
+                    fetchedModelPickerState.selected.add(model);
+                } else {
+                    fetchedModelPickerState.selected.delete(model);
+                }
+            });
+            renderFetchedModelPickerIntoContainer();
+        });
+
+        pickerContainer.querySelector('#close-model-picker')?.addEventListener('click', closeFetchedModelPicker);
+        pickerContainer.querySelector('#cancel-model-picker')?.addEventListener('click', closeFetchedModelPicker);
+        pickerContainer.querySelector('#confirm-model-picker')?.addEventListener('click', () => {
+            const existingSet = new Set(dedupeModelNames(currentModels));
+            const modelsToAdd = Array.from(fetchedModelPickerState.selected)
+                .filter((model) => !existingSet.has(model));
+            if (modelsToAdd.length === 0) {
+                showToast('没有选择可添加的新模型', 'error');
+                return;
+            }
+            currentModels = dedupeModelNames([...currentModels, ...modelsToAdd]);
+            renderModelTags();
+            closeFetchedModelPicker();
+            showToast(`已添加 ${modelsToAdd.length} 个模型`, 'success');
+        });
+    };
+
+    function renderFetchedModelPickerIntoContainer() {
+        const pickerContainer = document.getElementById('fetched-model-picker-container');
+        if (!pickerContainer || !fetchedModelPickerState) return;
+        modal.querySelector('.settings-modal-card')?.classList.add('settings-modal-card--model-picker');
+        pickerContainer.innerHTML = renderFetchedModelPicker(fetchedModelPickerState);
+        bindFetchedModelPickerEvents();
+    }
+
     const renderModelTags = () => {
         document.getElementById('models-container').innerHTML = currentModels.map((model) => `
             <span class="model-tag" data-model="${safeAttr(model)}" style="background: rgba(59,130,246,0.2); color: #60a5fa; padding: 6px 12px; border-radius: 6px; font-size: 13px; display: flex; align-items: center; gap: 6px;">
@@ -405,12 +760,13 @@ function showConfigEditModal(configId = null) {
             btn.addEventListener('click', () => {
                 currentModels = currentModels.filter((model) => model !== btn.dataset.model);
                 renderModelTags();
+                closeFetchedModelPicker();
             });
         });
     };
 
-    document.getElementById('close-config-modal')?.addEventListener('click', () => { modal.style.display = 'none'; });
-    document.getElementById('cancel-config-btn')?.addEventListener('click', () => { modal.style.display = 'none'; });
+    document.getElementById('close-config-modal')?.addEventListener('click', () => { closeFetchedModelPicker(); modal.style.display = 'none'; });
+    document.getElementById('cancel-config-btn')?.addEventListener('click', () => { closeFetchedModelPicker(); modal.style.display = 'none'; });
 
     // API类型切换事件
     document.getElementById('config-api-type')?.addEventListener('change', (event) => {
@@ -483,13 +839,13 @@ function showConfigEditModal(configId = null) {
             }
             const result = await fetchModelsForApiConfig(requestData);
             if (result.success && result.models && result.models.length > 0) {
-                result.models.forEach((model) => {
-                    if (!currentModels.includes(model)) {
-                        currentModels.push(model);
-                    }
-                });
-                renderModelTags();
-                showToast(`获取到 ${result.models.length} 个模型`, 'success');
+                fetchedModelPickerState = createFetchedModelPickerState(result.models, currentModels);
+                renderFetchedModelPickerIntoContainer();
+                if (fetchedModelPickerState.newModels.length === 0) {
+                    showToast(`获取到 ${result.models.length} 个模型，均已在列表中`, 'success');
+                } else {
+                    showToast(`获取到 ${result.models.length} 个模型，请勾选需要添加的模型`, 'success');
+                }
             } else {
                 showToast(result.error || '未能获取模型列表，请手动输入', 'error');
             }
@@ -545,6 +901,7 @@ function showConfigEditModal(configId = null) {
                 });
                 showToast('配置已创建 ✓', 'success');
             }
+            closeFetchedModelPicker();
             modal.style.display = 'none';
             loadGlobalAPISettings();
         } catch (e) {
