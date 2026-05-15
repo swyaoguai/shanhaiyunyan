@@ -1,0 +1,144 @@
+Shanhai Yunyan Non-Commercial Source License v1.0
+
+Copyright (c) 2026 swyaoguai and contributors
+
+This license applies to the source code, documentation, scripts, and original
+assets in this repository, except for third-party dependencies, third-party
+assets, bundled model files, icons, fonts, and other materials that carry their
+own licenses or service terms.
+
+1. Grant of non-commercial rights
+
+Subject to the terms below, the licensor grants you a non-exclusive,
+non-transferable, royalty-free right to use, copy, modify, and distribute this
+project for non-commercial purposes only.
+
+Non-commercial purposes include personal learning, research, evaluation,
+private experimentation, and individual creative writing where the software
+itself is not sold, hosted, sublicensed, or used to provide a paid product or
+service.
+
+2. Commercial use requires prior authorization
+
+You may not use this project for commercial purposes without prior written
+authorization from the licensor.
+
+Commercial purposes include, but are not limited to:
+
+- selling, leasing, licensing, or sublicensing the software or modified versions;
+- offering the software as a hosted service, SaaS product, internal paid tool,
+  commercial API, or paid workflow;
+- integrating the software into a commercial product, platform, service,
+  consulting delivery, customer project, or revenue-generating workflow;
+- using the software to provide paid writing, content generation, automation,
+  training, or production services;
+- distributing packaged builds for commercial gain.
+
+Commercial authorization must be granted in a separate written agreement. The
+licensor may approve, deny, limit, price, or revoke commercial authorization
+according to that agreement.
+
+3. Distribution conditions
+
+If you distribute copies or modified versions for non-commercial purposes, you
+must:
+
+- include this license file;
+- keep copyright and attribution notices intact;
+- clearly mark material modifications;
+- not imply that your version is endorsed by the original author unless you have
+  written permission.
+
+4. No trademark or branding rights
+
+This license does not grant rights to use project names, logos, trademarks,
+trade names, or branding for commercial promotion or endorsement without
+separate written permission.
+
+5. Third-party materials and external services
+
+Third-party packages, icons, fonts, model files, APIs, and services are governed
+by their own licenses or terms. You are responsible for complying with those
+terms, including API provider rules, model provider rules, and data privacy
+requirements.
+
+6. No warranty
+
+The project is provided "as is", without warranty of any kind, express or
+implied, including but not limited to warranties of merchantability, fitness for
+a particular purpose, and non-infringement. The licensor is not liable for any
+claim, damages, data loss, service interruption, content liability, or other
+loss arising from use of the project.
+
+7. Termination
+
+Any use outside the scope of this license automatically terminates your rights
+under this license. Upon termination, you must stop using and distributing the
+project and remove unauthorized copies under your control.
+
+8. Notes
+
+Because this license restricts commercial use, it is a source-available
+non-commercial license and is not an OSI-approved open source license.
+
+If you need commercial authorization, contact the repository maintainer before
+using the project commercially.
+
+---
+
+山海·云烟非商业源码许可 v1.0
+
+版权所有 (c) 2026 swyaoguai and contributors
+
+本许可证适用于本仓库中的源代码、文档、脚本和原创素材。第三方依赖、第三方素材、内置模型文件、图标、字体以及其他带有独立许可证或服务条款的材料，不受本许可证替代，仍按其各自条款处理。
+
+1. 非商业授权
+
+在遵守本许可证的前提下，授权方授予你一项非独占、不可转让、免许可费的权利，可仅为非商业目的使用、复制、修改和分发本项目。
+
+非商业目的包括个人学习、研究、评估、私人实验，以及不出售、不托管、不转授权、不用于付费产品或付费服务的个人创作使用。
+
+2. 商业使用必须事先授权
+
+未经授权方事先书面授权，你不得将本项目用于商业目的。
+
+商业目的包括但不限于：
+
+- 销售、出租、许可或转授权本软件或其修改版本；
+- 将本软件作为托管服务、SaaS 产品、内部付费工具、商业 API 或付费工作流提供；
+- 将本软件集成到商业产品、平台、服务、咨询交付、客户项目或营收工作流中；
+- 使用本软件提供付费写作、内容生成、自动化、培训或生产服务；
+- 以商业收益为目的分发打包版本。
+
+商业授权必须通过单独的书面协议授予。授权方可根据该协议批准、拒绝、限制、定价或撤销商业授权。
+
+3. 分发条件
+
+如果你为非商业目的分发本项目的副本或修改版本，必须：
+
+- 附带本许可证文件；
+- 保留版权和署名信息；
+- 清楚标明实质性修改；
+- 未经书面许可，不得暗示你的版本获得原作者背书。
+
+4. 不授予商标或品牌权利
+
+本许可证不授予你使用项目名称、Logo、商标、商号或品牌进行商业推广或背书的权利。相关使用需要另行取得书面许可。
+
+5. 第三方材料与外部服务
+
+第三方包、图标、字体、模型文件、API 和服务受其各自许可证或服务条款约束。你有责任遵守这些条款，包括 API 提供方规则、模型提供方规则和数据隐私要求。
+
+6. 无担保
+
+本项目按“现状”提供，不作任何明示或默示担保，包括但不限于适销性、特定用途适用性和不侵权担保。授权方不对因使用本项目产生的任何索赔、损害、数据丢失、服务中断、内容责任或其他损失负责。
+
+7. 终止
+
+任何超出本许可证范围的使用都会自动终止你在本许可证下的权利。权利终止后，你必须停止使用和分发本项目，并移除你控制范围内的未授权副本。
+
+8. 说明
+
+由于本许可证限制商业使用，它属于源码可见的非商业许可，并非 OSI 批准的开源许可证。
+
+如果需要商业授权，请在商业使用前联系仓库维护者。

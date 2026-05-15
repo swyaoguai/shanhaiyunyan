@@ -1,339 +1,307 @@
 <div align="center">
   <img src="logo.png" alt="山海·云烟 Logo" width="128" height="128">
-  
+
   # 山海·云烟
-  
-  **基于多Agent协作的AI小说创作系统**
-  
+
+  本地优先的中文 AI 小说创作工作台
+
   [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
   [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
-  [![Version](https://img.shields.io/badge/version-1.0-brightgreen.svg)](./CHANGELOG.md)
+  [![License](https://img.shields.io/badge/License-Non--Commercial-red.svg)](./LICENSE)
 </div>
 
----
+山海·云烟是一个面向中文长篇、短篇和改编工作的 AI 写作工具。它不是云端 SaaS，而是一个可在本机运行的 FastAPI + 原生 Web 前端应用：项目、章节、资料库、会话和统计数据默认保存在本地 `data/` 目录中。
 
-基于 Karpathy LLM Wiki 模式的知识系统 + Coordinator-Worker 多Agent协作架构，提供完整的小说创作工作流。
+当前代码库的核心目标是把小说创作拆成可管理的工作区：项目资料、章节正文、世界观、角色档案、事件线、Copilot 对话、多 Agent 生成流程、知识库检索、短篇创作和小说转剧本工作台。
 
-> **📢 山海·云烟 v1.0**
-> 引入 LLM Wiki 知识系统，资料库和知识中心升级为预编译wiki页面。
-> 提示词系统修复，用户自定义提示词立即生效。
+## 当前状态
 
-## ✨ 功能特点
+- 主入口：`python run.py`
+- 默认端口：`5656`，端口被占用时会自动尝试后续端口
+- 前端形态：Jinja2 页面壳 + 模块化原生 JavaScript
+- 后端形态：FastAPI 路由模块 + 项目本地 JSON/SQLite/向量库数据
+- 主要使用场景：个人本机写作、素材整理、创作辅助和打包成 Windows 便携版
+- 许可状态：源码可见，非商业使用；商业使用需要事先授权，详见 [LICENSE](./LICENSE)
 
-### 🤖 多Agent协作系统
-- **世界观构建Agent** - 自动生成完整的小说世界观设定（力量体系、地理环境、势力分布等）
-- **大纲规划Agent** - 智能规划故事结构、章节安排和情节走向
-- **章节撰写Agent** - 高质量的章节内容生成，支持上下文感知和知识库检索
-- **润色优化Agent** - 文字润色、风格统一和表达优化
-- **质量评估Agent** - 自动检测剧情漏洞、角色一致性和逻辑问题
-- **无限续写Agent** - 支持灵感驱动的故事续写，自动维护剧情一致性
-- **沟通助手Agent** - 多轮对话收集创作需求，自动触发工具调用
+注意：限制商用的许可证通常不属于 OSI 定义的“开源许可证”。本项目更准确地说是“源码可见的非商业授权项目”。
 
-### 📖 Wiki 知识系统
-基于 [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式，将知识从"临时检索"升级为"预编译wiki"。
+## 功能范围
 
-- **三层架构** - Raw Sources（原始文档）→ Wiki（LLM生成的结构化页面）→ Schema（规则与目标）
-- **两步链式摄取** - LLM先分析源文档结构，再生成wiki页面，质量远高于单步摄取
-- **4信号知识图谱** - 直接链接(×3) + 来源重叠(×4) + Adamic-Adar(×1.5) + 类型亲和度(×1)
-- **[[wikilink]]双向链接** - 页面间交叉引用，自动维护正向和反向链接
-- **多阶段检索管道** - 分词搜索 → 向量语义搜索 → 图谱扩展 → 预算控制 → 上下文组装
-- **SHA256增量缓存** - 跳过未变化的文件，节省LLM调用成本
-- **Lint质量检查** - 死链接、孤立页面、过时内容、空页面检测
-- **Review审核系统** - LLM标记待审核项，异步人工处理
+### 项目与写作工作区
 
-### 🎯 创作辅助
-- **Copilot助手** - AI写作助手，支持 @ 引用角色、章节和设定
-- **提示词系统** - 内置提示词 + 自定义提示词配置（修改后立即生效）
-- **热点融合** - 自动搜索抖音/头条热点，融入创作内容
-- **短篇创作** - 支持短篇小说的独立创作流程
+- 多项目管理：创建、切换、更新、删除小说项目。
+- 项目资料库：内置大纲、角色档案、世界观设定、道具物品、事件线、细纲设定、章纲设定、正文摘要等分类。
+- 章节管理：保存章节内容，并与项目资料、摘要和知识库同步。
+- 项目状态存储：支持按项目保存工作流状态、面板状态和配置片段。
+- 备份与恢复：支持项目备份导出、导入、备份列表、恢复和删除。
 
-### 📊 统计与分析
-- **Token统计** - 实时追踪API调用量和成本
-- **写作仪表板** - 进度跟踪、质量评分、写作习惯分析
+### Copilot 与多 Agent 创作
 
-### 📤 导出功能
-- 短篇成稿支持导出 TXT、Markdown、DOCX
-- 小说转剧本结果支持导出 TXT、Markdown、DOCX
-- 项目备份支持 ZIP 导出和导入
+- 右侧 Copilot 面板支持多轮对话、流式响应、会话列表和模型快速切换。
+- 支持 `@` 引用角色、章节、世界观和设定等项目资料。
+- RouterAgent 会根据用户请求在聊天、创作、续写、润色、资料生成、知识查询等路径之间分流。
+- NovelCoordinator 负责协调世界观构建、大纲规划、章节撰写、润色、质量评估等创作 Agent。
+- 支持创作契约确认、工作流恢复、结果文件预览和下载。
 
-## 🏗️ 技术架构
+### 多 Agent 生成流程
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Web UI (FastAPI + Jinja2)                │
-├─────────────────────────────────────────────────────────────┤
-│                  Coordinator (协调器 + 状态机)                │
-│    ┌───────────┬───────────┬───────────┬───────────┐        │
-│    │Worldbuilder│ Outliner │ChapterWriter│ Polisher│        │
-│    │  (世界观)  │  (大纲)  │  (撰写)    │  (润色)  │        │
-│    └─────┬─────┴─────┬─────┴─────┬─────┴─────┬────┘        │
-│          │           │           │           │              │
-│    ┌─────▼───────────▼───────────▼───────────▼────┐        │
-│    │         Message Bus (消息总线 + 能力注册表)     │        │
-│    └─────────────────────┬───────────────────────┘        │
-├──────────────────────────┼──────────────────────────────────┤
-│              Wiki 知识系统 (Karpathy LLM Wiki 模式)          │
-│    ┌──────────────┬──────────────┬──────────────┐          │
-│    │  WikiStore   │ WikiGraph    │ WikiRetriever│          │
-│    │ (页面存储)   │ (4信号图谱)  │ (多阶段检索) │          │
-│    ├──────────────┼──────────────┼──────────────┤          │
-│    │ WikiIngest   │ WikiLinter   │ WikiReview   │          │
-│    │ (两步摄取)   │ (质量检查)   │ (审核系统)   │          │
-│    └──────────────┴──────────────┴──────────────┘          │
-├─────────────────────────────────────────────────────────────┤
-│                  Context Manager (上下文管理)                │
-│    ┌──────────────┬──────────────┬──────────────┐          │
-│    │CharacterManager│WorldManager │ContextManager│          │
-│    └──────────────┴──────────────┴──────────────┘          │
-└─────────────────────────────────────────────────────────────┘
-```
+后端保留并使用以下创作角色：
 
-## 🚀 快速开始
+- `WorldbuilderAgent`：生成或补全世界观设定。
+- `OutlinerAgent`：生成主线大纲、卷纲、章节种子等结构。
+- `ChapterWriterAgent`：基于上下文与项目资料生成章节。
+- `PolisherAgent`：对正文进行润色和风格统一。
+- `EvaluatorAgent`：评估文本质量、逻辑和一致性。
+- `CharacterBuilderAgent`：生成或整理角色档案。
+- `ChapterSettingBuilderAgent`：生成章纲设定。
+
+这些能力通过 Web 路由、Copilot 路由和工作流协调器组合使用，而不是单独暴露成独立桌面程序。
+
+### 无限续写
+
+无限续写模块提供独立工作台，支持：
+
+- 导入或开始续写会话。
+- 按灵感、纠偏意见或当前上下文继续生成。
+- 停止、恢复、同步和重新生成章节。
+- 编辑生成章节，维护会话上下文。
+- 标记死亡角色，避免后续误用。
+- 导出 TXT、Markdown 或 DOCX。
+
+### 短篇创作
+
+短篇创作模块提供固定流程面板，后端接口覆盖：
+
+- 输入材料分析。
+- 融合方案生成与选择。
+- 梗概生成与选择。
+- 大纲生成、确认和占位修复。
+- 单章或全章生成。
+- 质量检查、连贯性复审和简单修复应用。
+- 标题、标签生成。
+- 成稿组装与 TXT、Markdown、DOCX 导出。
+
+### 小说转剧本
+
+小说转剧本工作台支持：
+
+- 导入小说文本文件。
+- 按整体或章节批次转换为剧本。
+- 批次重转。
+- 保存和恢复工作台状态。
+- 导出 TXT、Markdown 或 DOCX。
+
+### 资料库、知识库与 Wiki
+
+项目里同时存在两类知识能力：
+
+- 项目资料库：面向写作生产资料，保存角色、世界观、物品、事件线、细纲、章纲、正文摘要和自定义分类。
+- 知识库：面向文档导入和检索，使用 ChromaDB 向量存储、SQLite 元数据和 SQLite FTS 全文检索。
+- Wiki 知识中心：提供页面创建、编辑、删除、搜索、图谱、反向链接、lint、review、ingest 和从资料库迁移等接口与前端视图。
+
+知识库嵌入配置支持：
+
+- 硅基流动 API 嵌入模型。
+- 本地 ONNX 模型包。
+
+### 设置与模型配置
+
+设置页包含以下实际配置面：
+
+- 主题与背景。
+- 全局 API 配置。
+- 多 API 配置列表、激活配置和模型列表管理。
+- 单 Agent 模型覆盖配置。
+- 知识库嵌入来源配置。
+- 正则规则配置。
+- Skills 与热点配置。
+- 备份与资料管理。
+- 超时与写作相关设置。
+
+当前主工作流支持的 API 类型包括：
+
+- OpenAI Chat Completions 兼容接口。
+- OpenAI Responses 接口。
+- Anthropic Messages 接口。
+
+模型列表可从远端 `/models` 接口获取，也可以在设置页手动维护。
+
+### Skills 与热点
+
+仓库包含本地 `skills/` 目录。当前默认配置会启用：
+
+- `agent_reach`：网络搜索能力。
+- `trends_search`：热点趋势搜索，面向抖音、头条等素材获取场景。
+
+Skills 由后端扫描 `skills/<skill>/SKILL.md` 和脚本服务加载，具体是否可用取决于本地依赖和配置。
+
+### Token、诊断与运行时
+
+- Token 统计用于记录模型调用消耗。
+- 诊断日志路由用于查看运行状态和错误信息。
+- 本地运行时支持浏览器窗口心跳与关闭事件。
+- 默认关闭 HTTP 请求频率限制，适合本机单用户使用；如果暴露到局域网或公网，建议在 `.env` 中启用限流并放在反向代理后。
+
+## 快速开始
 
 ### 环境要求
-- Python 3.10+
-- 至少准备一种可用的模型 API 配置：
-  - OpenAI Chat
-  - OpenAI Responses
-  - Anthropic
 
-### 安装
+- Python 3.10 或更高版本。
+- Node.js 仅用于前端测试，不是运行 Web 应用的必需项。
+- 至少准备一个可用的大模型 API Key，或使用兼容 OpenAI/Anthropic 协议的接口。
+
+### 安装依赖
 
 ```bash
-git clone https://github.com/swyaoguai/wscz.git
-cd wscz
 pip install -r requirements.txt
 ```
 
-### 配置模型
-
-启动软件后进入「设置」，在「全局 API 配置」中新增配置。API 类型支持：
-
-| API 类型 | 说明 |
-|----------|------|
-| OpenAI Chat | 使用 OpenAI Chat Completions 兼容接口 |
-| OpenAI Responses | 使用 OpenAI Responses 接口 |
-| Anthropic | 使用 Anthropic Messages 接口 |
-
-知识库向量检索也在「设置 → 知识库配置」中选择，可以使用硅基流动线上嵌入模型，也可以安装本地 ONNX 模型包。
-
-### 启动
+如需运行前端测试：
 
 ```bash
-# Windows
-启动山海·云烟.bat
+npm install
+```
 
-# Linux/Mac
+### 配置环境变量
+
+复制示例配置：
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell 可使用：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+最小配置示例：
+
+```env
+OPENAI_API_KEY=你的 Key
+OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4
+HOST=0.0.0.0
+PORT=5656
+```
+
+也可以先启动应用，再在「设置」中新增全局 API 配置和模型列表。
+
+### 启动应用
+
+```bash
 python run.py
 ```
 
-默认访问 http://localhost:5656
-
-### 运行测试
-
-```bash
-python -m pytest
-```
-
-## 📁 项目结构
-
-```
-novel_agent/
-├── agents/                 # Agent实现
-│   ├── base_agent.py       # Agent基类（LLM调用、回调、重试、提示词管理集成）
-│   ├── worldbuilder.py     # 世界观构建Agent
-│   ├── outliner.py         # 大纲规划Agent
-│   ├── chapter_writer.py   # 章节撰写Agent（知识库集成）
-│   ├── polisher.py         # 润色优化Agent
-│   ├── evaluator.py        # 质量评估Agent
-│   ├── continuous_writer.py# 无限续写Agent（持久化会话、热点融合）
-│   ├── communicator.py     # 用户对话Agent（意图识别、工具调用）
-│   ├── router_agent.py     # 路由智能体
-│   └── message_bus.py      # Agent间消息总线
-│
-├── wiki/                   # Wiki知识系统
-│   ├── wiki_types.py       # 数据模型（WikiPage, Frontmatter, WikiGraph）
-│   ├── wiki_store.py       # 页面存储 + 双向链接 + SHA256缓存
-│   ├── wiki_index.py       # purpose.md/schema.md/index.md/overview.md
-│   ├── wiki_graph.py       # 4信号知识图谱 + 图谱扩展检索
-│   ├── wiki_ingest.py      # 两步链式摄取管道 + 持久化队列
-│   ├── wiki_retriever.py   # 多阶段检索（分词→向量→图谱→预算→组装）
-│   ├── wiki_lint.py        # Lint质量检查
-│   ├── wiki_review.py      # Review审核系统
-│   ├── wiki_migrate.py     # 旧数据迁移
-│   └── wiki_adapter.py     # LibraryService兼容适配器
-│
-├── context/                # 上下文管理
-│   ├── context_manager.py  # 上下文压缩与同步
-│   ├── character_manager.py# 角色档案管理
-│   └── world_manager.py    # 世界观设定管理
-│
-├── knowledge_base/         # 知识库系统（向量+全文检索）
-│   ├── data_layer/         # ChromaDB向量存储 + SQLite FTS5
-│   ├── logic_layer/        # 向量化、分块、章节识别
-│   └── application_layer/  # 混合检索、导航、统一模型
-│
-├── workflow/               # 工作流管理
-│   ├── coordinator.py      # 主协调器（状态机、检查点）
-│   ├── collab_services.py  # 协作服务（上下文策略、扩写、摘要）
-│   └── routing_policy.py   # 路由策略
-│
-├── prompts/                # 提示词系统
-│   ├── prompt_manager.py   # 提示词管理器（自定义提示词热重载）
-│   └── *.md                # 各Agent的提示词模板
-│
-├── llm_adapters/           # LLM适配器（多提供商支持）
-│   ├── deepseek.py         # DeepSeek
-│   ├── zhipu.py            # 智谱AI
-│   ├── moonshot.py         # 月之暗面
-│   ├── doubao.py           # 字节豆包
-│   └── ...                 # 阿里、百度、讯飞、MiniMax
-│
-├── web/                    # Web应用
-│   ├── app.py              # FastAPI主应用
-│   ├── routes/             # 路由模块（14个独立模块）
-│   ├── static/             # 前端资源（JS/CSS）
-│   └── templates/          # HTML模板
-│
-├── utils/                  # 工具模块
-│   ├── token_stats.py      # Token使用统计
-│   ├── retry.py            # 重试机制（指数退避、熔断器）
-│   ├── metrics.py          # 指标收集
-│   └── atomic_write.py     # 原子写入（防止文件损坏）
-│
-├── config.py               # 全局配置
-├── constants.py            # 常量定义
-├── project_manager.py      # 项目管理器（多项目隔离）
-└── memory_manager.py       # 记忆管理器
-```
-
-## ⚙️ 配置说明
-
-### 全局API配置
-
-系统支持在 Web UI 的设置页面配置全局 API，也可以为每个 Agent 单独配置不同的模型。
-
-| API 类型 | 需要填写 |
-|----------|----------|
-| OpenAI Chat | API Base URL、API Key、模型名 |
-| OpenAI Responses | API Base URL、API Key、模型名 |
-| Anthropic | API Base URL、API Key、模型名 |
-
-设置页也支持为不同 Agent 指定不同 API 配置、模型、温度和最大 token 数。
-
-### 知识库嵌入模型配置
-
-知识库检索需要先把文本转成向量。项目现在支持两种方式：线上硅基流动和本地 ONNX。用户不需要手动编辑 `.env`；打开软件后进入「设置 → 知识库配置」，在「嵌入模型来源」里选择即可。保存后程序会自动写入配置文件。
-
-如果本地模型包和硅基流动都已经配置好，实际使用哪一个只看「嵌入模型来源」当前选项：
-
-- 选择「本地模型包」：使用已安装的 ONNX 模型。
-- 选择「硅基流动线上模型」：使用硅基流动 API。
-
-#### 方式一：本地 ONNX 模型
-
-适合离线使用，不消耗线上 API 额度。推荐模型包为 `embedding-model-bge-small-zh-v1.5.zip`。在设置页点击「安装模型包」，选择这个 zip，程序会自动解压、检测并启用。
-
-安装后的目录结构为：
+Windows 用户也可以双击：
 
 ```text
-novel_agent/models/embedding/default/
-├── model.onnx
-├── tokenizer.json
-├── tokenizer_config.json
-├── special_tokens_map.json
-├── vocab.txt
-├── config.json
-└── metadata.json
+启动山海·云烟.bat
 ```
 
-`.env` 配置：
+启动后浏览器会尝试自动打开。如果没有自动打开，请访问终端里显示的地址，默认是：
 
-```env
-KB_EMBEDDING_PROVIDER=local_onnx
-KB_ONNX_MODEL_DIR=novel_agent/models/embedding/default
-KB_ONNX_MODEL_FILE=model.onnx
-KB_ONNX_POOLING=cls
+```text
+http://localhost:5656
 ```
 
-#### 方式二：硅基流动线上嵌入模型
+## 常用命令
 
-适合不想下载本地模型、或希望直接使用线上向量模型的场景。在设置页选择「硅基流动线上模型」，填写 API Key，选择模型后保存即可。
-
-对应配置如下，通常不需要用户手动编辑：
-
-```env
-KB_EMBEDDING_PROVIDER=api
-SILICONFLOW_API_KEY=你的硅基流动Key
-SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
-SILICONFLOW_EMBEDDING_MODEL=BAAI/bge-m3
-SILICONFLOW_EMBEDDING_DIM=1024
-```
-
-可选模型：
-
-| 模型 | 维度 | 说明 |
-|------|------|------|
-| `BAAI/bge-m3` | 1024 | 推荐，多语言，通用检索 |
-| `BAAI/bge-large-zh-v1.5` | 1024 | 中文优化 |
-| `BAAI/bge-large-en-v1.5` | 1024 | 英文优化 |
-
-从本地 ONNX 切到硅基流动，或从硅基流动切回本地 ONNX 后，建议重建知识库索引。不同模型的向量维度和分布可能不同，旧索引继续混用会影响检索效果，维度不同还可能导致向量库写入失败。
-
-### 支持的 API 类型
-
-项目当前在设置页支持三种 API 类型：
-
-| API 类型 | 用途 |
-|----------|------|
-| OpenAI Chat | 适用于 Chat Completions 兼容接口 |
-| OpenAI Responses | 适用于 Responses 接口 |
-| Anthropic | 适用于 Anthropic Messages 接口 |
-
-### Skill 配置
+### 后端测试
 
 ```bash
-# 以 trends_search 为例
-cd skills/trends_search
-cp config.example.json config.json
+pytest
+pytest novel_agent/tests
+pytest novel_agent/knowledge_base/tests
 ```
 
-可用 Skills：
-- `agent_reach`: 网络搜索功能
-- `trends_search`: 热点趋势搜索（抖音、头条）
+运行单个测试文件：
 
-## 🎮 使用指南
-
-### 1. 配置模型
-进入「设置」，新增一个 API 配置，选择 API 类型并填写 API Base URL、API Key 和模型名。保存后可以测试连接。
-
-### 2. 创建或选择项目
-在项目入口创建项目。项目数据会按项目隔离保存。
-
-### 3. 进入写作工作区
-在写作区可以编辑章节，也可以使用右侧 Copilot 对话，让它基于当前项目资料协助创作、修改或整理内容。
-
-### 4. 使用资料与知识库
-资料库用于管理角色、世界观、物品、事件线等项目资料。知识库用于导入文档、分块索引和语义检索；嵌入模型来源可在「设置 → 知识库配置」中切换。
-
-### 5. 使用专项工具
-可以进入「无限续写」「短篇创作」「小说转剧本」「热点趋势」「Token 统计」等模块处理对应任务。
-
-## 🔧 开发说明
-
-### 代码结构特点
-- **分层架构**：数据层/逻辑层/应用层分离
-- **异步优先**：核心LLM调用全部使用async/await
-- **线程安全**：关键数据结构使用threading.Lock保护
-- **提示词管理**：用户自定义提示词通过PromptManager热重载，立即生效
-- **消息总线**：Agent间通过消息总线通信，支持流式任务
-
-### 运行测试
 ```bash
-python -m pytest novel_agent/tests/ -v
+pytest novel_agent/tests/test_short_story_service.py
 ```
 
-## 📄 License
+### 前端测试
 
-MIT License
+```bash
+npm run test:frontend
+```
+
+运行单个 Vitest 文件：
+
+```bash
+npx vitest run --pool threads --maxWorkers 1 frontend-tests/continuous-write.dom.test.js
+```
+
+### 打包 Windows 便携版
+
+```bash
+python build_portable.py
+```
+
+打包脚本会使用 PyInstaller，复制静态资源、模板、提示词、发布用干净数据副本和内置 Skills。打包前请确保已经安装 PyInstaller：
+
+```bash
+pip install pyinstaller
+```
+
+## 目录结构
+
+```text
+.
+├── run.py                         # 本地开发和普通启动入口
+├── build_portable.py              # Windows 便携版打包脚本
+├── clean_for_release.py           # 发布前数据清理辅助脚本
+├── requirements.txt               # Python 运行依赖
+├── package.json                   # 前端测试依赖和脚本
+├── novel_agent/
+│   ├── agents/                    # 创作 Agent、Router、LLM 客户端、消息总线
+│   ├── workflow/                  # 协调器、创作工作流、任务池、运行状态
+│   ├── web/
+│   │   ├── app.py                 # FastAPI 应用工厂
+│   │   ├── routes/                # 页面、创作、聊天、设置、知识库等路由
+│   │   ├── api/                   # 备份和资源管理 API
+│   │   ├── static/                # 原生 JS/CSS 前端模块
+│   │   └── templates/             # Jinja2 页面模板
+│   ├── knowledge_base/            # 向量检索、全文检索、元数据和混合检索
+│   ├── wiki/                      # Wiki 页面、图谱、检索、lint、review、迁移
+│   ├── prompts/                   # 内置提示词与 PromptManager
+│   ├── context/                   # 上下文、角色、世界观管理
+│   ├── utils/                     # 原子写入、指标、Token 统计等工具
+│   └── models/embedding/default/  # 可选本地 ONNX 嵌入模型目录
+├── skills/                        # 本地 Skill 插件目录
+├── frontend-tests/                # Vitest + jsdom 前端测试
+├── docs/                          # 当前文档、设计文档、报告和归档
+└── data/                          # 默认本地运行数据，已被 .gitignore 忽略
+```
+
+## 数据与隐私
+
+- 默认数据目录是仓库根目录下的 `data/`。
+- 多项目元数据存放在 `data/projects.json`。
+- 单个项目内容存放在 `data/projects/<project_id>/`。
+- 知识库、统计、会话、备份等也会写入本地数据目录。
+- `.env`、`data/`、日志和构建产物不应提交到公开仓库。
+
+本项目没有内置多用户认证系统，默认面向本机单用户使用。不要直接把服务暴露到公网；如果确实需要远程访问，请自行增加认证、HTTPS、反向代理、访问控制和备份策略。
+
+## 开发说明
+
+- 后端使用 FastAPI，路由注册在 `novel_agent/web/routes/__init__.py`。
+- 前端不是 React/Vue，而是由 `index.html` 按顺序加载的原生 JS 模块。
+- `app-core.js` 维护全局状态、模块切换和主初始化流程。
+- 设置、资料库、Copilot、无限续写、短篇、小说转剧本、Wiki 都有各自的前端模块。
+- 重要数据写入应优先使用项目内的原子写入工具，避免 JSON 文件损坏。
+- 修改设置、项目资料或写作流程时，要同时关注后端路由、前端模块和已有测试。
+
+## 许可
+
+本项目采用自定义非商业源码许可：
+
+- 允许个人学习、研究、评估和非商业创作使用。
+- 禁止未经授权的商业使用、商业部署、商业集成、SaaS 化提供或销售。
+- 如需商业使用，请先联系项目维护者取得书面授权。
+- 第三方依赖、图标、模型文件和外部服务仍受其各自许可证或服务条款约束。
+
+完整条款见 [LICENSE](./LICENSE)。
