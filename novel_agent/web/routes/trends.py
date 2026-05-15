@@ -7,6 +7,7 @@
 
 import json
 import logging
+import importlib.util
 from typing import List, Optional
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -60,16 +61,37 @@ def _get_skill_service():
         return None
 
 
+def _get_trends_packaging_diagnostics() -> dict:
+    """Return diagnostics that explain common packaged-runtime failures."""
+    skill_path = _get_skill_path("trends_search")
+    required = {
+        "requests": importlib.util.find_spec("requests") is not None,
+    }
+    optional = {
+        "beautifulsoup4": importlib.util.find_spec("bs4") is not None,
+    }
+    return {
+        "skill_path": str(skill_path),
+        "skill_exists": skill_path.exists(),
+        "skill_md_exists": (skill_path / "SKILL.md").exists(),
+        "service_exists": (skill_path / "scripts" / "trends_service.py").exists(),
+        "required_dependencies": required,
+        "optional_dependencies": optional,
+    }
+
+
 @router.get("/trends/status")
 async def get_trends_status():
     """获取热点搜索服务状态"""
     try:
+        diagnostics = _get_trends_packaging_diagnostics()
         service = _get_skill_service()
         if service is None:
             return JSONResponse({
                 "available": False,
                 "tools": [],
-                "message": "热点搜索 Skill 未找到，请检查 skills/trends_search 目录"
+                "message": "热点搜索 Skill 未找到或依赖缺失，请检查 diagnostics",
+                "diagnostics": diagnostics,
             })
         
         # 检查 Skill 是否存在
@@ -83,7 +105,8 @@ async def get_trends_status():
             "available": is_available,
             "tools": tools,
             "server": "trends_search (Skill)",
-            "message": "热点服务已连接 (Skill系统)" if is_available else "热点搜索 Skill 未找到"
+            "message": "热点服务已连接 (Skill系统)" if is_available else "热点搜索 Skill 未找到",
+            "diagnostics": diagnostics,
         })
     except Exception as e:
         logger.warning(f"[Trends] 热点服务状态检查失败: {e}")
@@ -91,7 +114,8 @@ async def get_trends_status():
             "available": False,
             "tools": [],
             "error": str(e),
-            "message": "热点搜索服务未连接"
+            "message": "热点搜索服务未连接",
+            "diagnostics": _get_trends_packaging_diagnostics(),
         })
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 便携版打包脚本
-使用PyInstaller打包项目，创建单一exe文件
+使用 PyInstaller 打包项目，创建单一 exe 文件
 使用干净发布数据副本、添加哈希校验
 """
 
@@ -10,7 +10,6 @@ import sys
 import shutil
 import zipfile
 import hashlib
-import urllib.request
 import subprocess
 import json
 import time
@@ -28,10 +27,6 @@ PORTABLE_DIR = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable"
 RELEASE_DATA_DIR = BUILD_DIR / "release_data" / "novel_agent_data"
 SOURCE_ONNX_MODEL_DIR = ROOT_DIR / "novel_agent" / "models" / "embedding" / "default"
 SOURCE_SKILLS_DIR = ROOT_DIR / "skills"
-
-# Node.js Portable版本下载地址（Windows x64）
-NODEJS_URL = "https://nodejs.org/dist/v20.10.0/node-v20.10.0-win-x64.zip"
-NODEJS_ZIP = "node-v20.10.0-win-x64.zip"
 
 
 def calculate_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
@@ -83,6 +78,37 @@ def _default_skills_config() -> dict:
             "agent_reach": True
         }
     }
+
+
+def pyinstaller_skill_dependency_args() -> list[str]:
+    """Return explicit PyInstaller args for dynamically loaded Skill dependencies."""
+    return [
+        "--hidden-import", "bs4",
+        "--hidden-import", "bs4.builder._htmlparser",
+        "--hidden-import", "ddgs",
+        "--collect-submodules", "ddgs",
+    ]
+
+
+def pyinstaller_optional_exclude_args() -> list[str]:
+    """Return PyInstaller excludes for optional dev/ML stacks not needed at runtime."""
+    optional_modules = [
+        "datasets",
+        "matplotlib",
+        "nltk",
+        "pandas",
+        "scipy",
+        "sklearn",
+        "sentence_transformers",
+        "torch",
+        "torchaudio",
+        "torchvision",
+        "transformers",
+    ]
+    args: list[str] = []
+    for module in optional_modules:
+        args.extend(["--exclude-module", module])
+    return args
 
 
 def prepare_release_data():
@@ -141,15 +167,14 @@ def clean_build_artifacts():
             return False
         print(f"[OK] 删除 dist 目录")
     
-    # 清理build目录中的PyInstaller临时文件（保留Node.js缓存）
+    # 清理 build 目录中的 PyInstaller 临时文件。
     if BUILD_DIR.exists():
         for item in BUILD_DIR.iterdir():
-            if item.name != NODEJS_ZIP and not item.name.startswith("node-"):
-                if item.is_dir():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
-                print(f"[OK] 删除 {item.name}")
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            print(f"[OK] 删除 {item.name}")
     
     return True
 
@@ -232,6 +257,8 @@ def run_pyinstaller():
         "--collect-all", "pydantic",
         # 图标（如果存在）
     ]
+    cmd.extend(pyinstaller_skill_dependency_args())
+    cmd.extend(pyinstaller_optional_exclude_args())
     if skills_dir.exists():
         cmd.extend(["--add-data", f"{skills_dir};skills"])
     else:
@@ -348,44 +375,6 @@ def create_portable_structure():
     return True
 
 
-def download_nodejs():
-    """下载Node.js便携版"""
-    print("\n[下载] Node.js便携版...")
-    
-    nodejs_dir = PORTABLE_DIR / "nodejs"
-    nodejs_dir.mkdir(parents=True, exist_ok=True)
-    
-    zip_path = BUILD_DIR / NODEJS_ZIP
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    
-    if not zip_path.exists():
-        print(f"    下载中: {NODEJS_URL}")
-        try:
-            urllib.request.urlretrieve(NODEJS_URL, zip_path)
-            print(f"[OK] 下载完成: {NODEJS_ZIP}")
-        except Exception as e:
-            print(f"[X] 下载失败: {e}")
-            print("    请手动下载Node.js")
-            return False
-    else:
-        print(f"[OK] 使用缓存: {NODEJS_ZIP}")
-    
-    # 解压
-    print("    解压中...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(BUILD_DIR)
-    
-    # 移动到目标目录
-    extracted_dir = BUILD_DIR / "node-v20.10.0-win-x64"
-    if extracted_dir.exists():
-        for item in extracted_dir.iterdir():
-            shutil.move(str(item), str(nodejs_dir / item.name))
-        extracted_dir.rmdir()
-    
-    print("[OK] Node.js解压完成")
-    return True
-
-
 def create_launcher():
     """创建启动器脚本"""
     print("\n[创建] 启动器脚本...")
@@ -394,10 +383,6 @@ def create_launcher():
     bat_content = f'''@echo off
 chcp 65001 > nul
 title {DISPLAY_NAME}
-
-REM 设置环境变量
-set PATH=%~dp0nodejs;%PATH%
-set NODE_PATH=%~dp0nodejs\\node_modules
 
 echo.
 echo ========================================
@@ -487,7 +472,7 @@ pause
 ## 系统要求
 
 - Windows 10/11 64位
-- 无需安装其他依赖（Node.js已内置）
+- 无需安装 Node.js 或其他前端开发依赖
 - 需要有写入权限的目录
 
 ## 配置说明
@@ -528,7 +513,7 @@ SERVER_PORT=5656
 ├── data/                   # 数据目录
 │   ├── projects/          # 项目数据
 │   └── stats/             # Token统计
-└── nodejs/                # Node.js运行时
+└── skills/                # 技能扩展
 ```
 
 ## 详细文档
@@ -702,9 +687,8 @@ def main():
     print("  2. 创建干净发布数据副本（不修改开发数据）")
     print("  3. 使用PyInstaller打包为单一exe")
     print("  4. 创建便携版目录结构")
-    print("  5. 下载Node.js便携版")
-    print("  6. 生成哈希校验文件")
-    print("  7. 创建发布压缩包")
+    print("  5. 生成哈希校验文件")
+    print("  6. 创建发布压缩包")
     print()
     
     # 检查依赖
@@ -726,7 +710,6 @@ def main():
         ("准备发布数据", prepare_release_data),
         ("PyInstaller打包", run_pyinstaller),
         ("创建目录结构", create_portable_structure),
-        ("下载Node.js", download_nodejs),
         ("创建启动器", create_launcher),
         ("生成哈希校验", generate_hash_file),
         ("创建压缩包", create_zip),

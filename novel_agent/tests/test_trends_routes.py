@@ -105,6 +105,27 @@ def test_trends_search_parses_json_payload(monkeypatch):
     assert payload["trends"][0]["title"] == "测试热点B"
 
 
+def test_trends_status_includes_packaging_diagnostics(monkeypatch, tmp_path):
+    skill_path = tmp_path / "trends_search"
+    (skill_path / "scripts").mkdir(parents=True)
+    (skill_path / "SKILL.md").write_text("# 热点搜索", encoding="utf-8")
+    (skill_path / "scripts" / "trends_service.py").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(trends_routes, "_get_skill_path", lambda _name: skill_path)
+    monkeypatch.setattr(trends_routes, "_get_skill_service", lambda: object())
+
+    client = TestClient(create_app())
+    response = client.get("/api/trends/status")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["available"] is True
+    assert payload["diagnostics"]["skill_exists"] is True
+    assert payload["diagnostics"]["skill_md_exists"] is True
+    assert payload["diagnostics"]["service_exists"] is True
+    assert payload["diagnostics"]["required_dependencies"]["requests"] is True
+
+
 def test_trends_service_json_platforms_work_without_bs4(monkeypatch):
     service = trends_service.TrendsSearchService()
 
