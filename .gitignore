@@ -38,6 +38,12 @@ node_modules/
 .github/
 
 # Local development and test-only files
+.claude/
+.omx/
+.omc/
+JC/
+logo22.png
+startup_error.txt
 frontend-tests/
 novel_agent/tests/
 novel_agent/knowledge_base/tests/
@@ -82,4 +88,4 @@ logs/
 
 # OS specific
 .DS_Store
-Thumbs.dbJC/
+Thumbs.db
