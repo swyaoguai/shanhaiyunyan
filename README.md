@@ -247,3 +247,12 @@ data/
 商业使用需要事先取得书面授权。完整条款见 [LICENSE](./LICENSE)。
 
 第三方依赖、模型、图标、字体和外部 API 服务仍受其各自许可证或服务条款约束。
+
+## 交流与支持
+
+- QQ 交流群：[点击加入](https://qm.qq.com/q/E25rrnPONy)
+- 群号：`760758525`
+
+如果这个项目对你有帮助，也可以请作者喝杯咖啡：
+
+<img src="./novel_agent/web/static/赞赏码6.jpg" alt="赞赏码" width="220">
