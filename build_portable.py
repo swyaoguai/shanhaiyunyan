@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 便携版打包脚本
-使用 PyInstaller 打包项目，创建单一 exe 文件
-使用干净发布数据副本、添加哈希校验
+使用 PyInstaller 打包项目，创建便携目录。
+
+注意：正式发布请使用 build_release.py。发布约定只保留两个安装版 exe，
+不再生成 zip 压缩包。
 """
 
 import os
 import sys
 import shutil
-import zipfile
 import hashlib
 import subprocess
 import json
@@ -624,35 +625,6 @@ def generate_hash_file():
     return True
 
 
-def create_zip():
-    """创建发布压缩包"""
-    print("\n[打包] 创建发布压缩包...")
-    
-    zip_name = f"{DISPLAY_NAME}_v{APP_VERSION}_Portable.zip"
-    zip_path = DIST_DIR / zip_name
-    
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for file in PORTABLE_DIR.rglob("*"):
-            if file.is_file():
-                arcname = file.relative_to(PORTABLE_DIR)
-                zipf.write(file, arcname)
-    
-    # 计算压缩包哈希
-    zip_hash = calculate_file_hash(zip_path, "sha256")
-    size_mb = zip_path.stat().st_size / (1024 * 1024)
-    
-    print(f"[OK] 创建: {zip_name}")
-    print(f"     大小: {size_mb:.1f} MB")
-    print(f"     SHA256: {zip_hash}")
-    
-    # 写入压缩包哈希
-    zip_hash_path = DIST_DIR / f"{zip_name}.sha256"
-    zip_hash_path.write_text(f"{zip_hash}  {zip_name}", encoding="utf-8")
-    print(f"[OK] 创建: {zip_name}.sha256")
-    
-    return True
-
-
 def print_summary():
     """打印构建摘要"""
     print("\n" + "=" * 60)
@@ -660,7 +632,6 @@ def print_summary():
     print("=" * 60)
     
     exe_path = PORTABLE_DIR / f"{DISPLAY_NAME}.exe"
-    zip_path = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable.zip"
     
     if exe_path.exists():
         print(f"\n单文件exe:")
@@ -668,12 +639,8 @@ def print_summary():
         print(f"  大小: {exe_path.stat().st_size / (1024 * 1024):.1f} MB")
         print(f"  SHA256: {calculate_file_hash(exe_path, 'sha256')}")
     
-    if zip_path.exists():
-        print(f"\n便携版压缩包:")
-        print(f"  路径: {zip_path}")
-        print(f"  大小: {zip_path.stat().st_size / (1024 * 1024):.1f} MB")
-    
     print(f"\n便携版目录: {PORTABLE_DIR}")
+    print("提示: 正式发布请运行 python build_release.py，只输出两个安装版 exe。")
     print("\n" + "=" * 60)
 
 
@@ -688,7 +655,7 @@ def main():
     print("  3. 使用PyInstaller打包为单一exe")
     print("  4. 创建便携版目录结构")
     print("  5. 生成哈希校验文件")
-    print("  6. 创建发布压缩包")
+    print("  6. 不创建 zip；正式发布请使用 build_release.py")
     print()
     
     # 检查依赖
@@ -712,7 +679,6 @@ def main():
         ("创建目录结构", create_portable_structure),
         ("创建启动器", create_launcher),
         ("生成哈希校验", generate_hash_file),
-        ("创建压缩包", create_zip),
     ]
     
     for name, func in steps:

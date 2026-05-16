@@ -40,14 +40,16 @@ Single frontend test file:
 npx vitest run --pool threads --maxWorkers 1 frontend-tests/continuous-write.dom.test.js
 ```
 
-### Portable build
+### Release build
 ```bash
-python build_portable.py
+python build_release.py
 ```
 
 Notes:
-- `build_portable.py` expects PyInstaller to be installed.
-- The build script cleans personal data via `clean_for_release.py`, packages `run.py`, and bundles `novel_agent/web/static`, `novel_agent/web/templates`, `novel_agent/prompts`, and `novel_agent/data`.
+- The build scripts expect PyInstaller, and final installer EXE output requires Inno Setup (`ISCC.exe`).
+- The release script builds exactly two Windows installer EXE files in `dist/`: a lightweight version without the local ONNX model and a local-model version with `novel_agent/models/embedding/default` bundled.
+- Release builds do not generate zip archives. `build_portable.py` is kept only for local portable-directory checks and also no longer creates zip files.
+- The build scripts package `run.py`, bundle `novel_agent/web/static`, `novel_agent/web/templates`, `novel_agent/prompts`, Skills, and a clean release data copy.
 
 ### No lint command
 - There is no dedicated root lint script in `package.json` or repo-level documented lint command. Do not invent one in changes or docs.

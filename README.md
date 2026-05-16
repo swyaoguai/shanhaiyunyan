@@ -161,14 +161,19 @@ http://localhost:5656
 
 ## 打包
 
-Windows 便携版打包入口：
+Windows 发布只保留两个安装版 EXE：
 
 ```bash
 pip install pyinstaller
-python build_portable.py
+python build_release.py
 ```
 
-打包脚本会复制静态资源、模板、提示词、Skills、干净的发布数据副本，并使用根目录的 `logo.ico` 作为应用图标。
+输出文件：
+
+- `dist/山海·云烟_v1.0_安装包_轻量版.exe`：不内置本地 ONNX 向量模型，体积更小。
+- `dist/山海·云烟_v1.0_安装包_本地模型版.exe`：内置 `novel_agent/models/embedding/default` 下的本地 ONNX 向量模型。
+
+发布脚本会复制静态资源、模板、提示词、Skills、干净的发布数据副本，并使用根目录的 `logo.ico` 作为应用图标。发布产物不生成 zip。
 
 ## 目录说明
 
