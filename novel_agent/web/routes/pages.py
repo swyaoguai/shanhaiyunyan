@@ -23,6 +23,7 @@ def set_templates(templates):
 async def index(request: Request):
     """首页"""
     from ...config import config
+    from ...version import get_app_version
     
     if _templates is None:
         return HTMLResponse("<h1>模板引擎未初始化</h1>", status_code=500)
@@ -33,6 +34,7 @@ async def index(request: Request):
         {
             "request": request,
             "novel_types": config.novel.novel_types,
+            "app_version": get_app_version(),
         },
     )
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

@@ -16,6 +16,8 @@ from functools import lru_cache
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .version import get_app_version
+
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +181,7 @@ class AppSettings(BaseSettings):
 
     # 应用信息
     app_name: str = "山海·云烟"
-    app_version: str = "1.0"
+    app_version: str = get_app_version()
     debug: bool = False
 
     def setup_logging(self) -> None:

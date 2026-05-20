@@ -82,6 +82,21 @@ function renderNavPanel(moduleId) {
             }
             break;
 
+        case 'cover-images':
+            ui.navTitle.textContent = '封面生成';
+            ui.navActionAdd.style.display = 'none';
+            if (typeof renderCoverImagesNavPanel === 'function') {
+                renderCoverImagesNavPanel();
+            } else {
+                console.error('[Nav] renderCoverImagesNavPanel not found');
+                ui.navList.innerHTML = `
+                    <div style="padding: 16px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                        封面生成导航加载失败，请刷新页面重试。
+                    </div>
+                `;
+            }
+            break;
+
         case 'write':
             ui.navTitle.textContent = '多Agent创作';
             ui.navActionAdd.style.display = 'block';
@@ -855,13 +870,15 @@ function showEmptyWorld() {
 // ===== 关于页面渲染 =====
 function renderAboutPage() {
     updateBreadcrumbs(['关于', '山海·云烟']);
+
+    const version = getAppDisplayVersion();
     
     ui.workspace.innerHTML = `
         <div style="padding: 40px; max-width: 700px; margin: 0 auto;">
             <div style="text-align: center; margin-bottom: 40px;">
                 <img src="/static/logo.png" alt="山海·云烟" style="width: 100px; height: 100px; border-radius: 20px; box-shadow: 0 8px 32px rgba(139, 92, 246, 0.3);">
                 <h1 style="color: var(--text-primary); margin-top: 20px; font-size: 28px;">山海·云烟</h1>
-                <p style="color: var(--text-secondary); margin-top: 8px;">版本 1.0 · 智能小说创作工作台</p>
+                <p style="color: var(--text-secondary); margin-top: 8px;">版本 <span id="about-app-version">${version}</span> · 智能小说创作工作台</p>
             </div>
             
             <!-- 作者信息卡片 -->
@@ -939,6 +956,8 @@ function renderAboutPage() {
             </div>
         </div>
     `;
+
+    if (!String(window.SHANHAI_APP_VERSION || '').trim()) refreshAppVersionInfo();
 }
 
 function renderFeedbackPage() {
@@ -1049,8 +1068,8 @@ function bindFeedbackLogActions() {
 
 function renderVersionPage() {
     updateBreadcrumbs(['关于', '版本信息']);
-    
-    const version = '1.0';
+
+    const version = getAppDisplayVersion();
     const buildDate = new Date().toLocaleDateString('zh-CN');
     
     ui.workspace.innerHTML = `
@@ -1063,7 +1082,7 @@ function renderVersionPage() {
             <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 16px; padding: 24px; margin-bottom: 24px;">
                 <div style="display: grid; grid-template-columns: 120px 1fr; gap: 16px; font-size: 14px;">
                     <div style="color: var(--text-secondary);">当前版本</div>
-                    <div style="color: var(--text-primary); font-weight: 500;">v${version}</div>
+                    <div id="app-version-current" style="color: var(--text-primary); font-weight: 500;">v${version}</div>
                     
                     <div style="color: var(--text-secondary);">更新日期</div>
                     <div style="color: var(--text-primary);">${buildDate}</div>
@@ -1072,7 +1091,7 @@ function renderVersionPage() {
                     <div style="color: var(--text-primary);">Python 3.10+ / Windows</div>
                 </div>
             </div>
-            
+
             <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 16px; padding: 24px;">
                 <h3 style="color: var(--text-primary); margin-bottom: 16px;">✨ 主要功能</h3>
                 <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px; line-height: 2;">
@@ -1086,6 +1105,105 @@ function renderVersionPage() {
             </div>
         </div>
     `;
+
+    refreshAppVersionInfo();
+}
+
+function getAppDisplayVersion() {
+    const version = String(window.SHANHAI_APP_VERSION || '').trim();
+    return version || '1.0.0';
+}
+
+async function refreshAppVersionInfo() {
+    if (typeof fetch !== 'function') return;
+    const protocol = String(window.location?.protocol || '');
+    if (protocol && !/^https?:$/.test(protocol)) return;
+
+    try {
+        const response = await fetch(normalizeApiUrl('/api/app/runtime'), {
+            method: 'GET',
+            cache: 'no-store',
+            credentials: 'same-origin'
+        });
+        if (!response.ok) return;
+        if (typeof response.json !== 'function') return;
+
+        const runtime = await response.json();
+        window.SHANHAI_RUNTIME_INFO = runtime;
+        updateRuntimeControls(runtime);
+
+        const version = String(runtime?.version || '').trim();
+        if (!version) return;
+        window.SHANHAI_APP_VERSION = version;
+        const versionElement = document.getElementById('app-version-current');
+        const aboutVersionElement = document.getElementById('about-app-version');
+        if (versionElement) versionElement.textContent = `v${version}`;
+        if (aboutVersionElement) aboutVersionElement.textContent = version;
+    } catch (error) {
+        console.debug('[Version] 版本信息刷新不可用:', error);
+    }
+}
+
+function updateRuntimeControls(runtime) {
+    const shutdownButton = document.getElementById('app-shutdown-button');
+    if (!shutdownButton) return;
+
+    shutdownButton.hidden = !runtime?.explicit_shutdown_enabled;
+}
+
+async function requestAppShutdown(button) {
+    if (typeof window.confirm === 'function' && !window.confirm('确认退出山海·云烟？未完成的生成请求会中断。')) {
+        return;
+    }
+
+    const status = document.getElementById('app-shutdown-status');
+    const originalHtml = button?.innerHTML || '';
+    if (button) {
+        button.disabled = true;
+        const loadingHtml = button.classList?.contains('res-item')
+            ? '<i class="ri-loader-4-line"></i>'
+            : '<i class="ri-loader-4-line"></i> 正在退出...';
+        button.innerHTML = loadingHtml;
+    }
+    if (status) status.textContent = '正在关闭后台进程...';
+
+    try {
+        const response = await fetch(normalizeApiUrl('/api/app/shutdown'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'user_request' }),
+            credentials: 'same-origin'
+        });
+        if (!response.ok) {
+            let detail = '';
+            try {
+                const payload = await response.json();
+                detail = String(payload?.detail || '').trim();
+            } catch (parseError) {
+                detail = '';
+            }
+            if (response.status === 409) {
+                throw new Error('当前运行方式不支持应用内退出，请在启动窗口按 Ctrl+C 关闭后台。');
+            }
+            throw new Error(detail || `HTTP ${response.status}`);
+        }
+        if (status) status.textContent = '已发送退出请求';
+        if (typeof showToast === 'function') showToast('正在退出山海·云烟', 'success');
+        setTimeout(() => {
+            try {
+                window.close();
+            } catch (error) {
+                console.debug('[Runtime] 无法自动关闭窗口:', error);
+            }
+        }, 300);
+    } catch (error) {
+        if (status) status.textContent = `退出失败：${error.message}`;
+        if (typeof showToast === 'function') showToast(`退出失败：${error.message}`, 'error');
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalHtml;
+        }
+    }
 }
 
 // 全局暴露导航函数
@@ -1099,5 +1217,9 @@ window.showEmptyWorld = showEmptyWorld;
 window.renderAboutPage = renderAboutPage;
 window.renderFeedbackPage = renderFeedbackPage;
 window.renderVersionPage = renderVersionPage;
+window.getAppDisplayVersion = getAppDisplayVersion;
+window.refreshAppVersionInfo = refreshAppVersionInfo;
+window.updateRuntimeControls = updateRuntimeControls;
+window.requestAppShutdown = requestAppShutdown;
 
 console.log('[app-nav.js] 导航模块已加载');

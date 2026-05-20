@@ -391,6 +391,7 @@ function bindShortStoryEvents() {
                 api_config_id: getSelectedApiConfigIdForShortStory(),
                 model: document.getElementById('short-story-model')?.value || shortStoryState.selectedModel
             });
+            if (!analyzeResult) return;
             shortStoryState.inputAnalysisRawOutput = analyzeResult?.data?.raw_output || '';
             workflow = analyzeResult?.data?.workflow || getCurrentShortStoryWorkflow();
             if (!workflow) return;

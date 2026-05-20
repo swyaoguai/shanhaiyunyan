@@ -9,6 +9,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..utils.atomic_write import atomic_write_text
 from .contracts import TaskDefinition
+from .runtime_event_log import RuntimeEventLog
+from .runtime_events import (
+    build_legacy_trace_event,
+    normalize_legacy_trace_event,
+)
+from .runtime_messages import attach_runtime_message
 from .task_pool import TaskPool
 
 
@@ -72,20 +78,35 @@ class RuntimeStateStore:
             "supervised_mode": bool(supervised_mode),
             "fallback_to_orchestrated": bool(fallback_to_orchestrated),
             "updated_at": initialized_at,
-            "events": [
-                {
-                    "type": "contract_confirmation" if approved else "contract_rejection",
-                    "event": "contract_confirmed" if approved else "contract_rejected",
-                    "timestamp": initialized_at,
-                    "task_count": len(task_pool.list_tasks()),
-                }
-            ],
+            "events": [],
+            "runtime_events": [],
         }
+        event_type = "contract_confirmation" if approved else "contract_rejection"
+        trace_payload = attach_runtime_message(
+            event_type,
+            {
+                "event": "contract_confirmed" if approved else "contract_rejected",
+                "timestamp": initialized_at,
+                "task_count": len(task_pool.list_tasks()),
+            },
+            run_id=contract_id,
+            now_provider=self.now_provider,
+        )
+        trace_event, runtime_event = build_legacy_trace_event(
+            event_type,
+            trace_payload,
+            timestamp=initialized_at,
+            run_id=contract_id,
+            now_provider=self.now_provider,
+        )
+        execution_trace["events"].append(trace_event)
+        execution_trace["runtime_events"].append(runtime_event)
         project_manager = self._get_project_manager()
         project_manager.save_project_state("creation_contract", persisted_contract)
         project_manager.save_project_state("task_graph_draft", persisted_contract.get("task_graph", []))
         project_manager.save_project_state("task_pool", task_pool_payload)
         project_manager.save_project_state("collab_execution_trace", execution_trace)
+        RuntimeEventLog(self._get_project_dir()).safe_append_event(runtime_event)
         return {
             "creation_contract": persisted_contract,
             "task_pool": task_pool_payload,
@@ -118,6 +139,7 @@ class RuntimeStateStore:
         if not isinstance(trace, dict):
             trace = {}
         trace.setdefault("events", [])
+        trace.setdefault("runtime_events", [])
         trace.setdefault("status", "initialized")
         trace.setdefault("supervised_mode", bool(supervised_mode))
         trace.setdefault("fallback_to_orchestrated", bool(fallback_to_orchestrated))
@@ -126,40 +148,36 @@ class RuntimeStateStore:
         for item in trace.get("events", []):
             if not isinstance(item, dict):
                 continue
-            normalized_item = dict(item)
-            normalized_timestamp = str(
-                normalized_item.get("timestamp")
-                or normalized_item.get("created_at")
-                or ""
-            ).strip()
-            if not normalized_timestamp:
-                normalized_timestamp = self._now_iso()
-            normalized_item["timestamp"] = normalized_timestamp
-            normalized_item.pop("created_at", None)
-            normalized_events.append(normalized_item)
+            normalized_events.append(normalize_legacy_trace_event(item, now_provider=self.now_provider))
         trace["events"] = normalized_events
 
-        event_timestamp = self._now_iso()
-        event_payload = {
-            "type": str(event_type or "").strip() or "unknown",
-            "timestamp": event_timestamp,
-        }
-        if isinstance(payload, dict) and payload:
-            event_payload.update(payload)
-
-        normalized_timestamp = str(
-            event_payload.get("timestamp")
-            or event_payload.get("created_at")
-            or event_timestamp
-        ).strip() or event_timestamp
-        event_payload["timestamp"] = normalized_timestamp
-        event_payload.pop("created_at", None)
+        prepared_payload = attach_runtime_message(
+            event_type,
+            payload,
+            run_id=str(trace.get("contract_id") or trace.get("run_id") or "").strip(),
+            now_provider=self.now_provider,
+        )
+        event_payload, runtime_event = build_legacy_trace_event(
+            event_type,
+            prepared_payload,
+            run_id=str(trace.get("contract_id") or trace.get("run_id") or "").strip(),
+            now_provider=self.now_provider,
+        )
 
         trace["events"].append(event_payload)
         if len(trace["events"]) > 500:
             trace["events"] = trace["events"][-500:]
+        runtime_events = [
+            item for item in trace.get("runtime_events", [])
+            if isinstance(item, dict)
+        ]
+        runtime_events.append(runtime_event)
+        if len(runtime_events) > 500:
+            runtime_events = runtime_events[-500:]
+        trace["runtime_events"] = runtime_events
         trace["updated_at"] = event_payload["timestamp"]
         self._get_project_manager().save_project_state("collab_execution_trace", trace)
+        RuntimeEventLog(self._get_project_dir()).safe_append_event(runtime_event)
         return trace
 
     def upsert_runtime_task(

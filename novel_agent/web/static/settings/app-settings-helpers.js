@@ -10,6 +10,7 @@ let editingConfigId = null;
 let agentPageApiConfigs = [];
 let agentPageActiveConfigId = '';
 let agentSettingsShowAdvanced = false;
+let settingsReconnectInProgress = false;
 
 function renderSettingsLoadingState() {
     return `
@@ -19,16 +20,83 @@ function renderSettingsLoadingState() {
     `;
 }
 
-function renderSettingsErrorState(message) {
+function renderSettingsErrorState(message, options = {}) {
+    if (typeof options.retryAction === 'function') {
+        window.__lastSettingsRetryAction = options.retryAction;
+    }
+
     return `
         <div class="settings-error-state">
-            <div>
+            <div class="settings-error-panel">
                 <i class="ri-error-warning-line"></i>
                 <p class="settings-subtitle settings-subtitle--md" style="margin-top: 16px;">${message}</p>
+                <div class="settings-error-actions">
+                    <button type="button" class="settings-button settings-button--primary" data-settings-reconnect>
+                        <i class="ri-refresh-line"></i> 重新连接
+                    </button>
+                    <button type="button" class="settings-button" data-settings-refresh>
+                        <i class="ri-restart-line"></i> 刷新应用
+                    </button>
+                </div>
+                <p class="settings-error-hint">如果后端进程已经退出，请重新打开山海·云烟。</p>
             </div>
         </div>
     `;
 }
+
+async function waitForBackendConnection() {
+    const response = await fetch('/api/app/runtime', {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'same-origin'
+    });
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    return response;
+}
+
+async function handleSettingsReconnect(button) {
+    if (settingsReconnectInProgress) return;
+    settingsReconnectInProgress = true;
+
+    const originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="ri-loader-4-line"></i> 连接中...';
+
+    try {
+        await waitForBackendConnection();
+        if (typeof showToast === 'function') {
+            showToast('后端连接已恢复', 'success');
+        }
+        const retryAction = window.__lastSettingsRetryAction;
+        if (typeof retryAction === 'function') {
+            await retryAction();
+        } else {
+            window.location.reload();
+        }
+    } catch (error) {
+        if (typeof showToast === 'function') {
+            showToast('后端仍未响应，请确认程序没有退出', 'error');
+        }
+        button.disabled = false;
+        button.innerHTML = originalHtml;
+    } finally {
+        settingsReconnectInProgress = false;
+    }
+}
+
+document.addEventListener('click', (event) => {
+    const reconnectButton = event.target.closest('[data-settings-reconnect]');
+    if (reconnectButton) {
+        handleSettingsReconnect(reconnectButton);
+        return;
+    }
+
+    if (event.target.closest('[data-settings-refresh]')) {
+        window.location.reload();
+    }
+});
 
 function renderSettingsShell() {
     ui.workspace.innerHTML = `

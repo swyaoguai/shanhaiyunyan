@@ -5,6 +5,7 @@
 
 import os
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
@@ -101,7 +102,10 @@ class Config:
             from .constants import get_app_root
 
             # 优先使用运行根目录下的 .env；便携版中为 exe 同级目录。
-            env_file = get_app_root() / ".env"
+            if getattr(sys, "frozen", False):
+                env_file = get_app_root() / ".env"
+            else:
+                env_file = Path(__file__).resolve().parent.parent / ".env"
 
             # 兼容：若项目根目录不存在，则回退到当前工作目录
             if not env_file.exists():

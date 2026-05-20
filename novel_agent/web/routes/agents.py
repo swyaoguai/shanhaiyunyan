@@ -4,14 +4,11 @@ Agent配置API路由模块
 包含Agent列表、Agent配置管理、模型获取等功能。
 """
 
-import json
-import httpx
 import logging
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..models.requests import AgentConfigUpdateRequest, FetchModelsRequest
-from ...constants import TIMEOUTS
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +41,7 @@ async def get_agent_config(agent_name: str):
         "api_base": cfg.api_base,
         "api_key": cfg.api_key[:8] + "****" if len(cfg.api_key) > 8 else "",
         "model": cfg.model,
+        "api_type": cfg.api_type,
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "description": cfg.description,
@@ -72,6 +70,7 @@ async def update_agent_config(agent_name: str, request: AgentConfigUpdateRequest
             if selected_api_config:
                 updates['api_base'] = selected_api_config.api_base
                 updates['api_key'] = selected_api_config.api_key
+                updates['api_type'] = getattr(selected_api_config, 'api_type', 'openai_chat') or 'openai_chat'
                 if selected_api_config.models:
                     updates['model'] = selected_api_config.models[0]
 
@@ -82,6 +81,8 @@ async def update_agent_config(agent_name: str, request: AgentConfigUpdateRequest
         updates['api_key'] = request.api_key
     if request.model is not None:
         updates['model'] = request.model
+    if request.api_type is not None:
+        updates['api_type'] = request.api_type
     if request.temperature is not None:
         updates['temperature'] = request.temperature
     if request.max_tokens is not None:
@@ -109,6 +110,7 @@ async def update_agent_config(agent_name: str, request: AgentConfigUpdateRequest
             updates.setdefault('api_config_id', matched.id)
             updates.setdefault('api_base', matched.api_base)
             updates.setdefault('api_key', matched.api_key)
+            updates.setdefault('api_type', getattr(matched, 'api_type', 'openai_chat') or 'openai_chat')
     
     if updates:
         manager.update_config(agent_name, **updates)
@@ -129,93 +131,6 @@ async def copy_config_to_all(source: str):
 @router.post("/fetch-models")
 async def fetch_models_v2(request: FetchModelsRequest):
     """从API获取可用模型列表（兼容OpenAI v1接口格式）"""
-    api_base = request.api_base.rstrip('/')
-    if not api_base.endswith('/v1'):
-        if api_base.endswith('/'):
-            api_base = api_base + 'v1'
-        else:
-            api_base = api_base + '/v1'
-    
-    models_url = f"{api_base}/models"
-    
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if request.api_key:
-        headers["Authorization"] = f"Bearer {request.api_key}"
-    
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_MEDIUM) as client:
-            response = await client.get(models_url, headers=headers)
-            
-            if response.status_code == 200:
-                response_text = response.text.strip()
-                if response_text.startswith("<!DOCTYPE") or response_text.startswith("<html"):
-                    return JSONResponse({
-                        "success": False,
-                        "error": "API返回了HTML页面而非模型列表。该服务可能不支持 /models 端点，请手动输入模型名称",
-                        "models": [],
-                        "hint": "常用模型: gpt-4, gpt-3.5-turbo, claude-3-opus, gemini-pro 等"
-                    })
-                
-                try:
-                    data = response.json()
-                except (ValueError, json.JSONDecodeError):
-                    return JSONResponse({
-                        "success": False,
-                        "error": "API返回的不是有效的JSON格式，请手动输入模型名称",
-                        "models": []
-                    })
-                
-                models = []
-                if isinstance(data, dict) and "data" in data:
-                    for m in data["data"]:
-                        if isinstance(m, dict):
-                            model_id = m.get("id") or m.get("name") or m.get("model")
-                            if model_id and isinstance(model_id, str):
-                                models.append(model_id)
-                        elif isinstance(m, str):
-                            models.append(m)
-                elif isinstance(data, list):
-                    for m in data:
-                        if isinstance(m, dict):
-                            model_id = m.get("id") or m.get("name") or m.get("model")
-                            if model_id and isinstance(model_id, str):
-                                models.append(model_id)
-                        elif isinstance(m, str):
-                            models.append(m)
-                
-                valid_models = []
-                for m in models:
-                    if m and isinstance(m, str) and len(m) < 200 and not m.startswith("<"):
-                        valid_models.append(m)
-                
-                if valid_models:
-                    valid_models = sorted(valid_models)
-                    return JSONResponse({
-                        "success": True,
-                        "models": valid_models
-                    })
-                else:
-                    return JSONResponse({
-                        "success": False,
-                        "error": "未能解析到有效的模型列表，请手动输入模型名称",
-                        "models": [],
-                        "hint": "常用模型: gpt-4, gpt-3.5-turbo, claude-3-opus, gemini-pro 等"
-                    })
-            else:
-                return JSONResponse({
-                    "success": False,
-                    "error": f"API返回错误 (HTTP {response.status_code})，请手动输入模型名称",
-                    "models": []
-                })
-    except httpx.TimeoutException:
-        return JSONResponse({
-            "success": False,
-            "error": "连接超时，请检查API地址是否正确",
-            "models": []
-        })
-    except Exception as e:
-        return JSONResponse({
-            "success": False,
-            "error": f"获取失败: {str(e)}",
-            "models": []
-        })
+    from .settings import fetch_models
+
+    return await fetch_models(request)

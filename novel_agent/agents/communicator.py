@@ -1259,11 +1259,31 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 return None
             
         except Exception as e:
-            logger.warning(f"[{self.name}] LLM意图检测失败: {e}", exc_info=True)
+            if self._is_provider_blocked_message(e):
+                logger.warning(f"[{self.name}] LLM意图检测失败: {e}")
+            else:
+                logger.warning(f"[{self.name}] LLM意图检测失败: {e}", exc_info=True)
             fallback_intent = self._fallback_search_intent(message)
             if fallback_intent:
                 logger.info(f"[{self.name}] 启发式兜底判定需要搜索: {fallback_intent.get('query', '')}")
             return fallback_intent
+
+    @staticmethod
+    def _is_provider_blocked_message(error: Exception) -> bool:
+        """识别已转成用户友好提示的模型服务阻断，避免预处理兜底打印整段 traceback。"""
+        error_lower = str(error or "").lower()
+        return any(
+            token in error_lower
+            for token in (
+                "模型服务拒绝",
+                "request was blocked",
+                "your request was blocked",
+                "permissiondenied",
+                "permission denied",
+                "403",
+                "forbidden",
+            )
+        )
     
     def _format_web_results(self, results: List[Dict], query: str) -> str:
         """格式化网络搜索结果"""

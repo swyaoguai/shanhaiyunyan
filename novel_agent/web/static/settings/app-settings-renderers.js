@@ -2,6 +2,36 @@
  * 山海·云烟 - 设置页渲染层
  */
 
+const SETTINGS_DEFAULT_API_PRESET_ID = 'preset-tsc5';
+const SETTINGS_DEFAULT_API_PRESET_LEGACY_NAME = '预设接口';
+const SETTINGS_DEFAULT_API_PRESET_DISPLAY_NAME = '探索仓API';
+const SETTINGS_RELAY_SITE_URL = 'https://test.tsc5.top/';
+
+function normalizeApiConfigDisplayName(config) {
+    const name = String(config?.name || '').trim();
+    if (config?.id === SETTINGS_DEFAULT_API_PRESET_ID && (!name || name === SETTINGS_DEFAULT_API_PRESET_LEGACY_NAME)) {
+        return SETTINGS_DEFAULT_API_PRESET_DISPLAY_NAME;
+    }
+    return name || '未命名配置';
+}
+
+function shouldShowRelayQuickLink(config) {
+    const apiBase = String(config?.api_base || '').trim();
+    return config?.id === SETTINGS_DEFAULT_API_PRESET_ID || apiBase.includes('api.tsc5.top') || apiBase.includes('test.tsc5.top');
+}
+
+function renderRelayQuickLink(config, className = '') {
+    if (!shouldShowRelayQuickLink(config)) {
+        return '';
+    }
+    return `
+        <a class="settings-quick-link ${className}" href="${SETTINGS_RELAY_SITE_URL}" target="_blank" rel="noopener noreferrer">
+            <i class="ri-external-link-line"></i>
+            打开中转站
+        </a>
+    `;
+}
+
 function loadThemeSettings() {
     const content = ensureSettingsContentRoot();
 
@@ -177,7 +207,9 @@ async function loadGlobalAPISettings() {
 
         bindGlobalAPISettingsEvents(timeoutSettings);
     } catch (e) {
-        content.innerHTML = renderSettingsErrorState(`加载配置失败: ${safeErrorText(e)}`);
+        content.innerHTML = renderSettingsErrorState(`加载配置失败: ${safeErrorText(e)}`, {
+            retryAction: loadGlobalAPISettings
+        });
     }
 }
 
@@ -216,12 +248,15 @@ function renderGlobalApiSettingsView({
 
                 <div class="settings-grid settings-grid-2">
                     <div>
-                        <label class="settings-label">选择API配置</label>
+                        <div class="settings-label-row">
+                            <label class="settings-label">选择API配置</label>
+                            ${renderRelayQuickLink(activeConfig, 'settings-quick-link--inline')}
+                        </div>
                         <select id="active-config-select" class="settings-field">
                             ${!hasConfigs ? '<option value="">-- 请先添加配置 --</option>' : ''}
                             ${configs.map((cfg) => `
                                 <option value="${safeAttr(cfg.id)}" ${cfg.id === activeConfigId ? 'selected' : ''}>
-                                    ${safeText(cfg.name)} (${safeHostText(cfg.api_base)})
+                                    ${safeText(normalizeApiConfigDisplayName(cfg))} (${safeHostText(cfg.api_base)})
                                 </option>
                             `).join('')}
                         </select>
@@ -243,7 +278,7 @@ function renderGlobalApiSettingsView({
                         <i class="ri-wifi-line"></i> 测试连接
                     </button>
                     <span id="active-config-status" class="settings-status-text" style="margin-left: auto;">
-                        ${activeConfig ? `当前: ${safeText(activeConfig.name)} / ${safeText(activeModel || '未选择模型')}` : '未选择配置'}
+                        ${activeConfig ? `当前: ${safeText(normalizeApiConfigDisplayName(activeConfig))} / ${safeText(activeModel || '未选择模型')}` : '未选择配置'}
                     </span>
                 </div>
 
@@ -458,7 +493,8 @@ function renderConfigCard(cfg) {
             <div class="settings-card-header">
                 <div style="flex: 1;">
                     <div class="settings-card-title-row">
-                        <span class="settings-card-title">${safeText(cfg.name)}</span>
+                        <span class="settings-card-title">${safeText(normalizeApiConfigDisplayName(cfg))}</span>
+                        ${renderRelayQuickLink(cfg, 'settings-quick-link--card')}
                         ${isActive ? '<span class="settings-badge settings-badge--success">当前使用</span>' : ''}
                         <span class="settings-chip ${_apiTypeBadgeClass(apiType)}"><i class="ri-plug-line"></i> ${_apiTypeLabel(apiType)}</span>
                         ${keyStatusChip}
@@ -539,7 +575,9 @@ async function loadAgentSettings() {
             await loadAgentSettings();
         });
     } catch (e) {
-        content.innerHTML = renderSettingsErrorState(`加载Agent配置失败: ${safeErrorText(e)}`);
+        content.innerHTML = renderSettingsErrorState(`加载Agent配置失败: ${safeErrorText(e)}`, {
+            retryAction: loadAgentSettings
+        });
     }
 }
 
@@ -622,7 +660,7 @@ function renderAgentSettingsView(agentTypes, agents) {
                                         <option value="">-- 使用全局配置 --</option>
                                         ${agentPageApiConfigs.map((cfg) => `
                                             <option value="${safeAttr(cfg.id)}" ${matchedApiConfigId === cfg.id ? 'selected' : ''}>
-                                                ${safeText(cfg.name)} (${safeHostText(cfg.api_base)})
+                                                ${safeText(normalizeApiConfigDisplayName(cfg))} (${safeHostText(cfg.api_base)})
                                             </option>
                                         `).join('')}
                                     </select>
@@ -948,7 +986,9 @@ async function loadKnowledgeBaseSettings() {
 
         bindKnowledgeBaseEvents(config);
     } catch (e) {
-        content.innerHTML = renderSettingsErrorState(`加载资料库配置失败: ${safeErrorText(e)}`);
+        content.innerHTML = renderSettingsErrorState(`加载资料库配置失败: ${safeErrorText(e)}`, {
+            retryAction: loadKnowledgeBaseSettings
+        });
     }
 }
 
@@ -1009,7 +1049,9 @@ async function loadSkillsSettings() {
         content.innerHTML = renderSkillsSettingsView(skills);
         bindSkillsSettingsEvents();
     } catch (e) {
-        content.innerHTML = renderSettingsErrorState(`加载技能失败: ${safeErrorText(e)}`);
+        content.innerHTML = renderSettingsErrorState(`加载技能失败: ${safeErrorText(e)}`, {
+            retryAction: loadSkillsSettings
+        });
     }
 }
 

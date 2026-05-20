@@ -25,6 +25,7 @@ from ..config import config
 from ..settings import get_settings
 from ..agents import RouterAgent
 from ..constants import TIMEOUTS, get_data_dir
+from ..version import get_app_version
 from .dependencies import set_coordinator, set_router_agent
 from .runtime_refresh import create_runtime_coordinator
 from .routes import register_routes
@@ -234,7 +235,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="山海·云烟",
         description="基于多智能体协作的智能小说创作系统",
-        version="1.0",
+        version=get_app_version(),
         lifespan=lifespan
     )
 

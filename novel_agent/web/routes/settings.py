@@ -64,6 +64,10 @@ def _is_mimo_api_base(api_base: str) -> bool:
     return "xiaomimimo.com" in str(api_base or "").lower()
 
 
+def _is_tsc5_api_base(api_base: str) -> bool:
+    return "tsc5.top" in str(api_base or "").lower()
+
+
 def _build_openai_compatible_headers(api_key: str, api_base: str) -> dict[str, str]:
     """Build headers for OpenAI-compatible providers.
 
@@ -83,10 +87,15 @@ def _build_anthropic_headers(api_key: str, api_base: str) -> dict[str, str]:
 
     Official Anthropic uses x-api-key + anthropic-version. Xiaomi MiMo's
     Anthropic-compatible endpoint documents api-key auth under /anthropic/v1.
+    New API-compatible relays such as TSC5 document Bearer auth for
+    /v1/messages, so use the same header shape in tests and runtime calls.
     """
     headers = {"Content-Type": "application/json"}
     if _is_mimo_api_base(api_base):
         headers["api-key"] = api_key
+    elif _is_tsc5_api_base(api_base) or "anthropic.com" not in str(api_base or "").lower():
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["anthropic-version"] = "2023-06-01"
     else:
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
@@ -475,6 +484,8 @@ async def fetch_models(request: FetchModelsRequest):
                 cfg_key = (cfg.api_key or "").strip()
                 if cfg_base == api_base and cfg_key:
                     api_key = cfg_key
+                    if api_type == "openai_chat" and getattr(cfg, 'api_type', ''):
+                        api_type = cfg.api_type
                     logger.info(f"Using saved API key for {api_base}")
                     break
         
@@ -584,7 +595,7 @@ async def test_connection(request: TestConnectionRequest):
         api_type = (getattr(request, 'api_type', '') or "openai_chat").strip()
 
         if config_id:
-            from ...agent_config import get_config_manager
+            from ...agent_config import DEFAULT_API_PRESET_ID, get_config_manager
             manager = get_config_manager()
             selected_config = next(
                 (cfg for cfg in manager.multi_config.configs if cfg.id == config_id),
@@ -594,6 +605,14 @@ async def test_connection(request: TestConnectionRequest):
                 return JSONResponse({
                     "success": False,
                     "error": f"Config ID not found: {config_id}. Please refresh the settings page."
+                })
+            if selected_config.id == DEFAULT_API_PRESET_ID and not selected_config.is_configured():
+                return JSONResponse({
+                    "success": False,
+                    "error_code": "preset_requires_selection",
+                    "title": "请先选择可用配置",
+                    "solution": "探索仓API只是占位入口。请新建或选择一套已填写 Key 和模型的 API 配置后再测试。",
+                    "error": "请先选择可用配置。探索仓API不能直接测试连接。",
                 })
             if not api_base:
                 api_base = (selected_config.api_base or "").strip()
@@ -634,6 +653,8 @@ async def test_connection(request: TestConnectionRequest):
         # Anthropic 测试连接
         if api_type == "anthropic":
             return await _test_anthropic_connection(api_key, test_model, api_base)
+        if api_type == "openai_responses":
+            return await _test_openai_responses_connection(api_base, api_key, test_model)
 
         # OpenAI 兼容 API 测试连接
         return await _test_openai_connection(api_base, api_key, test_model)
@@ -679,14 +700,16 @@ async def _test_openai_connection(api_base: str, api_key: str, test_model: str) 
     start_time = time.time()
 
     async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+        request_body = {
+            "model": test_model,
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        if not _is_tsc5_api_base(api_base):
+            request_body["max_tokens"] = 5
         response = await client.post(
             f"{base_url}/chat/completions",
             headers=_build_openai_compatible_headers(api_key, api_base),
-            json={
-                "model": test_model,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 5
-            }
+            json=request_body,
         )
 
         response_time = int((time.time() - start_time) * 1000)
@@ -716,6 +739,77 @@ async def _test_openai_connection(api_base: str, api_key: str, test_model: str) 
                 success=True,
                 title="可以正常用",
                 solution="这套配置已经通过测试，可以直接拿来创作。",
+                error="连通，模型也能正常回话。",
+                model_tested=test_model,
+                response_time=response_time,
+                status_code=response.status_code,
+            )
+        mapped = _map_test_connection_error(response.status_code, error_detail, test_model)
+        return _build_test_connection_response(
+            success=False,
+            error_code=mapped["error_code"],
+            title=mapped["title"],
+            solution=mapped["solution"],
+            error=f"{mapped['title']}。{mapped['solution']}",
+            detail=error_detail or error_text[:200],
+            status_code=response.status_code,
+            model_tested=test_model,
+        )
+
+
+async def _test_openai_responses_connection(api_base: str, api_key: str, test_model: str) -> JSONResponse:
+    """测试 OpenAI Responses API 连接。"""
+    base_url = _normalize_openai_base_url(api_base)
+
+    if not test_model:
+        test_model = "gpt-5.4-mini"
+
+    start_time = time.time()
+    request_body = {
+        "model": test_model,
+        "input": "Hi" if _is_tsc5_api_base(api_base) else [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hi"}],
+            }
+        ],
+        "max_output_tokens": 5,
+    }
+
+    async with httpx.AsyncClient(timeout=TIMEOUTS.HTTP_LONG) as client:
+        response = await client.post(
+            f"{base_url}/responses",
+            headers=_build_openai_compatible_headers(api_key, api_base),
+            json=request_body,
+        )
+
+        response_time = int((time.time() - start_time) * 1000)
+        error_text = response.text[:400] if response.text else ""
+        error_detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                candidate = payload.get("error", payload.get("message", payload.get("detail", "")))
+                if isinstance(candidate, dict):
+                    error_detail = str(
+                        candidate.get("message")
+                        or candidate.get("detail")
+                        or candidate.get("code")
+                        or candidate
+                    )
+                else:
+                    error_detail = str(candidate or "")
+        except Exception:
+            error_detail = ""
+        if not error_detail:
+            error_detail = error_text
+        error_detail = (error_detail or "").strip()[:200]
+
+        if response.status_code == 200:
+            return _build_test_connection_response(
+                success=True,
+                title="可以正常用",
+                solution="这套 Responses API 配置已经通过测试，可以直接拿来创作。",
                 error="连通，模型也能正常回话。",
                 model_tested=test_model,
                 response_time=response_time,

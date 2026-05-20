@@ -100,7 +100,7 @@ function showCollaborativeImportDialog() {
                     导入小说到多Agent模式
                 </h3>
                 <p style="margin: 0 0 14px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7;">
-                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>。导入后会立即自动整理协作记忆。
+                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>。导入后会立即自动整理协作记忆，并反向补全角色卡、世界观和大纲。
                 </p>
 
                 <div style="margin-bottom: 14px;">
@@ -166,7 +166,10 @@ function showCollaborativeImportDialog() {
             closeModal();
 
             const importedCount = response.imported_chapters || 0;
-            showToast(`已导入 ${importedCount} 章，协作记忆已自动整理`, 'success');
+            const supplement = response.material_supplement || {};
+            const added = Number(supplement.total_added || 0);
+            const suffix = added > 0 ? `，补全 ${added} 条资料` : '，资料已检查';
+            showToast(`已导入 ${importedCount} 章，协作记忆已自动整理${suffix}`, 'success');
 
             if (Array.isArray(store.projectData.chapters) && store.projectData.chapters.length > 0) {
                 const openIndex = Math.max(0, store.projectData.chapters.length - importedCount);

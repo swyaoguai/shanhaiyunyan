@@ -13,11 +13,21 @@ import uuid
 
 from ..constants import WRITING_CONFIG
 from ..utils.atomic_write import atomic_write_json
+from .context_delta import build_context_delta
 from .execution_context import CollabExecutionContext, TaskExecutionEnvelope
+from .output_validation import format_output_validation_error, validate_task_outputs
 from .routing_policy import RoutingPolicy, RoutingPolicyError
+from .runtime_event_log import RuntimeEventLog
+from .runtime_events import (
+    build_legacy_trace_event,
+    normalize_legacy_trace_event,
+)
+from .runtime_hooks import get_runtime_hook_registry, make_runtime_hook_context
+from .runtime_messages import attach_runtime_message
 from .runtime_state import RuntimeStateStore
 from .task_pool import TaskPool, TaskStatus
 from .contracts import TaskDefinition
+from .workflow_context import AgentHandoff
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +49,9 @@ class DispatchResult:
     context: Dict[str, Any] = field(default_factory=dict)
     task_pool: Dict[str, Any] = field(default_factory=dict)
     runtime_task_pool: Dict[str, Any] = field(default_factory=dict)
+    output_validation: Dict[str, Any] = field(default_factory=dict)
+    handoff: Dict[str, Any] = field(default_factory=dict)
+    context_delta: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -112,6 +125,8 @@ class AgentDispatcher:
         # 13.5 批量写入：延迟持久化缓存
         self._deferred_events: List[Dict[str, Any]] = []
         self._deferred_snapshots: List[Dict[str, Any]] = []
+        self._deferred_handoffs: List[Dict[str, Any]] = []
+        self._deferred_context_deltas: List[Dict[str, Any]] = []
 
     def _get_capability_registry(self) -> Any:
         return self.capability_registry_provider()
@@ -122,12 +137,54 @@ class AgentDispatcher:
     def _get_project_dir(self) -> Path:
         return Path(self.project_dir_provider())
 
+    @staticmethod
+    def _unique_strings(values: List[Any]) -> List[str]:
+        normalized: List[str] = []
+        for value in values or []:
+            item = str(value or "").strip()
+            if item and item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    def _prime_required_context_keys(self, envelope: TaskExecutionEnvelope) -> List[str]:
+        required: List[str] = list(envelope.required_context_keys or [])
+        getter = getattr(self.routing_policy, "required_context_keys_for", None)
+        if callable(getter):
+            try:
+                required.extend(getter(envelope.task_type, envelope.stage))
+            except Exception:
+                pass
+        envelope.required_context_keys = self._unique_strings(required)
+        return list(envelope.required_context_keys)
+
+    @staticmethod
+    def _source_of_truth_summary(
+        context: CollabExecutionContext,
+        keys: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        source_map = dict(getattr(context, "source_of_truth", {}) or {})
+        if not source_map:
+            return {}
+        normalized_keys = [
+            str(item or "").strip()
+            for item in (keys or [])
+            if str(item or "").strip()
+        ]
+        if not normalized_keys:
+            normalized_keys = sorted(source_map.keys())
+        return {
+            key: str(source_map.get(key) or "").strip()
+            for key in normalized_keys
+            if str(source_map.get(key) or "").strip()
+        }
+
     def _append_execution_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         project_manager = self._get_project_manager()
         trace = project_manager.load_project_state("collab_execution_trace", default={})
         if not isinstance(trace, dict):
             trace = {}
         trace.setdefault("events", [])
+        trace.setdefault("runtime_events", [])
         trace.setdefault("status", "initialized")
         trace.setdefault("supervised_mode", bool(self.supervised_mode_provider()))
         trace.setdefault("fallback_to_orchestrated", bool(self.fallback_to_orchestrated_provider()))
@@ -136,35 +193,92 @@ class AgentDispatcher:
         for item in trace.get("events", []):
             if not isinstance(item, dict):
                 continue
-            normalized_item = dict(item)
-            normalized_timestamp = str(
-                normalized_item.get("timestamp")
-                or normalized_item.get("created_at")
-                or ""
-            ).strip()
-            if not normalized_timestamp:
-                normalized_timestamp = datetime.now().isoformat()
-            normalized_item["timestamp"] = normalized_timestamp
-            normalized_item.pop("created_at", None)
-            normalized_events.append(normalized_item)
+            normalized_events.append(normalize_legacy_trace_event(item))
         trace["events"] = normalized_events
 
-        event_timestamp = datetime.now().isoformat()
-        event_payload = {
-            "type": str(event_type or "").strip() or "unknown",
-            "timestamp": event_timestamp,
-        }
-        if isinstance(payload, dict) and payload:
-            event_payload.update(payload)
-        event_payload["timestamp"] = str(event_payload.get("timestamp") or event_timestamp).strip() or event_timestamp
-        event_payload.pop("created_at", None)
+        run_id = str(trace.get("contract_id") or trace.get("run_id") or "").strip()
+        prepared_payload = self._prepare_execution_payload(event_type, payload, run_id=run_id)
+        event_payload, runtime_event = build_legacy_trace_event(
+            event_type,
+            prepared_payload,
+            run_id=run_id,
+        )
 
         trace["events"].append(event_payload)
         if len(trace["events"]) > 500:
             trace["events"] = trace["events"][-500:]
+        runtime_events = [
+            item for item in trace.get("runtime_events", [])
+            if isinstance(item, dict)
+        ]
+        runtime_events.append(runtime_event)
+        if len(runtime_events) > 500:
+            runtime_events = runtime_events[-500:]
+        trace["runtime_events"] = runtime_events
         trace["updated_at"] = event_payload["timestamp"]
         project_manager.save_project_state("collab_execution_trace", trace)
+        RuntimeEventLog(self._get_project_dir()).safe_append_event(runtime_event)
         return trace
+
+    def _prepare_execution_payload(
+        self,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        run_id: str = "",
+    ) -> Dict[str, Any]:
+        """Attach typed message/artifact envelopes while preserving legacy fields."""
+        return attach_runtime_message(event_type, payload, run_id=run_id)
+
+    def _emit_execution_event(
+        self,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        defer_persist: bool = False,
+    ) -> None:
+        """写入执行事件；批量模式下先缓存，保持现有延迟落盘行为。"""
+        prepared_payload = self._prepare_execution_payload(event_type, payload)
+        if defer_persist:
+            event_payload, _runtime_event = build_legacy_trace_event(event_type, prepared_payload)
+            self._deferred_events.append(event_payload)
+            return
+        self._append_execution_event(event_type, prepared_payload)
+
+    async def _run_runtime_hooks(
+        self,
+        stage: str,
+        event: Dict[str, Any],
+        *,
+        task_id: str = "",
+        task_type: str = "",
+        agent_name: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        defer_persist: bool = False,
+    ) -> List[Any]:
+        context = make_runtime_hook_context(
+            stage=stage,
+            project_dir=self._get_project_dir(),
+            task_id=task_id,
+            task_type=task_type,
+            agent_name=agent_name,
+            metadata=metadata,
+        )
+        try:
+            return await get_runtime_hook_registry().run(stage, event, context)
+        except Exception as exc:
+            self._emit_execution_event(
+                "runtime_hook_error",
+                {
+                    "hook_stage": stage,
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "assigned_agent": agent_name,
+                    "error": str(exc),
+                },
+                defer_persist=defer_persist,
+            )
+            return []
 
     def _record_context_snapshot(
         self,
@@ -178,6 +292,9 @@ class AgentDispatcher:
         snapshot_id = f"ctx-{uuid.uuid4().hex[:12]}"
         # 13.5 修复：限制上下文快照大小，只保留关键字段
         context_dict = envelope.context.to_dict()
+        required_context_keys = list(envelope.required_context_keys or [])
+        missing_context_keys = envelope.context.missing_keys(required_context_keys)
+        source_summary = self._source_of_truth_summary(envelope.context, required_context_keys)
         snapshot_context = {}
         for key in ("stage", "world", "characters", "chapter_outline", "previous_summary", "context_strategy"):
             if key in context_dict:
@@ -197,7 +314,9 @@ class AgentDispatcher:
             "route_reason": route_reason,
             "candidate_source": candidate_source,
             "candidate_agents": list(candidate_agents or []),
-            "required_context_keys": list(envelope.required_context_keys or []),
+            "required_context_keys": required_context_keys,
+            "missing_context_keys": missing_context_keys,
+            "source_of_truth_summary": source_summary,
             "context": snapshot_context,
         }
 
@@ -353,6 +472,137 @@ class AgentDispatcher:
                 logger.debug(f"[AgentDispatcher] resolve model failed for {target_name}: {exc}")
         return ""
 
+    def _append_state_item(
+        self,
+        state_key: str,
+        item: Dict[str, Any],
+        *,
+        max_items: int,
+    ) -> None:
+        project_manager = self._get_project_manager()
+        store = project_manager.load_project_state(state_key, default={})
+        if not isinstance(store, dict):
+            store = {}
+        items = [
+            existing for existing in store.get("items", [])
+            if isinstance(existing, dict)
+        ]
+        items.append(dict(item or {}))
+        if len(items) > max_items:
+            items = items[-max_items:]
+        store["items"] = items
+        store["updated_at"] = datetime.now().isoformat()
+        project_manager.save_project_state(state_key, store)
+
+    def _persist_context_delta(self, delta: Dict[str, Any], *, defer_persist: bool = False) -> None:
+        if not isinstance(delta, dict) or not delta.get("delta_id"):
+            return
+        if defer_persist:
+            self._deferred_context_deltas.append(dict(delta))
+            return
+        self._append_state_item("collab_context_deltas", delta, max_items=300)
+
+    def _persist_handoff(self, handoff: Dict[str, Any], *, defer_persist: bool = False) -> None:
+        if not isinstance(handoff, dict) or not handoff.get("task_id"):
+            return
+        if defer_persist:
+            self._deferred_handoffs.append(dict(handoff))
+            return
+        self._append_state_item("collab_handoffs", handoff, max_items=300)
+
+    @staticmethod
+    def _extract_artifact_refs(task: TaskDefinition, result: Dict[str, Any]) -> List[str]:
+        refs: List[str] = []
+        if task.result_ref:
+            refs.append(str(task.result_ref))
+        for key in ("artifact_id", "target_path", "path", "filename", "summary_path", "result_ref"):
+            value = result.get(key) if isinstance(result, dict) else None
+            if isinstance(value, str) and value.strip():
+                refs.append(value.strip())
+        created_files = result.get("created_files") if isinstance(result, dict) else None
+        if isinstance(created_files, list):
+            for item in created_files:
+                if isinstance(item, dict):
+                    path = str(item.get("path") or "").strip()
+                    if path:
+                        refs.append(path)
+        return AgentDispatcher._unique_strings(refs)
+
+    @staticmethod
+    def _summarize_result_for_handoff(task_type: str, result: Dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return ""
+        for key in ("response_message", "message", "summary"):
+            value = str(result.get(key) or "").strip()
+            if value:
+                return re.sub(r"\s+", " ", value)[:240]
+        if task_type == "write_chapter" and str(result.get("content") or "").strip():
+            return f"已生成章节正文，约 {result.get('word_count') or len(str(result.get('content') or ''))} 字。"
+        if task_type == "content_read":
+            loaded = result.get("loaded_context")
+            if isinstance(loaded, dict):
+                return "已加载上下文：" + "、".join(list(loaded.keys())[:8])
+        if task_type == "evaluate_chapter":
+            evaluation = result.get("evaluation")
+            if isinstance(evaluation, dict):
+                passed = evaluation.get("passed")
+                return "章节评估通过。" if passed else "章节评估需要修订。"
+        if task_type == "summary_orchestrate" and isinstance(result.get("summary_payload"), dict):
+            payload = result.get("summary_payload") or {}
+            return f"已生成第{payload.get('start_chapter', '?')}-{payload.get('end_chapter', '?')}章阶段总结。"
+        return f"{task_type or '任务'} 已完成。"
+
+    def _build_agent_handoff(
+        self,
+        *,
+        task: TaskDefinition,
+        runtime_task: TaskDefinition,
+        task_type: str,
+        agent_name: str,
+        result: Dict[str, Any],
+        context_snapshot_id: str,
+        context_delta: Dict[str, Any],
+        output_validation: Dict[str, Any],
+        required_context_keys: List[str],
+    ) -> Dict[str, Any]:
+        produced_keys = self._unique_strings(
+            list((context_delta or {}).get("added_keys") or [])
+            + list((context_delta or {}).get("updated_keys") or [])
+        )
+        artifact_refs = self._extract_artifact_refs(task, result)
+        summary = self._summarize_result_for_handoff(task_type, result)
+        risks: List[str] = []
+        if (output_validation or {}).get("warning_outputs"):
+            risks.append("输出缺少建议字段：" + "、".join(output_validation.get("warning_outputs") or []))
+        if not (output_validation or {}).get("passed", True):
+            risks.append("输出校验未通过")
+
+        handoff = AgentHandoff(
+            artifact_id=artifact_refs[0] if artifact_refs else context_snapshot_id,
+            artifact_type=str(task_type or "").strip(),
+            task_id=str(runtime_task.task_id or task.task_id or "").strip(),
+            agent_name=str(agent_name or "").strip(),
+            context_snapshot_id=str(context_snapshot_id or "").strip(),
+            decisions=[summary] if summary else [],
+            dependencies=[str(item) for item in (task.depends_on or [])],
+            new_facts=[
+                f"{key}: {(context_delta.get('summaries') or {}).get(key, {}).get('preview') or (context_delta.get('summaries') or {}).get(key, {}).get('type') or 'updated'}"
+                for key in list((context_delta or {}).get("added_keys") or [])[:8]
+            ],
+            changed_facts=[
+                f"{key}: {(context_delta.get('overwrite_reasons') or {}).get(key, 'updated')}"
+                for key in list((context_delta or {}).get("updated_keys") or [])[:8]
+            ],
+            risks=risks,
+            next_context_summary=summary,
+            artifact_refs=artifact_refs,
+            context_delta_id=str((context_delta or {}).get("delta_id") or "").strip(),
+            consumed_context_keys=self._unique_strings(list(required_context_keys or []) + list((task.inputs or {}).keys())),
+            produced_context_keys=produced_keys,
+            output_validation=dict(output_validation or {}),
+        )
+        return handoff.to_dict()
+
     def _update_task_metadata(
         self,
         *,
@@ -366,6 +616,12 @@ class AgentDispatcher:
         selected_agent_name: str,
         fallback_provenance: Optional[Dict[str, Any]] = None,
         selected_model: str = "",
+        required_context_keys: Optional[List[str]] = None,
+        missing_context_keys: Optional[List[str]] = None,
+        source_of_truth_summary: Optional[Dict[str, str]] = None,
+        output_validation: Optional[Dict[str, Any]] = None,
+        handoff: Optional[Dict[str, Any]] = None,
+        context_delta: Optional[Dict[str, Any]] = None,
     ) -> None:
         model_label = str(selected_model or self._resolve_agent_model(selected_agent_name) or "").strip()
         metadata_patch = {
@@ -376,6 +632,20 @@ class AgentDispatcher:
             "selected_agent": selected_agent_name,
             "fallback_provenance": dict(fallback_provenance or {}),
         }
+        if required_context_keys is not None:
+            metadata_patch["required_context_keys"] = self._unique_strings(required_context_keys)
+        if missing_context_keys is not None:
+            metadata_patch["missing_context_keys"] = self._unique_strings(missing_context_keys)
+        if source_of_truth_summary is not None:
+            metadata_patch["source_of_truth_summary"] = dict(source_of_truth_summary or {})
+        if output_validation is not None:
+            metadata_patch["output_validation"] = dict(output_validation or {})
+        if handoff is not None:
+            metadata_patch["handoff"] = dict(handoff or {})
+        if context_delta is not None:
+            metadata_patch["context_delta"] = dict(context_delta or {})
+            if isinstance(context_delta, dict) and context_delta.get("delta_id"):
+                metadata_patch["context_delta_id"] = str(context_delta.get("delta_id") or "").strip()
         if model_label:
             metadata_patch.update({
                 "model": model_label,
@@ -393,7 +663,12 @@ class AgentDispatcher:
 
     def flush_deferred_persistence(self) -> None:
         """13.5 批量写入：将缓存的事件和快照一次性持久化到磁盘。"""
-        if not self._deferred_events and not self._deferred_snapshots:
+        if (
+            not self._deferred_events
+            and not self._deferred_snapshots
+            and not self._deferred_handoffs
+            and not self._deferred_context_deltas
+        ):
             return
 
         project_manager = self._get_project_manager()
@@ -416,12 +691,45 @@ class AgentDispatcher:
             project_manager.save_project_state("collab_context_snapshots", snapshot_store)
             self._deferred_snapshots.clear()
 
+        if self._deferred_context_deltas:
+            delta_store = project_manager.load_project_state("collab_context_deltas", default={})
+            if not isinstance(delta_store, dict):
+                delta_store = {}
+            delta_items = [
+                item for item in delta_store.get("items", [])
+                if isinstance(item, dict)
+            ]
+            delta_items.extend(self._deferred_context_deltas)
+            if len(delta_items) > 300:
+                delta_items = delta_items[-300:]
+            delta_store["items"] = delta_items
+            delta_store["updated_at"] = datetime.now().isoformat()
+            project_manager.save_project_state("collab_context_deltas", delta_store)
+            self._deferred_context_deltas.clear()
+
+        if self._deferred_handoffs:
+            handoff_store = project_manager.load_project_state("collab_handoffs", default={})
+            if not isinstance(handoff_store, dict):
+                handoff_store = {}
+            handoff_items = [
+                item for item in handoff_store.get("items", [])
+                if isinstance(item, dict)
+            ]
+            handoff_items.extend(self._deferred_handoffs)
+            if len(handoff_items) > 300:
+                handoff_items = handoff_items[-300:]
+            handoff_store["items"] = handoff_items
+            handoff_store["updated_at"] = datetime.now().isoformat()
+            project_manager.save_project_state("collab_handoffs", handoff_store)
+            self._deferred_handoffs.clear()
+
         # 批量写入事件
         if self._deferred_events:
             trace = project_manager.load_project_state("collab_execution_trace", default={})
             if not isinstance(trace, dict):
                 trace = {}
             trace.setdefault("events", [])
+            trace.setdefault("runtime_events", [])
             trace.setdefault("status", "initialized")
             trace.setdefault("supervised_mode", bool(self.supervised_mode_provider()))
             trace.setdefault("fallback_to_orchestrated", bool(self.fallback_to_orchestrated_provider()))
@@ -430,24 +738,57 @@ class AgentDispatcher:
             for item in trace.get("events", []):
                 if not isinstance(item, dict):
                     continue
-                normalized_item = dict(item)
-                normalized_timestamp = str(
-                    normalized_item.get("timestamp")
-                    or normalized_item.get("created_at")
-                    or ""
-                ).strip()
-                if not normalized_timestamp:
-                    normalized_timestamp = datetime.now().isoformat()
-                normalized_item["timestamp"] = normalized_timestamp
-                normalized_item.pop("created_at", None)
-                normalized_events.append(normalized_item)
+                normalized_events.append(normalize_legacy_trace_event(item))
             trace["events"] = normalized_events
 
-            trace["events"].extend(self._deferred_events)
+            runtime_events = [
+                item for item in trace.get("runtime_events", [])
+                if isinstance(item, dict)
+            ]
+            flushed_events: List[Dict[str, Any]] = []
+            for item in self._deferred_events:
+                if not isinstance(item, dict):
+                    continue
+                if isinstance(item.get("runtime_event"), dict):
+                    event_payload = normalize_legacy_trace_event(item)
+                    runtime_event = dict(item.get("runtime_event") or {})
+                    resolved_run_id = str(trace.get("contract_id") or trace.get("run_id") or "").strip()
+                    if not runtime_event.get("run_id"):
+                        runtime_event["run_id"] = resolved_run_id
+                    event_payload["run_id"] = runtime_event.get("run_id", "")
+                    if isinstance(event_payload.get("runtime_message"), dict) and resolved_run_id:
+                        runtime_message = dict(event_payload.get("runtime_message") or {})
+                        metadata = dict(runtime_message.get("metadata") or {})
+                        metadata.setdefault("run_id", resolved_run_id)
+                        runtime_message["metadata"] = metadata
+                        event_payload["runtime_message"] = runtime_message
+                        if isinstance(runtime_event.get("payload"), dict):
+                            runtime_event["payload"]["runtime_message"] = runtime_message
+                    event_payload["runtime_event"] = runtime_event
+                else:
+                    legacy_type = str(item.get("type") or "unknown").strip() or "unknown"
+                    event_payload, runtime_event = build_legacy_trace_event(
+                        legacy_type,
+                        item,
+                        timestamp=str(item.get("timestamp") or "").strip(),
+                        run_id=str(trace.get("contract_id") or trace.get("run_id") or "").strip(),
+                    )
+                flushed_events.append(event_payload)
+                runtime_events.append(runtime_event)
+
+            trace["events"].extend(flushed_events)
             if len(trace["events"]) > 500:
                 trace["events"] = trace["events"][-500:]
+            if len(runtime_events) > 500:
+                runtime_events = runtime_events[-500:]
+            trace["runtime_events"] = runtime_events
             trace["updated_at"] = datetime.now().isoformat()
             project_manager.save_project_state("collab_execution_trace", trace)
+            RuntimeEventLog(self._get_project_dir()).safe_append_events(
+                event.get("runtime_event", {})
+                for event in flushed_events
+                if isinstance(event.get("runtime_event"), dict)
+            )
             self._deferred_events.clear()
 
     async def dispatch(
@@ -465,6 +806,38 @@ class AgentDispatcher:
             envelope.fallback_agent_name or getattr(fallback_agent, "name", "") or ""
         ).strip()
         ephemeral_agent_name = ""
+        required_context_keys = self._prime_required_context_keys(envelope)
+        missing_context_keys = envelope.context.missing_keys(required_context_keys)
+        source_of_truth_summary = self._source_of_truth_summary(envelope.context, required_context_keys)
+        output_validation: Dict[str, Any] = {}
+        handoff_payload: Dict[str, Any] = {}
+        context_delta_payload: Dict[str, Any] = {}
+
+        self._emit_execution_event(
+            "route_start",
+            {
+                "task_id": runtime_task.task_id,
+                "task_type": envelope.task_type,
+                "title": envelope.title,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+                "source_of_truth_summary": source_of_truth_summary,
+            },
+            defer_persist=defer_persist,
+        )
+        await self._run_runtime_hooks(
+            "before_route",
+            {
+                "task_id": runtime_task.task_id,
+                "task_type": envelope.task_type,
+                "title": envelope.title,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+            },
+            task_id=runtime_task.task_id,
+            task_type=envelope.task_type,
+            defer_persist=defer_persist,
+        )
 
         try:
             envelope.validate_required_context()
@@ -487,6 +860,13 @@ class AgentDispatcher:
                 candidate_names = list(decision.candidate_names or [])
                 route_reason = decision.route_reason
                 candidate_source = decision.candidate_source
+                if decision.required_context_keys:
+                    required_context_keys = self._unique_strings(
+                        list(required_context_keys) + list(decision.required_context_keys or [])
+                    )
+                    envelope.required_context_keys = required_context_keys
+                    missing_context_keys = envelope.context.missing_keys(required_context_keys)
+                    source_of_truth_summary = self._source_of_truth_summary(envelope.context, required_context_keys)
                 selected_agent = self._resolve_agent_instance(selected_agent_name, fallback_agent=fallback_agent)
                 if selected_agent is None:
                     raise RuntimeError(f"任务 {envelope.task_type} 缺少可执行Agent: {selected_agent_name}")
@@ -526,8 +906,26 @@ class AgentDispatcher:
                         context_snapshot_id=context_snapshot_id,
                         execution_mode="rejected",
                         selected_agent_name="",
+                        required_context_keys=required_context_keys,
+                        missing_context_keys=missing_context_keys,
+                        source_of_truth_summary=source_of_truth_summary,
                     )
                     self.save_runtime_task_pool(runtime_pool)
+                    self._emit_execution_event(
+                        "route_end",
+                        {
+                            "task_id": runtime_task.task_id,
+                            "task_type": envelope.task_type,
+                            "title": envelope.title,
+                            "status": "failed",
+                            "reason": route_reason,
+                            "candidate_source": candidate_source,
+                            "context_snapshot_id": context_snapshot_id,
+                            "required_context_keys": required_context_keys,
+                            "missing_context_keys": missing_context_keys,
+                        },
+                        defer_persist=defer_persist,
+                    )
                     self._append_execution_event(
                         "task_rejected",
                         {
@@ -536,6 +934,8 @@ class AgentDispatcher:
                             "title": envelope.title,
                             "reason": route_reason,
                             "context_snapshot_id": context_snapshot_id,
+                            "required_context_keys": required_context_keys,
+                            "missing_context_keys": missing_context_keys,
                         },
                     )
                     raise
@@ -559,8 +959,26 @@ class AgentDispatcher:
                     context_snapshot_id=context_snapshot_id,
                     execution_mode="rejected",
                     selected_agent_name="",
+                    required_context_keys=required_context_keys,
+                    missing_context_keys=missing_context_keys,
+                    source_of_truth_summary=source_of_truth_summary,
                 )
                 self.save_runtime_task_pool(runtime_pool)
+                self._emit_execution_event(
+                    "route_end",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "title": envelope.title,
+                        "status": "failed",
+                        "reason": route_reason,
+                        "candidate_source": candidate_source,
+                        "context_snapshot_id": context_snapshot_id,
+                        "required_context_keys": required_context_keys,
+                        "missing_context_keys": missing_context_keys,
+                    },
+                    defer_persist=defer_persist,
+                )
                 self._append_execution_event(
                     "task_rejected",
                     {
@@ -569,6 +987,8 @@ class AgentDispatcher:
                         "title": envelope.title,
                         "reason": route_reason,
                         "context_snapshot_id": context_snapshot_id,
+                        "required_context_keys": required_context_keys,
+                        "missing_context_keys": missing_context_keys,
                     },
                 )
                 raise
@@ -578,6 +998,39 @@ class AgentDispatcher:
             route_reason=route_reason,
             candidate_source=candidate_source,
             candidate_agents=candidate_names,
+            defer_persist=defer_persist,
+        )
+        self._emit_execution_event(
+            "route_end",
+            {
+                "task_id": runtime_task.task_id,
+                "task_type": envelope.task_type,
+                "title": envelope.title,
+                "assigned_agent": selected_agent_name,
+                "candidate_agents": candidate_names,
+                "candidate_source": candidate_source,
+                "route_reason": route_reason,
+                "context_snapshot_id": context_snapshot_id,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+                "source_of_truth_summary": source_of_truth_summary,
+            },
+            defer_persist=defer_persist,
+        )
+        await self._run_runtime_hooks(
+            "after_route",
+            {
+                "task_id": runtime_task.task_id,
+                "task_type": envelope.task_type,
+                "assigned_agent": selected_agent_name,
+                "candidate_agents": candidate_names,
+                "candidate_source": candidate_source,
+                "route_reason": route_reason,
+                "context_snapshot_id": context_snapshot_id,
+            },
+            task_id=runtime_task.task_id,
+            task_type=envelope.task_type,
+            agent_name=selected_agent_name,
             defer_persist=defer_persist,
         )
 
@@ -598,6 +1051,9 @@ class AgentDispatcher:
             execution_mode=execution_mode,
             selected_agent_name=claimed_by,
             selected_model=selected_model,
+            required_context_keys=required_context_keys,
+            missing_context_keys=missing_context_keys,
+            source_of_truth_summary=source_of_truth_summary,
         )
         task_pool.claim_task(task.task_id, claimed_by)
         task_pool.start_task(task.task_id, claimed_by)
@@ -605,6 +1061,25 @@ class AgentDispatcher:
         runtime_pool.update_task_status(runtime_task.task_id, TaskStatus.RUNNING, assigned_agent=claimed_by)
         # 问题17修复：runtime_pool 状态必须立即持久化，不能延迟
         self.save_runtime_task_pool(runtime_pool)
+        self._emit_execution_event(
+            "task_claimed",
+            {
+                "task_id": runtime_task.task_id,
+                "task_type": envelope.task_type,
+                "title": envelope.title,
+                "assigned_agent": claimed_by,
+                "candidate_source": candidate_source,
+                "route_reason": route_reason,
+                "context_snapshot_id": context_snapshot_id,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+                "model": selected_model,
+                "current_model": selected_model,
+                "active_model": selected_model,
+                "model_used": selected_model,
+            },
+            defer_persist=defer_persist,
+        )
         # 13.5 延迟模式：缓存事件而非立即写盘
         _task_started_event = {
             "task_id": runtime_task.task_id,
@@ -614,6 +1089,8 @@ class AgentDispatcher:
             "route_reason": route_reason,
             "candidate_source": candidate_source,
             "context_snapshot_id": context_snapshot_id,
+            "required_context_keys": required_context_keys,
+            "missing_context_keys": missing_context_keys,
             "model": selected_model,
             "current_model": selected_model,
             "active_model": selected_model,
@@ -645,9 +1122,110 @@ class AgentDispatcher:
 
         current_context = envelope.context.clone()
         try:
+            before_dispatch_results = await self._run_runtime_hooks(
+                "before_task_dispatch",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "input_keys": sorted(str(key) for key in (envelope.input_data or {}).keys()),
+                },
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                defer_persist=defer_persist,
+            )
+            task_block = next(
+                (
+                    item for item in before_dispatch_results
+                    if isinstance(item, dict) and item.get("block")
+                ),
+                None,
+            )
+            if task_block:
+                block_reason = str(task_block.get("reason") or "runtime hook blocked task").strip()
+                task_pool.block_task(task.task_id, block_reason)
+                runtime_pool.block_task(runtime_task.task_id, block_reason)
+                self.save_runtime_task_pool(runtime_pool)
+                self._emit_execution_event(
+                    "task_blocked",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": claimed_by,
+                        "reason": block_reason,
+                        "context_snapshot_id": context_snapshot_id,
+                    },
+                    defer_persist=defer_persist,
+                )
+                return DispatchResult(
+                    success=False,
+                    agent_name=claimed_by,
+                    result={"success": False, "blocked": True, "reason": block_reason},
+                    route_reason=route_reason,
+                    candidate_source=candidate_source,
+                    candidate_agents=candidate_names,
+                    context_snapshot_id=context_snapshot_id,
+                    execution_mode="blocked",
+                    context=current_context.to_dict(),
+                    task_pool=task_pool.to_dict(),
+                    runtime_task_pool=runtime_pool.to_dict(),
+                )
+
             result = await selected_agent.execute(envelope.input_data, context=current_context.to_agent_context())
-            if not isinstance(result, dict) or not result.get("success", True):
+            after_result_results = await self._run_runtime_hooks(
+                "after_task_result",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "result_keys": sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else [],
+                },
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                defer_persist=defer_persist,
+            )
+            for hook_result in after_result_results:
+                if isinstance(hook_result, dict) and isinstance(hook_result.get("result_patch"), dict) and isinstance(result, dict):
+                    result.update(hook_result["result_patch"])
+            self._emit_execution_event(
+                "validation_start",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "expected_outputs": list(task.expected_outputs or []),
+                },
+                defer_persist=defer_persist,
+            )
+            output_validation = validate_task_outputs(
+                task_type=envelope.task_type,
+                expected_outputs=task.expected_outputs,
+                result=result,
+            )
+            self._emit_execution_event(
+                "validation_end",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
+                },
+                defer_persist=defer_persist,
+            )
+            if (
+                not isinstance(result, dict)
+                or not result.get("success", True)
+                or not output_validation.get("passed", False)
+            ):
                 failure_msg = _format_agent_failure(result)
+                if isinstance(result, dict) and result.get("success", True) and not output_validation.get("passed", False):
+                    failure_msg = format_output_validation_error(output_validation)
                 logger.warning(
                     f"[AgentDispatcher] 任务首次执行失败，task_type={envelope.task_type}, "
                     f"agent={claimed_by}, reason={failure_msg[:200]}，正在重试..."
@@ -656,12 +1234,126 @@ class AgentDispatcher:
                 result = await selected_agent.execute(
                     envelope.input_data, context=retry_context.to_agent_context()
                 )
-                if not isinstance(result, dict) or not result.get("success", True):
+                self._emit_execution_event(
+                    "validation_start",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": claimed_by,
+                        "context_snapshot_id": context_snapshot_id,
+                        "expected_outputs": list(task.expected_outputs or []),
+                        "attempt": "retry",
+                    },
+                    defer_persist=defer_persist,
+                )
+                output_validation = validate_task_outputs(
+                    task_type=envelope.task_type,
+                    expected_outputs=task.expected_outputs,
+                    result=result,
+                )
+                self._emit_execution_event(
+                    "validation_end",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": claimed_by,
+                        "context_snapshot_id": context_snapshot_id,
+                        "output_validation": output_validation,
+                        "attempt": "retry",
+                    },
+                    defer_persist=defer_persist,
+                )
+                if (
+                    not isinstance(result, dict)
+                    or not result.get("success", True)
+                    or not output_validation.get("passed", False)
+                ):
+                    if isinstance(result, dict) and result.get("success", True) and not output_validation.get("passed", False):
+                        raise RuntimeError(format_output_validation_error(output_validation))
                     raise RuntimeError(_format_agent_failure(result))
             if bool(result.get("fallback_used")) or bool(result.get("coverage_fallback_used")):
                 fallback_used = True
 
+            artifact_refs = self._extract_artifact_refs(task, result)
+            if artifact_refs or isinstance(result, dict):
+                self._emit_execution_event(
+                    "artifact_created",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": claimed_by,
+                        "context_snapshot_id": context_snapshot_id,
+                        "artifact_refs": artifact_refs,
+                        "result_keys": sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else [],
+                    },
+                    defer_persist=defer_persist,
+                )
+
+            before_context = current_context.to_dict()
             current_context.apply_task_result(envelope.task_type, result)
+            context_delta_payload = build_context_delta(
+                before=before_context,
+                after=current_context.to_dict(),
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+            ).to_dict()
+            self._persist_context_delta(context_delta_payload, defer_persist=defer_persist)
+            self._emit_execution_event(
+                "context_delta_created",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "added_keys": context_delta_payload.get("added_keys", []),
+                    "updated_keys": context_delta_payload.get("updated_keys", []),
+                    "removed_keys": context_delta_payload.get("removed_keys", []),
+                },
+                defer_persist=defer_persist,
+            )
+            await self._run_runtime_hooks(
+                "after_context_delta",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "added_keys": context_delta_payload.get("added_keys", []),
+                    "updated_keys": context_delta_payload.get("updated_keys", []),
+                    "removed_keys": context_delta_payload.get("removed_keys", []),
+                },
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                defer_persist=defer_persist,
+            )
+            handoff_payload = self._build_agent_handoff(
+                task=task,
+                runtime_task=runtime_task,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                result=result,
+                context_snapshot_id=context_snapshot_id,
+                context_delta=context_delta_payload,
+                output_validation=output_validation,
+                required_context_keys=required_context_keys,
+            )
+            self._persist_handoff(handoff_payload, defer_persist=defer_persist)
+            self._emit_execution_event(
+                "handoff_created",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": claimed_by,
+                    "context_snapshot_id": context_snapshot_id,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "handoff": handoff_payload,
+                },
+                defer_persist=defer_persist,
+            )
             if envelope.task_type == "content_read":
                 self._persist_permanent_memory(current_context.permanent_memory)
 
@@ -681,6 +1373,12 @@ class AgentDispatcher:
                 selected_agent_name=claimed_by,
                 fallback_provenance=fallback_provenance,
                 selected_model=selected_model,
+                required_context_keys=required_context_keys,
+                missing_context_keys=missing_context_keys,
+                source_of_truth_summary=source_of_truth_summary,
+                output_validation=output_validation,
+                handoff=handoff_payload,
+                context_delta=context_delta_payload,
             )
             # 问题17修复：runtime_pool 状态必须立即持久化，不能延迟
             self.save_runtime_task_pool(runtime_pool)
@@ -694,6 +1392,11 @@ class AgentDispatcher:
                 "candidate_source": candidate_source,
                 "context_snapshot_id": context_snapshot_id,
                 "fallback_used": fallback_used,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+                "output_validation": output_validation,
+                "context_delta_id": context_delta_payload.get("delta_id", ""),
+                "handoff": handoff_payload,
                 "model": selected_model,
                 "current_model": selected_model,
                 "active_model": selected_model,
@@ -739,6 +1442,10 @@ class AgentDispatcher:
                 selected_agent_name=claimed_by,
                 fallback_provenance=fallback_provenance,
                 selected_model=selected_model,
+                required_context_keys=required_context_keys,
+                missing_context_keys=missing_context_keys,
+                source_of_truth_summary=source_of_truth_summary,
+                output_validation=output_validation,
             )
             self.save_runtime_task_pool(runtime_pool)
             self._append_execution_event(
@@ -751,6 +1458,9 @@ class AgentDispatcher:
                     "route_reason": route_reason,
                     "candidate_source": candidate_source,
                     "context_snapshot_id": context_snapshot_id,
+                    "required_context_keys": required_context_keys,
+                    "missing_context_keys": missing_context_keys,
+                    "output_validation": output_validation,
                     "model": selected_model,
                     "current_model": selected_model,
                     "active_model": selected_model,
@@ -801,6 +1511,9 @@ class AgentDispatcher:
                         "from_agent": claimed_by,
                         "reason": autonomous_error,
                     },
+                    "required_context_keys": required_context_keys,
+                    "missing_context_keys": missing_context_keys,
+                    "source_of_truth_summary": source_of_truth_summary,
                     "model": retry_model,
                     "current_model": retry_model,
                     "active_model": retry_model,
@@ -829,6 +1542,10 @@ class AgentDispatcher:
                 selected_agent_name=retry_claimed_by,
                 fallback_provenance=fallback_provenance,
                 selected_model=retry_model,
+                required_context_keys=required_context_keys,
+                missing_context_keys=missing_context_keys,
+                source_of_truth_summary=source_of_truth_summary,
+                output_validation=output_validation,
             )
             self.save_runtime_task_pool(runtime_pool)
             self._append_execution_event(
@@ -839,6 +1556,8 @@ class AgentDispatcher:
                     "assigned_agent": retry_claimed_by,
                     "fallback_from": claimed_by,
                     "context_snapshot_id": context_snapshot_id,
+                    "required_context_keys": required_context_keys,
+                    "missing_context_keys": missing_context_keys,
                     "model": retry_model,
                     "current_model": retry_model,
                     "active_model": retry_model,
@@ -862,8 +1581,43 @@ class AgentDispatcher:
             )
 
             result = await fallback_agent.execute(envelope.input_data, context=envelope.context.to_agent_context())
-            if not isinstance(result, dict) or not result.get("success", True):
+            self._emit_execution_event(
+                "validation_start",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": retry_claimed_by,
+                    "fallback_used": True,
+                    "context_snapshot_id": context_snapshot_id,
+                    "expected_outputs": list(task.expected_outputs or []),
+                },
+                defer_persist=defer_persist,
+            )
+            output_validation = validate_task_outputs(
+                task_type=envelope.task_type,
+                expected_outputs=task.expected_outputs,
+                result=result,
+            )
+            self._emit_execution_event(
+                "validation_end",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": retry_claimed_by,
+                    "fallback_used": True,
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
+                },
+                defer_persist=defer_persist,
+            )
+            if (
+                not isinstance(result, dict)
+                or not result.get("success", True)
+                or not output_validation.get("passed", False)
+            ):
                 fallback_error = str((result or {}).get("error") or "fallback_task_failed")
+                if isinstance(result, dict) and result.get("success", True) and not output_validation.get("passed", False):
+                    fallback_error = format_output_validation_error(output_validation)
                 task_pool.fail_task(retry_task.task_id, error=fallback_error)
                 runtime_pool.fail_task(runtime_task.task_id, error=fallback_error)
                 self._update_task_metadata(
@@ -877,6 +1631,10 @@ class AgentDispatcher:
                     selected_agent_name=retry_claimed_by,
                     fallback_provenance=fallback_provenance,
                     selected_model=retry_model,
+                    required_context_keys=required_context_keys,
+                    missing_context_keys=missing_context_keys,
+                    source_of_truth_summary=source_of_truth_summary,
+                    output_validation=output_validation,
                 )
                 self.save_runtime_task_pool(runtime_pool)
                 self._append_execution_event(
@@ -888,18 +1646,101 @@ class AgentDispatcher:
                         "fallback_used": True,
                         "error": fallback_error,
                         "context_snapshot_id": context_snapshot_id,
+                        "required_context_keys": required_context_keys,
+                        "missing_context_keys": missing_context_keys,
+                        "output_validation": output_validation,
                         "model": retry_model,
                         "current_model": retry_model,
                         "active_model": retry_model,
                         "model_used": retry_model,
                     },
                 )
+                self._emit_execution_event(
+                    "fallback_end",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": retry_claimed_by,
+                        "fallback_from": claimed_by,
+                        "fallback_used": True,
+                        "status": "failed",
+                        "error": fallback_error,
+                        "context_snapshot_id": context_snapshot_id,
+                        "output_validation": output_validation,
+                    },
+                    defer_persist=defer_persist,
+                )
                 if ephemeral_agent_name:
                     self._unregister_ephemeral_agent(ephemeral_agent_name)
                 raise RuntimeError(fallback_error)
 
+            artifact_refs = self._extract_artifact_refs(retry_task, result)
+            if artifact_refs or isinstance(result, dict):
+                self._emit_execution_event(
+                    "artifact_created",
+                    {
+                        "task_id": runtime_task.task_id,
+                        "task_type": envelope.task_type,
+                        "assigned_agent": retry_claimed_by,
+                        "fallback_used": True,
+                        "context_snapshot_id": context_snapshot_id,
+                        "artifact_refs": artifact_refs,
+                        "result_keys": sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else [],
+                    },
+                    defer_persist=defer_persist,
+                )
+
             current_context = envelope.context.clone()
+            before_context = current_context.to_dict()
             current_context.apply_task_result(envelope.task_type, result)
+            context_delta_payload = build_context_delta(
+                before=before_context,
+                after=current_context.to_dict(),
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=retry_claimed_by,
+            ).to_dict()
+            self._persist_context_delta(context_delta_payload, defer_persist=defer_persist)
+            self._emit_execution_event(
+                "context_delta_created",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": retry_claimed_by,
+                    "fallback_used": True,
+                    "context_snapshot_id": context_snapshot_id,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "added_keys": context_delta_payload.get("added_keys", []),
+                    "updated_keys": context_delta_payload.get("updated_keys", []),
+                    "removed_keys": context_delta_payload.get("removed_keys", []),
+                },
+                defer_persist=defer_persist,
+            )
+            handoff_payload = self._build_agent_handoff(
+                task=retry_task,
+                runtime_task=runtime_task,
+                task_type=envelope.task_type,
+                agent_name=retry_claimed_by,
+                result=result,
+                context_snapshot_id=context_snapshot_id,
+                context_delta=context_delta_payload,
+                output_validation=output_validation,
+                required_context_keys=required_context_keys,
+            )
+            self._persist_handoff(handoff_payload, defer_persist=defer_persist)
+            self._emit_execution_event(
+                "handoff_created",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": retry_claimed_by,
+                    "fallback_used": True,
+                    "context_snapshot_id": context_snapshot_id,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "handoff": handoff_payload,
+                },
+                defer_persist=defer_persist,
+            )
             if envelope.task_type == "content_read":
                 self._persist_permanent_memory(current_context.permanent_memory)
             if task.review_required:
@@ -918,8 +1759,29 @@ class AgentDispatcher:
                 selected_agent_name=retry_claimed_by,
                 fallback_provenance=fallback_provenance,
                 selected_model=retry_model,
+                required_context_keys=required_context_keys,
+                missing_context_keys=missing_context_keys,
+                source_of_truth_summary=source_of_truth_summary,
+                output_validation=output_validation,
+                handoff=handoff_payload,
+                context_delta=context_delta_payload,
             )
             self.save_runtime_task_pool(runtime_pool)
+            self._emit_execution_event(
+                "fallback_end",
+                {
+                    "task_id": runtime_task.task_id,
+                    "task_type": envelope.task_type,
+                    "assigned_agent": retry_claimed_by,
+                    "fallback_from": claimed_by,
+                    "fallback_used": True,
+                    "status": "completed",
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                },
+                defer_persist=defer_persist,
+            )
             self._append_execution_event(
                 "task_completed",
                 {
@@ -929,6 +1791,11 @@ class AgentDispatcher:
                     "fallback_used": True,
                     "review_required": bool(task.review_required),
                     "context_snapshot_id": context_snapshot_id,
+                    "required_context_keys": required_context_keys,
+                    "missing_context_keys": missing_context_keys,
+                    "output_validation": output_validation,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "handoff": handoff_payload,
                     "model": retry_model,
                     "current_model": retry_model,
                     "active_model": retry_model,
@@ -956,6 +1823,9 @@ class AgentDispatcher:
             context=current_context.to_dict(),
             task_pool=task_pool.to_dict(),
             runtime_task_pool=runtime_pool.to_dict(),
+            output_validation=output_validation,
+            handoff=handoff_payload,
+            context_delta=context_delta_payload,
         )
 
     async def run_autonomous_task(
@@ -1049,6 +1919,9 @@ class AgentDispatcher:
             "candidate_source": dispatch_result.candidate_source,
             "context_snapshot_id": dispatch_result.context_snapshot_id,
             "context": dispatch_result.context,
+            "output_validation": dispatch_result.output_validation,
+            "handoff": dispatch_result.handoff,
+            "context_delta": dispatch_result.context_delta,
         }
 
     def build_chapter_task_pool(

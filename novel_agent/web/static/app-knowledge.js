@@ -425,6 +425,98 @@ function getKnowledgeSchema(categoryOrKey) {
     return BUILTIN_KNOWLEDGE_SCHEMAS[key] || null;
 }
 
+function getKnowledgeTemplateFields(category) {
+    const schema = getKnowledgeSchema(category);
+    return schema?.fields || [
+        { key: 'name', label: '名称', type: 'text', required: true },
+        { key: 'description', label: '描述', type: 'textarea', rows: 4 },
+        { key: 'details', label: '详细信息', type: 'textarea', rows: 8 },
+    ];
+}
+
+function getKnowledgeFreeformFields(category) {
+    const categoryName = String(category?.name || '条目').trim() || '条目';
+    return [
+        { key: 'title', label: `${categoryName}标题`, type: 'text', required: true },
+        { key: 'content', label: '自定义内容', type: 'textarea', rows: 16, required: true, placeholder: '按你的习惯直接写内容，不需要套固定字段。' },
+        { key: 'notes', label: '备注', type: 'textarea', rows: 3 },
+    ];
+}
+
+function isFilledSchemaValue(value) {
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === 'object') return Object.keys(value).length > 0;
+    if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+    return String(value ?? '').trim().length > 0;
+}
+
+function getSchemaFieldLabel(fields, key, fallback = '内容') {
+    const field = (fields || []).find(item => item && item.key === key);
+    return String(field?.label || fallback).replace(/\s*\*$/, '').trim() || fallback;
+}
+
+function getKnowledgeItemDisplayName(item, category = null) {
+    if (!item || typeof item !== 'object') return '';
+    const fields = category ? getKnowledgeTemplateFields(category) : [];
+    const requiredKey = fields.find(field => field?.required && isFilledSchemaValue(item[field.key]))?.key;
+    const candidates = [
+        item.name,
+        item.title,
+        item.world_name,
+        item.chapter_title,
+        item.summary_title,
+        requiredKey ? item[requiredKey] : '',
+    ];
+    const named = candidates.map(value => String(value ?? '').trim()).find(Boolean);
+    if (named) return named;
+    if (isFilledSchemaValue(item.chapter_number)) return `第${item.chapter_number}章摘要`;
+    const summary = String(item.summary_text || item.summary || item.description || item.content || item.details || '').trim();
+    return summary ? summary.slice(0, 24) : '';
+}
+
+function validateKnowledgeValues(fields, values, category, mode = 'template') {
+    const activeFields = Array.isArray(fields) ? fields : [];
+    for (const field of activeFields) {
+        if (!field?.required) continue;
+        if (!isFilledSchemaValue(values?.[field.key])) {
+            return { ok: false, message: `请输入${getSchemaFieldLabel(activeFields, field.key)}` };
+        }
+    }
+
+    const displayName = getKnowledgeItemDisplayName(values, category);
+    if (displayName) return { ok: true, displayName };
+
+    if (mode === 'template' && category?.key === 'chapter_summary') {
+        return { ok: false, message: '请输入章节号或章节摘要' };
+    }
+    return { ok: false, message: '请输入标题或内容' };
+}
+
+function buildFreeformKnowledgeItem(category, values) {
+    const title = String(values?.title || '').trim();
+    const content = String(values?.content || '').trim();
+    const notes = String(values?.notes || '').trim();
+    const item = {
+        title,
+        name: title,
+        content,
+        raw_content: content,
+        description: content,
+        details: content,
+        notes,
+        manual_mode: 'freeform',
+    };
+
+    if (category?.key === 'outline') {
+        item.summary = content;
+        item.global_outline = content;
+    } else if (category?.key === 'chapter_summary') {
+        item.summary_text = content;
+    }
+
+    return item;
+}
+
 function isMeaningfulOutlineText(value) {
     const text = String(value || '').trim();
     return text && text !== '待生成' && text !== '待生成。';
@@ -505,20 +597,26 @@ function buildOutlineOverviewItem(rows) {
         : [];
     if (!items.length) return null;
 
+    const sourceItem = items.length === 1 ? items[0] : {};
+    const manuallyEditable = Boolean(sourceItem && sourceItem.manual_mode);
     const globalOutline = getFirstOutlineText(items, ['global_outline', 'standard_outline', 'full_outline']);
     const summary = globalOutline || getFirstOutlineText(items, ['summary', 'description', 'content']);
     const volumePlan = getOutlineVolumePlan(items);
 
     return {
-        id: 'outline-overview',
-        title: '主线大纲',
-        name: '主线大纲',
+        id: sourceItem.id || 'outline-overview',
+        title: sourceItem.title || sourceItem.name || '主线大纲',
+        name: sourceItem.name || sourceItem.title || '主线大纲',
         summary: summary || '暂无大纲内容。',
+        content: sourceItem.content || sourceItem.raw_content || summary || '',
+        raw_content: sourceItem.raw_content || sourceItem.content || '',
         volume_plan: volumePlan,
         story_synopsis: getFirstOutlineText(items, ['story_synopsis', 'synopsis']) || '主线蓝图，章节目标另存为章纲或细纲。',
         conflicts: getFirstOutlineText(items, ['conflicts', 'main_conflict']),
         selling_points: getFirstOutlineText(items, ['selling_points']),
-        readonly: true,
+        notes: sourceItem.notes || '',
+        manual_mode: sourceItem.manual_mode || '',
+        readonly: !manuallyEditable,
     };
 }
 
@@ -587,9 +685,11 @@ function escapeAttributeValue(value) {
 
 function getKnowledgeItemName(item, fallback = '未命名条目') {
     if (!item || typeof item !== 'object') return fallback;
-    const candidates = [item.name, item.title, item.world_name, item.chapter_title, item.id];
+    const candidates = [item.name, item.title, item.world_name, item.chapter_title, item.summary_title, item.id];
     const name = candidates.map(value => String(value ?? '').trim()).find(Boolean);
-    return name || fallback;
+    if (name) return name;
+    if (isFilledSchemaValue(item.chapter_number)) return `第${item.chapter_number}章摘要`;
+    return fallback;
 }
 
 function parseSchemaFieldValue(field, rawValue) {
@@ -638,7 +738,7 @@ function buildSchemaFieldHtml(field, value, prefix) {
             <div style="margin-bottom: 20px;">
                 <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${label}</label>
                 <textarea id="${fieldId}" rows="${field.rows || 4}" placeholder="${placeholder}"
-                    style="${commonStyle} resize: vertical; line-height: 1.6;">${renderedValue}</textarea>
+                    style="${commonStyle} resize: vertical; line-height: 1.6;">${escapeHtml(renderedValue)}</textarea>
             </div>
         `;
     }
@@ -979,12 +1079,9 @@ function addNewSetting() {
 function showAddSettingDialog(category) {
     const modal = document.getElementById('modal-container');
     modal.classList.remove('hidden');
-    const schema = getKnowledgeSchema(category);
-    const fields = schema?.fields || [
-        { key: 'name', label: '名称', type: 'text', required: true },
-        { key: 'description', label: '描述', type: 'textarea', rows: 4 },
-    ];
-    
+    const templateFields = getKnowledgeTemplateFields(category);
+    const freeformFields = getKnowledgeFreeformFields(category);
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; padding: 30px; width: 720px; max-width: 95%; max-height: 90vh; overflow-y: auto;">
@@ -992,8 +1089,23 @@ function showAddSettingDialog(category) {
                     <i class="${category.icon}" style="margin-right: 8px;"></i>
                     添加${category.name}
                 </h3>
-                ${fields.map(field => buildSchemaFieldHtml(field, '', 'new-setting')).join('')}
-                
+                <div style="display:flex; gap:8px; margin-bottom:20px;">
+                    <label style="flex:1; cursor:pointer;">
+                        <input type="radio" name="new-setting-mode" value="freeform" checked style="accent-color: var(--accent-color);">
+                        <span style="margin-left:6px; color:var(--text-primary);">自由内容</span>
+                    </label>
+                    <label style="flex:1; cursor:pointer;">
+                        <input type="radio" name="new-setting-mode" value="template" style="accent-color: var(--accent-color);">
+                        <span style="margin-left:6px; color:var(--text-primary);">结构化模板</span>
+                    </label>
+                </div>
+                <div id="new-setting-freeform-section">
+                    ${freeformFields.map(field => buildSchemaFieldHtml(field, '', 'new-setting-freeform')).join('')}
+                </div>
+                <div id="new-setting-template-section" style="display:none;">
+                    ${templateFields.map(field => buildSchemaFieldHtml(field, '', 'new-setting-template')).join('')}
+                </div>
+
                 <div style="display: flex; gap: 12px;">
                     <button id="cancel-add-setting" style="flex: 1; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">取消</button>
                     <button id="confirm-add-setting" style="flex: 1; padding: 12px; background: var(--accent-color); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">创建</button>
@@ -1001,11 +1113,23 @@ function showAddSettingDialog(category) {
             </div>
         </div>
     `;
-    
+
     // 自动聚焦输入框
     setTimeout(() => {
-        document.getElementById('new-setting-name')?.focus();
+        document.getElementById('new-setting-freeform-title')?.focus();
     }, 100);
+
+    function syncModeSections() {
+        const mode = document.querySelector('input[name="new-setting-mode"]:checked')?.value || 'freeform';
+        const freeformSection = document.getElementById('new-setting-freeform-section');
+        const templateSection = document.getElementById('new-setting-template-section');
+        if (freeformSection) freeformSection.style.display = mode === 'freeform' ? '' : 'none';
+        if (templateSection) templateSection.style.display = mode === 'template' ? '' : 'none';
+    }
+    modal.querySelectorAll('input[name="new-setting-mode"]').forEach(input => {
+        input.addEventListener('change', syncModeSections);
+    });
+    syncModeSections();
     
     // 取消
     document.getElementById('cancel-add-setting').addEventListener('click', () => {
@@ -1015,13 +1139,21 @@ function showAddSettingDialog(category) {
     
     // 确认
     document.getElementById('confirm-add-setting').addEventListener('click', async () => {
-        const newItem = collectSchemaFormValues(fields, 'new-setting');
-        const name = String(newItem.name || '').trim();
-
-        if (!name) {
-            showToast('请输入名称', 'error');
+        const mode = document.querySelector('input[name="new-setting-mode"]:checked')?.value || 'freeform';
+        const activeFields = mode === 'template' ? templateFields : freeformFields;
+        const rawValues = collectSchemaFormValues(
+            activeFields,
+            mode === 'template' ? 'new-setting-template' : 'new-setting-freeform'
+        );
+        const validation = validateKnowledgeValues(activeFields, rawValues, category, mode);
+        if (!validation.ok) {
+            showToast(validation.message, 'error');
             return;
         }
+        const newItem = mode === 'template'
+            ? { ...rawValues, manual_mode: 'template' }
+            : buildFreeformKnowledgeItem(category, rawValues);
+        const name = validation.displayName || getKnowledgeItemDisplayName(newItem, category);
 
         newItem.id = Date.now().toString();
         newItem.created_at = new Date().toISOString();
@@ -1050,9 +1182,19 @@ function showAddSettingDialog(category) {
             window.renderMultiAgentWriteNavPanel();
         }
     });
-    
+
     // 回车确认
-    document.getElementById('new-setting-name')?.addEventListener('keydown', (e) => {
+    document.getElementById('new-setting-freeform-title')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            document.getElementById('confirm-add-setting').click();
+        }
+    });
+    document.getElementById('new-setting-template-name')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            document.getElementById('confirm-add-setting').click();
+        }
+    });
+    document.getElementById('new-setting-template-title')?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             document.getElementById('confirm-add-setting').click();
         }
@@ -1212,17 +1354,19 @@ function openSettingEditor(typeId, index) {
     // 从资料库分类中查找配置
     const category = store.knowledgeCategories.find(c => c.id === typeId);
     if (!category) return;
-    const schema = getKnowledgeSchema(category);
-    const fields = schema?.fields || [
-        { key: 'name', label: '名称', type: 'text', required: true },
-        { key: 'description', label: '描述', type: 'textarea', rows: 4 },
-        { key: 'details', label: '详细信息', type: 'textarea', rows: 8 },
-    ];
+    const templateFields = getKnowledgeTemplateFields(category);
+    const freeformFields = getKnowledgeFreeformFields(category);
 
     const data = getKnowledgeCategoryData(category);
     const item = data[index];
     if (!item) return;
     const isReadOnlyOutline = category.key === 'outline' && item.readonly;
+    const initialMode = item.manual_mode === 'freeform' ? 'freeform' : 'template';
+    const freeformItem = {
+        title: item.title || item.name || getKnowledgeItemName(item, ''),
+        content: item.content || item.raw_content || item.summary || item.summary_text || item.description || item.details || '',
+        notes: item.notes || '',
+    };
 
     updateBreadcrumbs(['资料库', category.name, getKnowledgeItemName(item)]);
 
@@ -1237,26 +1381,62 @@ function openSettingEditor(typeId, index) {
                     <i class="${isReadOnlyOutline ? 'ri-arrow-left-line' : 'ri-save-line'}"></i> ${isReadOnlyOutline ? '返回' : '保存'}
                 </button>
             </div>
-            
+
             <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px;">
-                ${fields.map(field => buildSchemaFieldHtml(field, item[field.key], 'setting')).join('')}
+                <div style="display:${isReadOnlyOutline ? 'none' : 'flex'}; gap:8px; margin-bottom:20px;">
+                    <label style="flex:1; cursor:pointer;">
+                        <input type="radio" name="setting-mode" value="freeform" ${initialMode === 'freeform' ? 'checked' : ''} style="accent-color: var(--accent-color);">
+                        <span style="margin-left:6px; color:var(--text-primary);">自由内容</span>
+                    </label>
+                    <label style="flex:1; cursor:pointer;">
+                        <input type="radio" name="setting-mode" value="template" ${initialMode === 'template' ? 'checked' : ''} style="accent-color: var(--accent-color);">
+                        <span style="margin-left:6px; color:var(--text-primary);">结构化模板</span>
+                    </label>
+                </div>
+                <div id="setting-freeform-section">
+                    ${freeformFields.map(field => buildSchemaFieldHtml(field, freeformItem[field.key], 'setting-freeform')).join('')}
+                </div>
+                <div id="setting-template-section">
+                    ${templateFields.map(field => buildSchemaFieldHtml(field, item[field.key], 'setting-template')).join('')}
+                </div>
             </div>
         </div>
     `;
 
     document.getElementById('back-to-list').addEventListener('click', () => loadDatabase(typeId));
 
+    function syncModeSections() {
+        const mode = document.querySelector('input[name="setting-mode"]:checked')?.value || initialMode;
+        const freeformSection = document.getElementById('setting-freeform-section');
+        const templateSection = document.getElementById('setting-template-section');
+        if (freeformSection) freeformSection.style.display = mode === 'freeform' ? '' : 'none';
+        if (templateSection) templateSection.style.display = mode === 'template' ? '' : 'none';
+    }
+    document.querySelectorAll('input[name="setting-mode"]').forEach(input => {
+        input.addEventListener('change', syncModeSections);
+    });
+    syncModeSections();
+
     document.getElementById('save-setting-btn').addEventListener('click', async () => {
         if (isReadOnlyOutline) {
             loadDatabase(typeId);
             return;
         }
-        const nextValues = collectSchemaFormValues(fields, 'setting');
-        const name = String(nextValues.name || nextValues.title || '').trim();
-        if (!name) {
-            showToast('名称不能为空', 'error');
+        const mode = document.querySelector('input[name="setting-mode"]:checked')?.value || initialMode;
+        const activeFields = mode === 'template' ? templateFields : freeformFields;
+        const rawValues = collectSchemaFormValues(
+            activeFields,
+            mode === 'template' ? 'setting-template' : 'setting-freeform'
+        );
+        const validation = validateKnowledgeValues(activeFields, rawValues, category, mode);
+        if (!validation.ok) {
+            showToast(validation.message, 'error');
             return;
         }
+        const nextValues = mode === 'template'
+            ? { ...rawValues, manual_mode: 'template' }
+            : buildFreeformKnowledgeItem(category, rawValues);
+        const name = validation.displayName || getKnowledgeItemDisplayName(nextValues, category);
 
         store.projectData[category.key][index] = {
             ...store.projectData[category.key][index],

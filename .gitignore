@@ -39,9 +39,12 @@ node_modules/
 
 # Local development and test-only files
 .claude/
+.codex-pets/
+.codex-run/
 .omx/
 .omc/
 JC/
+*.bak
 logo22.png
 startup_error.txt
 frontend-tests/

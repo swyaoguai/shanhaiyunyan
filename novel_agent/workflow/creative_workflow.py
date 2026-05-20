@@ -338,12 +338,20 @@ def _agent_handoff_from_dict(payload: Any) -> AgentHandoff:
     return AgentHandoff(
         artifact_id=str(payload.get("artifact_id") or "").strip(),
         artifact_type=str(payload.get("artifact_type") or "").strip(),
+        task_id=str(payload.get("task_id") or "").strip(),
+        agent_name=str(payload.get("agent_name") or "").strip(),
+        context_snapshot_id=str(payload.get("context_snapshot_id") or "").strip(),
         decisions=[str(item) for item in payload.get("decisions") or []],
         dependencies=[str(item) for item in payload.get("dependencies") or []],
         new_facts=[str(item) for item in payload.get("new_facts") or []],
         changed_facts=[str(item) for item in payload.get("changed_facts") or []],
         risks=[str(item) for item in payload.get("risks") or []],
         next_context_summary=str(payload.get("next_context_summary") or "").strip(),
+        artifact_refs=[str(item) for item in payload.get("artifact_refs") or []],
+        context_delta_id=str(payload.get("context_delta_id") or "").strip(),
+        consumed_context_keys=[str(item) for item in payload.get("consumed_context_keys") or []],
+        produced_context_keys=[str(item) for item in payload.get("produced_context_keys") or []],
+        output_validation=dict(payload.get("output_validation") or {}),
     )
 
 

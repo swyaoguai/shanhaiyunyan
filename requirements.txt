@@ -13,6 +13,7 @@ aiofiles>=23.0.0
 python-multipart>=0.0.6
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+Pillow>=10.0.0
 
 # RAG & Knowledge Base
 numpy>=1.24.0

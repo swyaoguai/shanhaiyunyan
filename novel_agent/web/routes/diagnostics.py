@@ -16,7 +16,8 @@ from ...utils.log_sanitizer import sanitize_for_log
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_LOG_BYTES = 512 * 1024
+MAX_SUPPORT_LOG_FILES = 8
 SUPPORT_EMAIL = "swjiarui@126.com"
 
 
@@ -63,6 +64,7 @@ def _tail_text(path: Path, max_bytes: int = MAX_LOG_BYTES) -> str:
 
 def build_support_log_text(files: Iterable[Path] | None = None) -> str:
     selected = list(files) if files is not None else _candidate_log_files()
+    selected = selected[:MAX_SUPPORT_LOG_FILES]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "山海·云烟 支持日志",

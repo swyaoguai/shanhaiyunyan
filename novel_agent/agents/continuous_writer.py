@@ -834,7 +834,7 @@ class ContinuousWriter(BaseAgent):
 
             preflight = self._build_preflight_consistency_checklist(recent_chapters)
             if preflight:
-                parts.append("[续写前快速自检]")
+                parts.append("[续写前检查]")
                 parts.append(preflight)
                 parts.append("")
         
@@ -854,20 +854,26 @@ class ContinuousWriter(BaseAgent):
         min_w = int(target * 0.90)
         max_w = int(target * 1.10)
         
-        parts.append("[执行优先级]")
+        parts.append("[写作要求]")
         parts.append("1. 先保证前文记忆、人物状态、世界设定、时间线不出错。")
         parts.append("2. 再自然承接上一章结尾，推进当前冲突或目标。")
         parts.append("3. 若使用热点，只能改写成剧情素材，不能写成新闻播报或生硬插入。")
-        parts.append("4. 直接输出小说正文，不要附加章节信息、自检结果或解释。")
+        parts.append("4. 直接输出小说正文，不要附加章节信息、检查过程或解释。")
         parts.append("")
         parts.append("[记忆使用]")
-        parts.append("已提供的前情、知识库、剧情总结、死亡角色和约束就是本次可用记忆，优先服从，不要擅自补写未提供的重要设定。")
+        if all_dead:
+            parts.append("已提供的前情、知识库、剧情总结、角色状态和约束就是本次可用记忆；涉及已离场角色时，以前文事实为准。")
+        else:
+            parts.append("已提供的前情、知识库、剧情总结、角色状态和约束就是本次可用记忆；重要设定以前文事实为准。")
         parts.append("")
         parts.append(f"[字数限制] {min_w}-{max_w}字，目标{target}字")
         parts.append(f"[任务] 请创作第{chapter_number}章")
-        parts.append("[注意] 请保持与前文剧情连贯，不要重复已有内容，不要让已死亡角色复活，不要输出正文外说明")
-        
-        mandatory_tail_marker = "[执行优先级]"
+        if all_dead:
+            parts.append("[注意] 请保持与前文剧情连贯，不要重复已有内容；已离场角色只按前文允许的方式出现；不要输出正文外说明")
+        else:
+            parts.append("[注意] 请保持与前文剧情连贯，不要重复已有内容，不要输出正文外说明")
+
+        mandatory_tail_marker = "[写作要求]"
 
         prompt_text = "\n".join(parts)
         estimated_tokens = len(prompt_text) // 2

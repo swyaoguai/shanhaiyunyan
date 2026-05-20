@@ -154,6 +154,7 @@ class AgentConfigUpdateRequest(BaseModel):
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+    api_type: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     use_global: Optional[bool] = None

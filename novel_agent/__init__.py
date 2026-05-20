@@ -9,5 +9,8 @@
 - 响应保证：确保每个用户请求都有智能体响应
 """
 
-__version__ = "1.0"
+from .version import get_app_version
+
+
+__version__ = get_app_version()
 __author__ = "山海·云烟"

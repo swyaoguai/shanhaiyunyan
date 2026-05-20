@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..config import config
 from ..constants import get_data_dir
+from ..version import get_app_version
 from ..workflow import NovelCoordinator
 from ..agents import RouterAgent
 from .dependencies import set_coordinator, set_router_agent
@@ -189,7 +190,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="山海·云烟",
         description="基于多智能体协作的智能小说创作系统",
-        version="1.0",
+        version=get_app_version(),
         lifespan=lifespan
     )
     

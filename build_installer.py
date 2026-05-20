@@ -25,6 +25,9 @@ from build_portable import (
     ROOT_DIR,
     SOURCE_ONNX_MODEL_DIR,
     SOURCE_SKILLS_DIR,
+    VERSION_FILE,
+    _default_global_api_config,
+    _default_knowledge_base_config,
     _default_skills_config,
     _default_timeout_settings,
     _default_trends_config,
@@ -45,6 +48,7 @@ LEGACY_VARIANT_SETUP_EXE_PATHS = {
     DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_Lite.exe",
     DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Setup_LocalModel.exe",
 }
+DEFAULT_LOCAL_ONNX_MODEL_DIR = "novel_agent/models/embedding/default"
 
 CHINESE_INNO_MESSAGES = r"""
 [Messages]
@@ -195,7 +199,7 @@ StatusRollback=正在回滚更改...
 ErrorExecutingProgram=无法执行文件：%n%1
 UninstallNotFound=文件 %1 不存在，无法卸载。
 UninstallOpenError=无法打开文件 %1，无法卸载。
-ConfirmUninstall=确定要完全移除 %1 及其所有组件吗？
+ConfirmUninstall=确定要卸载 %1 吗？%n%n程序文件会被移除；项目、知识库、API 配置（.env）、备份、统计和日志默认保留在安装目录。%n%n如需彻底清除，请卸载后手动删除安装目录中的 data 文件夹和 .env 文件。
 UninstallStatusLabel=请稍候，正在从您的计算机中移除 %1。
 UninstalledAll=%1 已成功从您的计算机中移除。
 UninstalledMost=%1 卸载完成。%n%n某些项目无法移除，可以手动删除。
@@ -213,12 +217,12 @@ def installer_variant(include_onnx: bool) -> str:
 
 
 def installer_variant_label(include_onnx: bool) -> str:
-    return "本地模型版" if include_onnx else "轻量版"
+    return "内含检索模型版" if include_onnx else "无检索模型版"
 
 
 def setup_base_name(include_onnx: bool) -> str:
-    suffix = "本地模型版" if include_onnx else "轻量版"
-    return f"{DISPLAY_NAME}_v{APP_VERSION}_安装包_{suffix}"
+    suffix = "内含检索模型版" if include_onnx else "无检索模型版"
+    return f"{DISPLAY_NAME}_v{APP_VERSION}_{suffix}"
 
 
 def setup_exe_path(include_onnx: bool) -> Path:
@@ -230,7 +234,54 @@ def _safe_rmtree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def clean_installer_artifacts(include_onnx: bool = False) -> bool:
+def _upsert_env_values(env_path: Path, values: dict[str, str]) -> None:
+    """Update selected .env.example keys while preserving comments and ordering."""
+    if not env_path.exists():
+        return
+
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    updated_keys: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in line:
+            key, _value = line.split("=", 1)
+            normalized_key = key.strip()
+            if normalized_key in values:
+                output.append(f"{normalized_key}={values[normalized_key]}")
+                updated_keys.add(normalized_key)
+                continue
+        output.append(line)
+
+    missing = [key for key in values if key not in updated_keys]
+    if missing and output and output[-1].strip():
+        output.append("")
+    for key in missing:
+        output.append(f"{key}={values[key]}")
+
+    env_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
+def configure_env_example_for_variant(include_onnx: bool, local_model_available: bool) -> None:
+    """Make the bundled-model installer default to local ONNX on first launch."""
+    env_path = APP_DIR / ".env.example"
+    if not include_onnx or not local_model_available:
+        return
+    _upsert_env_values(
+        env_path,
+        {
+            "KB_EMBEDDING_PROVIDER": "local_onnx",
+            "KB_ONNX_MODEL_DIR": DEFAULT_LOCAL_ONNX_MODEL_DIR,
+            "KB_ONNX_MODEL_FILE": "model.onnx",
+            "KB_ONNX_TOKENIZER_DIR": "",
+            "KB_ONNX_MAX_LENGTH": "512",
+            "KB_ONNX_POOLING": "cls",
+        },
+    )
+    print("[OK] 内含检索模型版默认启用本地 ONNX 向量模型")
+
+
+def clean_installer_artifacts(include_onnx: bool = True) -> bool:
     """Remove only installer-related build outputs."""
     print("\n[清理] 清理安装包构建产物...")
     for path in (
@@ -279,6 +330,8 @@ def _pyinstaller_common_args() -> list[str]:
         f"{prompts_dir};novel_agent/prompts",
         "--add-data",
         f"{data_dir};novel_agent/data",
+        "--add-data",
+        f"{VERSION_FILE};.",
         "--hidden-import",
         "uvicorn.logging",
         "--hidden-import",
@@ -356,7 +409,7 @@ def _skill_copy_ignore(_dir: str, names: list[str]) -> set[str]:
     return ignored
 
 
-def populate_app_layout(include_onnx: bool = False) -> bool:
+def populate_app_layout(include_onnx: bool = True) -> bool:
     """Copy runtime-side files that should live next to the exe."""
     print("\n[创建] 安装版应用目录结构...")
     if not APP_DIR.exists():
@@ -386,6 +439,10 @@ def populate_app_layout(include_onnx: bool = False) -> bool:
         json.dumps(_default_skills_config(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    (data_dir / "global_api_config.json").write_text(
+        json.dumps(_default_global_api_config(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     print("[OK] 创建默认 data 配置")
 
     if SOURCE_SKILLS_DIR.exists():
@@ -397,18 +454,31 @@ def populate_app_layout(include_onnx: bool = False) -> bool:
     else:
         print("[警告] 未找到 skills 目录，安装包将不内置技能")
 
+    local_model_available = False
     if include_onnx:
         if SOURCE_ONNX_MODEL_DIR.exists():
             model_dst = APP_DIR / "novel_agent" / "models" / "embedding" / "default"
             if model_dst.exists():
                 _safe_rmtree(model_dst)
             shutil.copytree(SOURCE_ONNX_MODEL_DIR, model_dst)
+            local_model_available = True
+            (data_dir / "knowledge_base_config.json").write_text(
+                json.dumps(_default_knowledge_base_config(local_onnx_enabled=True), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             print("[OK] 已内置本地 ONNX 向量模型")
         else:
-            print("[提示] 未找到本地 ONNX 模型，跳过内置")
+            print(f"[X] 未找到本地 ONNX 模型: {SOURCE_ONNX_MODEL_DIR.relative_to(ROOT_DIR)}")
+            print("    正式发布必须内置检索模型；如仅做本地调试，请使用 --without-onnx。")
+            return False
     else:
+        (data_dir / "knowledge_base_config.json").write_text(
+            json.dumps(_default_knowledge_base_config(local_onnx_enabled=False), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         print("[OK] 默认不内置本地 ONNX 模型，用户可在设置页按需安装模型包")
 
+    configure_env_example_for_variant(include_onnx=include_onnx, local_model_available=local_model_available)
     create_start_bat()
     write_installer_manifest(include_onnx=include_onnx)
     return True
@@ -468,7 +538,7 @@ def _inno_path(path: Path) -> str:
     return str(path.resolve())
 
 
-def write_inno_script(include_onnx: bool = False) -> bool:
+def write_inno_script(include_onnx: bool = True) -> bool:
     """Write the Inno Setup script used to compile the final installer."""
     print("\n[安装包] 生成 Inno Setup 脚本...")
     INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
@@ -503,14 +573,17 @@ SetupLogging=yes
 UninstallDisplayIcon={{app}}\\{{#MyAppExeName}}
 
 [Files]
-Source: "{{#SourceDir}}\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{{#SourceDir}}\\*"; DestDir: "{{app}}"; Excludes: "data\\*,.env"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{{#SourceDir}}\\data\\*"; DestDir: "{{app}}\\data"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist uninsneveruninstall
 
 [Dirs]
-Name: "{{app}}\\data"
-Name: "{{app}}\\data\\projects"
-Name: "{{app}}\\data\\stats"
-Name: "{{app}}\\data\\sessions"
-Name: "{{app}}\\data\\logs"
+Name: "{{app}}\\data"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\projects"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\stats"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\sessions"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\logs"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\knowledge_base"; Flags: uninsneveruninstall
+Name: "{{app}}\\data\\backups"; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{{group}}\\{{#MyAppName}}"; Filename: "{{app}}\\{{#MyAppExeName}}"
@@ -522,6 +595,33 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Run]
 Filename: "{{cmd}}"; Parameters: "/C if not exist ""{{app}}\\.env"" copy ""{{app}}\\.env.example"" ""{{app}}\\.env"""; Flags: runhidden
 Filename: "{{app}}\\{{#MyAppExeName}}"; Description: "启动 {{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure ForceStopRunningApp();
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{{cmd}}'), '/C taskkill /F /T /IM "{{#MyAppExeName}}" >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(600);
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  ForceStopRunningApp();
+  Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  ForceStopRunningApp();
+  Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  ForceStopRunningApp();
+  Result := True;
+end;
 {CHINESE_INNO_MESSAGES}
 '''
     INNO_SCRIPT_PATH.write_text(script, encoding="utf-8")
@@ -543,7 +643,7 @@ def find_iscc() -> str | None:
     return None
 
 
-def compile_inno_installer(include_onnx: bool = False, skip_compile: bool = False) -> bool:
+def compile_inno_installer(include_onnx: bool = True, skip_compile: bool = False) -> bool:
     """Compile Setup.exe when Inno Setup is installed."""
     if skip_compile:
         print("[跳过] 已按参数跳过 Inno Setup 编译")
@@ -569,7 +669,7 @@ def compile_inno_installer(include_onnx: bool = False, skip_compile: bool = Fals
     return True
 
 
-def print_summary(include_onnx: bool = False) -> None:
+def print_summary(include_onnx: bool = True) -> None:
     print("\n" + "=" * 60)
     print("安装包构建摘要")
     print("=" * 60)
@@ -590,18 +690,24 @@ def print_summary(include_onnx: bool = False) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build Windows installer for 山海·云烟")
     parser.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
-    parser.add_argument("--include-onnx", action="store_true", help="bundle local ONNX embedding model")
+    parser.add_argument("--include-onnx", action="store_true", help="bundle local ONNX embedding model (default for release builds)")
+    parser.add_argument("--without-onnx", action="store_true", help="local debug only: build without bundled ONNX model")
     parser.add_argument("--skip-compile", action="store_true", help="do not call Inno Setup compiler")
     args = parser.parse_args()
+    if args.include_onnx and args.without_onnx:
+        parser.error("--include-onnx 和 --without-onnx 不能同时使用")
+    include_onnx = not args.without_onnx
 
     print("=" * 60)
     print(f"{DISPLAY_NAME} - 安装包构建脚本")
     print("=" * 60)
     print("本脚本会生成安装版应用目录，并在检测到 Inno Setup 时生成 Setup.exe。")
-    print("默认不内置 Node.js，也不内置本地 ONNX 模型。")
-    if args.include_onnx:
+    print("默认不内置 Node.js；正式发布默认内置本地 ONNX 模型。")
+    if include_onnx:
         print("[选项] 本次会内置本地 ONNX 模型。")
-    print(f"[版本] 输出安装包后缀: {setup_base_name(args.include_onnx)}.exe")
+    else:
+        print("[选项] 本次为本地调试包，不内置本地 ONNX 模型。")
+    print(f"[版本] 输出安装包后缀: {setup_base_name(include_onnx)}.exe")
 
     if not check_requirements():
         return 1
@@ -612,12 +718,12 @@ def main() -> int:
             return 0
 
     steps = [
-        ("清理安装包产物", lambda: clean_installer_artifacts(include_onnx=args.include_onnx)),
+        ("清理安装包产物", lambda: clean_installer_artifacts(include_onnx=include_onnx)),
         ("准备发布数据", prepare_release_data),
         ("PyInstaller onedir 构建", run_pyinstaller_onedir),
-        ("创建应用目录结构", lambda: populate_app_layout(include_onnx=args.include_onnx)),
-        ("生成 Inno Setup 脚本", lambda: write_inno_script(include_onnx=args.include_onnx)),
-        ("编译安装包", lambda: compile_inno_installer(include_onnx=args.include_onnx, skip_compile=args.skip_compile)),
+        ("创建应用目录结构", lambda: populate_app_layout(include_onnx=include_onnx)),
+        ("生成 Inno Setup 脚本", lambda: write_inno_script(include_onnx=include_onnx)),
+        ("编译安装包", lambda: compile_inno_installer(include_onnx=include_onnx, skip_compile=args.skip_compile)),
     ]
     for name, func in steps:
         print(f"\n{'=' * 60}")
@@ -627,7 +733,7 @@ def main() -> int:
             print(f"\n[X] {name} 失败，构建中止")
             return 1
 
-    print_summary(include_onnx=args.include_onnx)
+    print_summary(include_onnx=include_onnx)
     print("\n构建流程完成。")
     return 0
 

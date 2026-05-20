@@ -37,6 +37,7 @@ from ..workflow.artifact_review import ReviewResult, review_artifact_basic
 from ..workflow.creative_executor import CreativeWorkflowExecutor, TaskExecutionResult
 from ..workflow.creative_workflow import CreativeWorkflowRun
 from ..workflow.contracts import build_default_creation_contract, build_default_task_graph
+from ..workflow.runtime_messages import make_runtime_message
 from ..workflow.workflow_context import AgentHandoff, Artifact, WorkflowContext
 from ..workflow.workflow_planner import BUILTIN_CATEGORY_DEFINITIONS, WorkflowTask, build_workflow_plan, detect_target_categories
 
@@ -418,10 +419,11 @@ class RouterAgent(BaseAgent):
         self._polisher = None
         self._continuous_writer = None
 
-        # LLM意图分析配置（强制使用LLM，不使用规则兜底）
+        # LLM意图分析配置（LLM优先；仅在接口不可用时恢复明确执行命令）
         self._llm_intent_timeout = 15.0       # 当前超时时间（秒）
         self._llm_intent_max_timeout = 60.0    # 最大超时
         self._llm_intent_max_retries = 2        # 最大重试次数
+        self._last_intent_error_kind: Optional[str] = None
 
     def _get_default_prompt(self) -> str:
         from .enhanced_prompts import ROUTER_AGENT_PROMPT
@@ -431,18 +433,23 @@ class RouterAgent(BaseAgent):
         """
         分析用户意图（单意图，向后兼容）。
 
-        完全基于 LLM 判断，不使用规则兜底。
+        LLM 优先判断；当 LLM 接口不可用时，只对明确的执行类命令使用本地恢复。
         LLM 支持动态超时重试：首次超时后自动延长重试，最多重试2次（15s -> 30s -> 60s）。
         若全部重试均失败，抛出 RuntimeError 显式报错。
         """
         # 重置超时状态（新请求从头开始）
         self._llm_intent_timeout = 15.0
+        self._last_intent_error_kind = None
 
         llm_analysis = await self._analyze_intent_with_llm(message)
         if llm_analysis is not None:
-            return llm_analysis
+            return self._normalize_intent_analysis(message, llm_analysis)
 
-        # LLM 彻底失败后，显式报错（不回退到规则匹配）
+        recovered = self._recover_intent_after_llm_unavailable(message)
+        if recovered is not None:
+            return recovered
+
+        # LLM 彻底失败后，显式报错。
         raise RuntimeError(
             f"[{self.name}] LLM意图分析全部重试失败，无法识别用户意图。请检查LLM配置。"
         )
@@ -456,14 +463,16 @@ class RouterAgent(BaseAgent):
         """
         # 重置超时状态
         self._llm_intent_timeout = 15.0
+        self._last_intent_error_kind = None
 
         llm_results = await self._analyze_intents_with_llm(message)
         if llm_results:
-            return self._sort_intents_by_dependency(llm_results)
+            normalized_results = [self._normalize_intent_analysis(message, item) for item in llm_results]
+            return self._sort_intents_by_dependency(normalized_results)
 
         # 回退到单意图分析
         single = await self.analyze_intent(message)
-        return [single]
+        return [self._normalize_intent_analysis(message, single)]
 
     def _build_intent_analysis(
         self,
@@ -535,6 +544,130 @@ class RouterAgent(BaseAgent):
             return []
         return [self._build_intent_analysis(message, intent, confidence=1.0)]
 
+    def _normalize_intent_analysis(self, message: str, analysis: Any) -> IntentAnalysis:
+        """兼容测试桩和旧调用方返回的简化意图对象。"""
+        if isinstance(analysis, IntentAnalysis) and isinstance(analysis.primary_intent, UserIntent):
+            if not isinstance(analysis.entities, dict):
+                analysis.entities = self._extract_entities(message, analysis.primary_intent)
+            return analysis
+
+        raw_intent = getattr(analysis, "primary_intent", None)
+        intent = raw_intent if isinstance(raw_intent, UserIntent) else self._coerce_user_intent(
+            getattr(raw_intent, "value", raw_intent)
+        )
+        if intent is None:
+            intent = UserIntent.GENERAL_CHAT
+
+        fallback_raw = getattr(analysis, "fallback_intent", None)
+        fallback_intent = fallback_raw if isinstance(fallback_raw, UserIntent) else self._coerce_user_intent(
+            getattr(fallback_raw, "value", fallback_raw)
+        )
+
+        try:
+            confidence = float(getattr(analysis, "confidence", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        normalized = self._build_intent_analysis(
+            message,
+            intent,
+            confidence=confidence,
+            fallback_intent=fallback_intent,
+        )
+
+        supplied_entities = getattr(analysis, "entities", None)
+        if isinstance(supplied_entities, dict):
+            normalized.entities.update(supplied_entities)
+
+        for attr in ("requires_knowledge_base", "requires_tool_call", "tool_name", "tool_args"):
+            if hasattr(analysis, attr):
+                setattr(normalized, attr, getattr(analysis, attr))
+        if not isinstance(normalized.tool_args, (dict, type(None))):
+            normalized.tool_args = {}
+        return normalized
+
+    def _recover_intent_after_llm_unavailable(self, message: str) -> Optional[IntentAnalysis]:
+        """LLM 连接失败时，仅恢复强执行语义，避免把讨论误判为写入操作。"""
+        if self._last_intent_error_kind != "llm_unavailable":
+            return None
+
+        intent = self._detect_local_action_intent(message)
+        if intent is None:
+            return None
+
+        logger.info(f"[{self.name}] LLM不可用，使用本地执行意图恢复: {intent.value}")
+        return self._build_intent_analysis(
+            message,
+            intent,
+            confidence=0.88,
+            fallback_intent=UserIntent.GENERAL_CHAT,
+        )
+
+    @staticmethod
+    def _detect_local_action_intent(message: str) -> Optional[UserIntent]:
+        text = str(message or "").strip()
+        if not text:
+            return None
+
+        soft_enrichment_markers = (
+            "丰富一下", "丰富", "细化一下", "继续细化", "细化", "展开一下",
+            "扩展一下", "扩展", "拓展一下", "拓展", "根据这个设定",
+            "基于这个设定", "在这个设定上", "帮我想想", "帮我想",
+            "补充一点", "补充一下", "完善一下",
+        )
+        hard_execution_markers = (
+            "直接生成", "直接创建", "直接写", "开始创作", "开始写", "开始正文",
+            "生成", "创建", "新建", "建立", "写入资料库", "保存到资料库",
+            "同步到资料库", "加入资料库", "存到资料库", "落库", "入库",
+            "执行", "续写", "继续写", "写正文", "生成正文",
+        )
+        if (
+            any(marker in text for marker in soft_enrichment_markers)
+            and not any(marker in text for marker in hard_execution_markers)
+        ):
+            return None
+
+        discussion_markers = (
+            "先讨论", "先聊", "聊聊", "建议", "怎么", "如何", "要不要", "是否",
+            "能不能", "可不可以", "可以吗", "行不行", "合适吗", "帮我看看",
+        )
+        if any(marker in text for marker in discussion_markers):
+            return None
+
+        action_markers = (
+            "生成", "创建", "新建", "建立", "构建", "设计", "梳理", "整理",
+            "补全", "补出来", "补一下", "完善", "写", "做", "加入资料库",
+            "保存到资料库", "存到资料库", "写入资料库", "同步到资料库",
+        )
+
+        if any(token in text for token in ("续写", "继续写", "接着写", "往下写", "继续正文")):
+            return UserIntent.CONTINUE_WRITE
+        if re.search(r"(写|创作|生成)第[0-9一二三四五六七八九十百千万两零〇]+章", text):
+            return UserIntent.CONTINUE_WRITE
+        if any(token in text for token in ("润色", "改写这段", "优化这段", "修改这段", "重写这段")):
+            return UserIntent.POLISH_CONTENT
+
+        has_action = any(token in text for token in action_markers)
+        if has_action and any(token in text for token in ("角色卡", "人设卡", "人物卡", "角色档案", "人物设定", "主角档案", "反派人物设定")):
+            return UserIntent.CREATE_CHARACTER
+        if has_action and any(token in text for token in ("事件线", "剧情线", "故事线", "主线", "支线")):
+            return UserIntent.CREATE_EVENTLINES
+        if has_action and any(token in text for token in ("细纲", "详细大纲", "分场细纲")):
+            return UserIntent.CREATE_DETAIL_OUTLINE
+        if has_action and any(token in text for token in ("章纲", "章节设定", "章节规划")):
+            return UserIntent.CREATE_CHAPTER_SETTINGS
+        if has_action and any(token in text for token in ("世界观", "世界设定", "世界设定集")):
+            return UserIntent.CREATE_NOVEL
+
+        create_novel_markers = (
+            "开始创作", "开始写", "创建小说", "开一本新书", "写一部", "写一本",
+            "写个小说", "写一篇小说", "创作小说",
+        )
+        if any(marker in text for marker in create_novel_markers):
+            return UserIntent.CREATE_NOVEL
+
+        return None
+
     async def _analyze_intent_with_llm(
         self,
         message: str,
@@ -587,6 +720,7 @@ class RouterAgent(BaseAgent):
                 )
                 # 成功，reset 超时状态
                 self._llm_intent_timeout = 15.0
+                self._last_intent_error_kind = None
                 logger.info(
                     f"[{self.name}] LLM意图分析成功: {analysis.primary_intent.value} "
                     f"(confidence={analysis.confidence:.2f})"
@@ -601,6 +735,7 @@ class RouterAgent(BaseAgent):
                         f"[{self.name}] LLM意图分析第{retries - 1}次超时，已达最大重试次数"
                     )
                     self._llm_intent_timeout = 15.0  # reset 供下次使用
+                    self._last_intent_error_kind = "llm_unavailable"
                     return None
                 current_timeout = min(current_timeout * 2, self._llm_intent_max_timeout)
                 self._llm_intent_timeout = current_timeout
@@ -613,6 +748,7 @@ class RouterAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"[{self.name}] LLM意图分析异常: {e}")
                 self._llm_intent_timeout = 15.0  # reset 供下次使用
+                self._last_intent_error_kind = "invalid_response" if isinstance(e, ValueError) else "llm_unavailable"
                 return None
 
         self._llm_intent_timeout = 15.0  # reset
@@ -673,6 +809,7 @@ class RouterAgent(BaseAgent):
                     raise ValueError("no_valid_intents_parsed")
 
                 self._llm_intent_timeout = 15.0
+                self._last_intent_error_kind = None
                 logger.info(
                     f"[{self.name}] LLM 多意图分析成功: {len(analyses)} 个意图, "
                     f"intents={[a.primary_intent.value for a in analyses]}"
@@ -686,6 +823,7 @@ class RouterAgent(BaseAgent):
                         f"[{self.name}] LLM 多意图分析第{retries - 1}次超时，已达最大重试次数"
                     )
                     self._llm_intent_timeout = 15.0
+                    self._last_intent_error_kind = "llm_unavailable"
                     return None
                 current_timeout = min(current_timeout * 2, self._llm_intent_max_timeout)
                 self._llm_intent_timeout = current_timeout
@@ -698,6 +836,7 @@ class RouterAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"[{self.name}] LLM 多意图分析异常: {e}")
                 self._llm_intent_timeout = 15.0
+                self._last_intent_error_kind = "invalid_response" if isinstance(e, ValueError) else "llm_unavailable"
                 return None
 
         self._llm_intent_timeout = 15.0
@@ -726,7 +865,8 @@ class RouterAgent(BaseAgent):
 世界观 → 角色档案 → 故事大纲 → 章节正文（并行可写多章）→ 评估 → 润色
 
 【关键区分规则】
-- "写小说" + "主角叫XXX" → CREATE_NOVEL（主角是小说的设定之一）
+- "写小说" + "主角叫XXX" + 要求开始创作/生成大纲/写正文 → CREATE_NOVEL（主角是小说的设定之一）
+- "我想写一本..." 但只是要求"丰富/细化/展开主角人设或世界观设定" → GENERAL_CHAT，除非明确说生成、保存、写入资料库或开始创作
 - "创建角色档案/人设卡/角色卡" → CREATE_CHARACTER
 - "梳理/生成事件线/剧情线" → CREATE_EVENTLINES
 - "续写/继续写" → CONTINUE_WRITE
@@ -737,8 +877,8 @@ class RouterAgent(BaseAgent):
             UserIntent.CREATE_NOVEL: (
                 "用户要开始创作一部新小说。关键词：'写小说/创作/开始写'、指定了主角名字、"
                 "提到小说类型（玄幻/都市等）、要求'搭大纲''世界观''写正文'。"
-                "注意：只要表达了'写一个故事/小说'的意愿，即便同时提到主角名字，"
-                "也用 CREATE_NOVEL，而不是 CREATE_CHARACTER。"
+                "注意：如果用户只是要求丰富、细化、展开主角人设或世界观设定，"
+                "且没有明确要求生成/保存/开始创作，判为 GENERAL_CHAT。"
             ),
             UserIntent.CREATE_CHARACTER: (
                 "用户要创建角色档案、人设卡，或把角色加入资料库。"
@@ -774,7 +914,8 @@ class RouterAgent(BaseAgent):
             + "\n\n"
             "判断要求：\n"
             "1. 以用户真实意图为准，不只看单个关键词。\n"
-            "2. '写小说 + 主角名' → CREATE_NOVEL；'主角叫XXX'单独出现才考虑 CREATE_CHARACTER。\n"
+            "2. '写小说 + 主角名 + 明确开始创作/生成大纲/写正文' → CREATE_NOVEL；"
+            "'丰富/细化/展开主角人设或世界观设定' → GENERAL_CHAT，除非明确要求保存、生成或开始创作。\n"
             "3. '续写/继续写' → CONTINUE_WRITE；'润色/改写已有内容' → POLISH_CONTENT。\n"
             "4. 如果用户是在询问建议、比较方案、确认是否要做、或明确说先讨论，优先 GENERAL_CHAT/ASK_HELP，而不是执行类意图。\n"
             "5. CREATE_* 只表示用户主题属于创作任务；是否立即写入由后续执行门控判断，不要为了“可能会写”而提高置信度。\n"
@@ -891,7 +1032,8 @@ class RouterAgent(BaseAgent):
 世界观 → 角色档案 → 故事大纲 → 章节正文（并行可写多章）→ 评估 → 润色
 
 【关键区分规则】
-- "写小说" + "主角叫XXX" → CREATE_NOVEL（主角是小说的设定之一）
+- "写小说" + "主角叫XXX" + 要求开始创作/生成大纲/写正文 → CREATE_NOVEL（主角是小说的设定之一）
+- "我想写一本..." 但只是要求"丰富/细化/展开主角人设或世界观设定" → GENERAL_CHAT，除非明确说生成、保存、写入资料库或开始创作
 - "创建角色档案/人设卡/角色卡" → CREATE_CHARACTER
 - "梳理/生成事件线/剧情线" → CREATE_EVENTLINES
 - "续写/继续写" → CONTINUE_WRITE
@@ -902,8 +1044,8 @@ class RouterAgent(BaseAgent):
             UserIntent.CREATE_NOVEL: (
                 "用户要开始创作一部新小说。关键词：'写小说/创作/开始写'、指定了主角名字、"
                 "提到小说类型（玄幻/都市等）、要求'搭大纲''世界观''写正文'。"
-                "注意：只要表达了'写一个故事/小说'的意愿，即便同时提到主角名字，"
-                "也用 CREATE_NOVEL，而不是 CREATE_CHARACTER。"
+                "注意：如果用户只是要求丰富、细化、展开主角人设或世界观设定，"
+                "且没有明确要求生成/保存/开始创作，判为 GENERAL_CHAT。"
             ),
             UserIntent.CREATE_CHARACTER: (
                 "用户要创建角色档案、人设卡，或把角色加入资料库。"
@@ -937,7 +1079,8 @@ class RouterAgent(BaseAgent):
             + "\n\n"
             "判断要求：\n"
             "1. 以用户真实意图为准，不只看单个关键词。\n"
-            "2. '写小说 + 主角名' → CREATE_NOVEL；'主角叫XXX'单独出现才考虑 CREATE_CHARACTER。\n"
+            "2. '写小说 + 主角名 + 明确开始创作/生成大纲/写正文' → CREATE_NOVEL；"
+            "'丰富/细化/展开主角人设或世界观设定' → GENERAL_CHAT，除非明确要求保存、生成或开始创作。\n"
             "3. '续写/继续写' → CONTINUE_WRITE；'润色/改写已有内容' → POLISH_CONTENT。\n"
             "4. 如果用户是在询问建议、比较方案、确认是否要做、或明确说先讨论，优先 GENERAL_CHAT/ASK_HELP，而不是执行类意图。\n"
             "5. CREATE_* 只表示用户主题属于创作任务；是否立即写入由后续执行门控判断，不要为了“可能会写”而提高置信度。\n"
@@ -1363,6 +1506,7 @@ class RouterAgent(BaseAgent):
             intent_analyses = self._intent_analyses_from_explicit_context(message, context)
             if not intent_analyses:
                 intent_analyses = await self.analyze_intents(message)
+            intent_analyses = [self._normalize_intent_analysis(message, ia) for ia in intent_analyses]
             
             # 记录所有意图
             result["intent"] = {
@@ -5693,7 +5837,15 @@ class RouterAgent(BaseAgent):
             text = _localize_workflow_error(str(message or "").strip())
             if not text:
                 return
-            payload = {"content": f"{text}\n\n"}
+            payload = {
+                "content": f"{text}\n\n",
+                "runtime_message": make_runtime_message(
+                    role="event",
+                    message_type="workflow",
+                    content={"content": f"{text}\n\n"},
+                    trace_id=self._get_run_id(context),
+                ).to_dict(),
+            }
         elif isinstance(message, dict):
             next_payload = dict(message)
             content = _localize_workflow_error(str(next_payload.get("content") or "").strip())
@@ -5702,6 +5854,26 @@ class RouterAgent(BaseAgent):
             for key in ("message", "details", "error"):
                 if next_payload.get(key):
                     next_payload[key] = _localize_workflow_error(next_payload[key])
+            if not isinstance(next_payload.get("runtime_message"), dict):
+                next_payload["runtime_message"] = make_runtime_message(
+                    role="event",
+                    message_type="workflow",
+                    content={
+                        key: value
+                        for key, value in next_payload.items()
+                        if key != "runtime_message"
+                    },
+                    trace_id=self._get_run_id(context),
+                    agent_name=str(
+                        next_payload.get("current_agent")
+                        or next_payload.get("target_agent")
+                        or ""
+                    ).strip(),
+                    metadata={
+                        "stage": str(next_payload.get("stage") or "").strip(),
+                        "status": str(next_payload.get("status") or "").strip(),
+                    },
+                ).to_dict()
             payload = next_payload
         else:
             return
@@ -6457,9 +6629,17 @@ class RouterAgent(BaseAgent):
         outline_rows = pm.load_project_data("outline")
         outline_path = str(pm.get_project_data_path("outline"))
         outline_data: Dict[str, Any] = {}
+        execution_outline_rows: List[Dict[str, Any]] = []
         if bool(requirements.get("resume_existing", False)) and isinstance(outline_rows, list) and outline_rows:
             outline_rows = [row for row in outline_rows if isinstance(row, dict)]
             outline_data = {"chapters": outline_rows}
+            execution_outline_rows = extract_outline_chapter_rows(outline_rows)
+            if not execution_outline_rows:
+                execution_outline_rows = derive_chapter_seed_rows_from_outline(outline_rows)
+            if not execution_outline_rows:
+                execution_outline_rows = self._load_project_executable_chapter_rows()
+            if not execution_outline_rows:
+                execution_outline_rows = outline_rows
             outline_file = self._build_file_record(outline_path, "outline", "大纲", "reused")
             self._append_file_record_by_status(
                 file_record=outline_file,
@@ -6514,6 +6694,11 @@ class RouterAgent(BaseAgent):
             )
             outline_data = normalize_outline_payload(outline_result.get("outline", {}) if isinstance(outline_result, dict) else {})
             outline_rows = self._outline_to_project_rows(outline_data)
+            execution_outline_rows = extract_outline_chapter_rows(outline_data)
+            if not execution_outline_rows:
+                execution_outline_rows = derive_chapter_seed_rows_from_outline(outline_data)
+            if not execution_outline_rows:
+                execution_outline_rows = outline_rows
             outline_persist = self._persist_outline_rows(outline_rows)
             self._sync_eventlines_from_outline(outline_data)
             outline_path = str(outline_persist.get("outline_path") or "")
@@ -6530,7 +6715,7 @@ class RouterAgent(BaseAgent):
                 reused_files=reused_files,
             )
             await self._emit_progress(context, {
-                "content": f"### 大纲阶段完成\n共规划 {len(outline_rows)} 章，大纲已同步到资料库",
+                "content": f"### 大纲阶段完成\n共规划 {len(execution_outline_rows)} 章，大纲已同步到资料库",
                 "current_agent": "Outliner",
                 "stage": "outlining",
                 "status": "running",
@@ -6539,9 +6724,10 @@ class RouterAgent(BaseAgent):
                 "reused_files": reused_files,
                 "output_dir": str(self.coordinator.project_dir),
             })
+        chapter_outline_rows = execution_outline_rows or outline_rows
         project_title = self._ensure_project_metadata(
             requirements=requirements,
-            outline_rows=outline_rows,
+            outline_rows=chapter_outline_rows,
             outline_data=outline_data if isinstance(outline_data, dict) else {},
         )
 
@@ -6549,7 +6735,7 @@ class RouterAgent(BaseAgent):
         chapter_files: List[Dict[str, str]] = []
         last_persisted_paths = {"outline_path": outline_path}
         resumed_chapter_count = 0
-        for chapter_index, row in enumerate(outline_rows, start=1):
+        for chapter_index, row in enumerate(chapter_outline_rows, start=1):
             if await self._check_coordinator_pause_cancel():
                 return {
                     "agent_name": "Coordinator",
@@ -6562,7 +6748,7 @@ class RouterAgent(BaseAgent):
                     "reused_files": reused_files,
                     "output_dir": str(self.coordinator.project_dir),
                     "focus_module": "write",
-                    "focus_chapter": self._find_next_incomplete_chapter(outline_rows, start_at=chapter_index) or chapter_index,
+                    "focus_chapter": self._find_next_incomplete_chapter(chapter_outline_rows, start_at=chapter_index) or chapter_index,
                     "params": {
                         "persisted_paths": {
                             "outline_path": outline_path,
@@ -6607,7 +6793,7 @@ class RouterAgent(BaseAgent):
             await self._emit_progress(
                 context,
                 {
-                    "content": f"### 章节阶段\n正在创作第 {chapter_index}/{len(outline_rows)} 章：{row.get('title') or f'第{chapter_index}章'}",
+                    "content": f"### 章节阶段\n正在创作第 {chapter_index}/{len(chapter_outline_rows)} 章：{row.get('title') or f'第{chapter_index}章'}",
                     "current_agent": "ChapterWriter",
                     "stage": f"chapter_{chapter_index}",
                     "status": "running",
@@ -6627,7 +6813,7 @@ class RouterAgent(BaseAgent):
                 previous_chapters=written_chapters,
             )
             written_chapters.append(chapter_result)
-            last_persisted_paths = await self._persist_chapter_result(chapter_result, outline_rows)
+            last_persisted_paths = await self._persist_chapter_result(chapter_result, chapter_outline_rows)
             if last_persisted_paths.get("chapter_path"):
                 chapter_file = self._build_file_record(
                     str(last_persisted_paths["chapter_path"]),
@@ -6711,7 +6897,7 @@ class RouterAgent(BaseAgent):
             },
         )
 
-        outline_preview = [row.get("title", f"第{i+1}章") for i, row in enumerate(outline_rows[:5])]
+        outline_preview = [row.get("title", f"第{i+1}章") for i, row in enumerate(chapter_outline_rows[:5])]
         world_preview = ""
         if isinstance(world_data, dict):
             world_preview = (
@@ -6726,7 +6912,7 @@ class RouterAgent(BaseAgent):
             "",
             "生成结果：",
             "- 世界观已同步到资料库",
-            f"- 大纲已生成，共 {len(outline_rows)} 章",
+            f"- 大纲已生成，共 {len(chapter_outline_rows)} 章",
         ]
         if resumed_chapter_count:
             response_parts.extend(["", f"断点续作：已复用 {resumed_chapter_count} 个已完成章节，仅补写缺失内容。"])
@@ -6759,7 +6945,7 @@ class RouterAgent(BaseAgent):
             "reused_files": reused_files,
             "output_dir": str(self.coordinator.project_dir),
             "focus_module": "write",
-            "focus_chapter": self._find_next_incomplete_chapter(outline_rows, start_at=1),
+            "focus_chapter": self._find_next_incomplete_chapter(chapter_outline_rows, start_at=1),
             "params": {
                 **requirements,
                 "persisted_paths": persisted_paths,

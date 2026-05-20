@@ -23,6 +23,12 @@ from fastapi.responses import JSONResponse
 
 from ...constants import SERVER_DEFAULTS
 from ...constants import get_app_root, get_data_dir
+from ...knowledge_runtime import (
+    apply_bundled_local_onnx_defaults,
+    has_embedding_config,
+    load_knowledge_base_settings,
+    resolve_local_onnx_model_dir,
+)
 from ...knowledge_base.logic_layer.chapter_marker import ChapterMarker
 from ...utils.atomic_write import atomic_write_text
 from ..models.requests import (
@@ -86,7 +92,10 @@ def _resolve_onnx_model_dir(model_dir: str) -> Path:
     path = Path(raw)
     if path.is_absolute():
         return path
-    return get_app_root() / path
+    app_root_path = get_app_root() / path
+    if app_root_path.exists():
+        return app_root_path
+    return resolve_local_onnx_model_dir(raw)
 
 
 def _inspect_local_onnx_model(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -229,6 +238,8 @@ async def get_knowledge_base_config():
             default_config.update(saved_config)
         except Exception as e:
             logger.warning(f"[Knowledge] 读取知识库配置失败，使用默认值: {e}")
+    else:
+        default_config.update(apply_bundled_local_onnx_defaults({}))
     
     api_key = default_config.get("siliconflow_api_key", "")
     onnx_status = _inspect_local_onnx_model(default_config)
@@ -663,24 +674,8 @@ async def save_infinite_summary(request: dict):
         "created_at": datetime.datetime.now().isoformat(),
     }
 
-    config_path = _knowledge_base_config_path()
-    has_embedding_config = False
-    if config_path.exists():
-        try:
-            kb_config = json.loads(config_path.read_text(encoding="utf-8"))
-            provider = str(kb_config.get("embedding_provider") or "api").lower()
-            has_embedding_config = bool((kb_config.get("siliconflow_api_key") or "").strip())
-            if provider in {"local", "local_onnx"}:
-                has_embedding_config = bool((kb_config.get("onnx_model_dir") or "").strip())
-        except Exception as e:
-            logger.warning(f"[Knowledge] 读取知识库配置失败: {e}")
-    else:
-        provider = os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")).lower()
-        has_embedding_config = bool(os.getenv("SILICONFLOW_API_KEY", ""))
-        if provider in {"local", "local_onnx"}:
-            has_embedding_config = bool(os.getenv("KB_ONNX_MODEL_DIR", ""))
-
-    if not has_embedding_config:
+    kb_settings = load_knowledge_base_settings(pm.data_dir)
+    if not has_embedding_config(kb_settings):
         return JSONResponse(
             {
                 "success": False,

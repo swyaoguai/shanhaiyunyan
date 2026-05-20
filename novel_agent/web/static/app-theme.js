@@ -132,6 +132,30 @@ function getSafeSettingValue(value, defaultValue) {
     return (value !== undefined && value !== null && !isNaN(value)) ? value : defaultValue;
 }
 
+function syncBackgroundImageState(url) {
+    const hasBgImage = !!String(url || '').trim();
+    if (document.body) {
+        document.body.classList.toggle('has-bg-image', hasBgImage);
+    }
+    document.documentElement.style.setProperty('--app-overlay-blur', hasBgImage ? '0px' : '80px');
+}
+
+function applyBackgroundImageToElement(url) {
+    const bgEl = document.getElementById('app-bg');
+    if (!bgEl) return;
+
+    if (url) {
+        bgEl.style.backgroundImage = `url('${url}')`;
+        bgEl.style.backgroundSize = 'cover';
+        bgEl.style.backgroundPosition = 'center';
+        bgEl.style.backgroundRepeat = 'no-repeat';
+        bgEl.style.opacity = '1';
+    } else {
+        bgEl.style.backgroundImage = '';
+        bgEl.style.opacity = '0';
+    }
+}
+
 function updateThemeButton() {
     const themeKey = store.settings.theme || 'dark';
     const theme = THEMES[themeKey];
@@ -180,6 +204,7 @@ function applyFullThemeFromHue(hue) {
     const overlayOpacity = (store.settings.bgOpacity !== undefined && store.settings.bgOpacity !== null)
         ? store.settings.bgOpacity : 0.85;
     const hasBgImage = !!store.settings.bgUrl;
+    syncBackgroundImageState(store.settings.bgUrl);
     
     // 判断是浅色还是深色模式
     const isLightMode = bgLightness > 50;
@@ -270,19 +295,9 @@ function applyTextColor() {
 async function setAppBackground(url) {
     if (!url) return;
 
-    const bgEl = document.getElementById('app-bg');
-    if (bgEl) {
-        bgEl.style.backgroundImage = `url('${url}')`;
-        bgEl.style.backgroundSize = 'cover';
-        bgEl.style.backgroundPosition = 'center';
-        bgEl.style.backgroundRepeat = 'no-repeat';
-        bgEl.style.opacity = '1';  // 确保背景图片可见
-    }
-
     store.settings.bgUrl = url;
-    
-    // 添加body类，启用侧边栏透明效果
-    document.body.classList.add('has-bg-image');
+    applyBackgroundImageToElement(url);
+    syncBackgroundImageState(url);
 
     // 使用IndexedDB存储大图片，localStorage作为备用
     try {
@@ -307,13 +322,9 @@ async function setAppBackground(url) {
 }
 
 async function clearAppBackground() {
-    const bgEl = document.getElementById('app-bg');
-    if (bgEl) {
-        bgEl.style.backgroundImage = '';
-        bgEl.style.opacity = '0';
-    }
-
     store.settings.bgUrl = '';
+    applyBackgroundImageToElement('');
+    syncBackgroundImageState('');
     
     // 清除IndexedDB和localStorage中的背景图片
     try {
@@ -323,9 +334,6 @@ async function clearAppBackground() {
     }
     localStorage.removeItem('theme_bg');
     
-    // 移除body类，恢复侧边栏原有样式
-    document.body.classList.remove('has-bg-image');
-
     // 清空输入框
     const urlInput = document.getElementById('bg-url-input');
     if (urlInput) {
@@ -424,21 +432,18 @@ async function loadSavedSettings() {
     
     if (savedBg) {
         store.settings.bgUrl = savedBg;
-        // 添加body类，启用侧边栏透明效果
-        document.body.classList.add('has-bg-image');
+        syncBackgroundImageState(savedBg);
+        applyBackgroundImageToElement(savedBg);
         // 延迟设置背景图片，确保DOM加载完成
         setTimeout(() => {
-            const bgEl = document.getElementById('app-bg');
-            if (bgEl) {
-                bgEl.style.backgroundImage = `url('${savedBg}')`;
-                bgEl.style.backgroundSize = 'cover';
-                bgEl.style.backgroundPosition = 'center';
-                bgEl.style.opacity = '1';
-                console.log('[Background] 背景图片已应用');
-            }
+            applyBackgroundImageToElement(savedBg);
+            syncBackgroundImageState(savedBg);
+            console.log('[Background] 背景图片已应用');
             // 重新应用主题以确保叠加层正确显示
             applyFullThemeFromHue(store.settings.accentHue);
         }, 100);
+    } else {
+        syncBackgroundImageState('');
     }
 
     // 加载主题模式
@@ -478,6 +483,8 @@ window.setBackgroundOpacity = setBackgroundOpacity;
 window.setBackgroundLightness = setBackgroundLightness;
 window.setOverlayOpacity = setOverlayOpacity;
 window.setBackgroundFromHue = setBackgroundFromHue;
+window.syncBackgroundImageState = syncBackgroundImageState;
+window.applyBackgroundImageToElement = applyBackgroundImageToElement;
 window.applyFullThemeFromHue = applyFullThemeFromHue;
 window.applyThemePreset = applyThemePreset;
 window.setSaturation = setSaturation;

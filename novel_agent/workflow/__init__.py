@@ -42,8 +42,25 @@ from .collab_services import (
     build_default_collab_service_registry,
 )
 from .execution_context import CollabExecutionContext, ContextValidationError, TaskExecutionEnvelope
+from .context_bundle import (
+    ContextBundle,
+    confirm_context_bundle,
+    create_context_bundle,
+    load_confirmed_context_bundles_from_project_dir,
+)
 from .memory_sync import MemorySyncManager
 from .routing_policy import RouteDecision, RouteRule, RoutingPolicy, RoutingPolicyError
+from .runtime_event_log import RuntimeEventLog
+from .runtime_events import AgentRuntimeEvent, make_runtime_event
+from .runtime_hooks import RuntimeHookContext, RuntimeHookRegistry, get_runtime_hook_registry
+from .runtime_messages import (
+    AgentRuntimeMessage,
+    ArtifactEnvelope,
+    attach_runtime_message,
+    make_artifact_envelope,
+    make_runtime_message,
+    make_runtime_message_for_event,
+)
 from .runtime_state import RuntimeStateStore
 from .task_pool import TaskPool, TaskPoolSnapshot, TaskStatus
 
@@ -75,11 +92,27 @@ __all__ = [
     "CollabExecutionContext",
     "ContextValidationError",
     "TaskExecutionEnvelope",
+    "ContextBundle",
+    "confirm_context_bundle",
+    "create_context_bundle",
+    "load_confirmed_context_bundles_from_project_dir",
     "MemorySyncManager",
     "RouteDecision",
     "RouteRule",
     "RoutingPolicy",
     "RoutingPolicyError",
+    "AgentRuntimeEvent",
+    "AgentRuntimeMessage",
+    "ArtifactEnvelope",
+    "RuntimeEventLog",
+    "attach_runtime_message",
+    "make_artifact_envelope",
+    "make_runtime_event",
+    "RuntimeHookContext",
+    "RuntimeHookRegistry",
+    "get_runtime_hook_registry",
+    "make_runtime_message",
+    "make_runtime_message_for_event",
     "RuntimeStateStore",
     "TaskPool",
     "TaskPoolSnapshot",

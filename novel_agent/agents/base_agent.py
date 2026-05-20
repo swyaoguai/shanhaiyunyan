@@ -12,7 +12,7 @@ import time
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Dict, Any, List, AsyncGenerator, Callable, Awaitable, Union
+from typing import Optional, Dict, Any, List, AsyncGenerator, Callable, Awaitable, Union, Tuple
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -175,13 +175,20 @@ class BaseAgent(ABC):
         
         return self._create_openai_client(api_key, api_base, timeout_config)
 
+    @staticmethod
+    def _is_tsc5_api_base_value(api_base: str) -> bool:
+        return "tsc5.top" in str(api_base or "").lower()
+
     def _create_openai_client(self, api_key: str, api_base: str, timeout_config: httpx.Timeout) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            timeout=timeout_config,
-            max_retries=0  # 禁用SDK内部重试，使用我们自己的重试逻辑
-        )
+        kwargs = {
+            "api_key": api_key,
+            "base_url": api_base,
+            "timeout": timeout_config,
+            "max_retries": 0,  # 禁用SDK内部重试，使用我们自己的重试逻辑
+        }
+        if self._is_tsc5_api_base_value(api_base):
+            kwargs["default_headers"] = {"User-Agent": "ShanhaiYunyan/1.0"}
+        return AsyncOpenAI(**kwargs)
 
     def _rotation_config_id(self) -> str:
         return (
@@ -280,11 +287,60 @@ class BaseAgent(ABC):
     
     def _get_max_tokens(self) -> int:
         """获取最大token数
-        
+
         model_config 由 get_effective_config 返回，已包含合并后的有效值
         """
         return self.model_config.max_tokens
-    
+
+    def _is_tsc5_api_base(self) -> bool:
+        """识别探索仓中转域名。"""
+        api_base = self.model_config.api_base or config.llm.api_base or ""
+        return self._is_tsc5_api_base_value(api_base)
+
+    def _should_omit_max_tokens(self) -> bool:
+        """探索仓等严格 OpenAI 兼容中转不携带 max_tokens。"""
+        return self._is_tsc5_api_base()
+
+    def _split_system_messages(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, Any]], str]:
+        system_parts: List[str] = []
+        if self.system_prompt:
+            system_parts.append(str(self.system_prompt).strip())
+
+        normalized: List[Dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role", "user") or "user").strip() or "user"
+            content = message.get("content", "")
+            if role == "system":
+                text = str(content or "").strip()
+                if text:
+                    system_parts.append(text)
+                continue
+            normalized.append(dict(message))
+
+        return normalized, "\n\n".join(part for part in system_parts if part)
+
+    def _build_openai_chat_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """构建 Chat Completions 消息，按中转兼容性调整 system role。"""
+        normalized, resolved_system_prompt = self._split_system_messages(messages)
+        if not resolved_system_prompt:
+            return normalized
+        if not self._is_tsc5_api_base():
+            return [{"role": "system", "content": resolved_system_prompt}] + normalized
+
+        if not normalized:
+            return [{"role": "user", "content": resolved_system_prompt}]
+
+        for message in normalized:
+            if message.get("role") == "user":
+                content = message.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False)
+                message["content"] = f"写作提示:\n{resolved_system_prompt}\n\n{content}"
+                return normalized
+
+        normalized.insert(0, {"role": "user", "content": resolved_system_prompt})
+        return normalized
+
     def update_config(self, **kwargs) -> None:
         """
         更新Agent配置并重新初始化客户端
@@ -609,9 +665,11 @@ class BaseAgent(ABC):
             return self._stream_response_with_retry(messages, temperature, max_tokens)
         
         last_error = None
+        attempts_made = 0
         current_delay = self.retry_config.delay
-        
+
         for attempt in range(self.retry_config.max_retries + 1):
+            attempts_made = attempt + 1
             try:
                 return await self._call_llm_internal(messages, temperature, max_tokens, stream)
             except Exception as e:
@@ -638,8 +696,7 @@ class BaseAgent(ABC):
                 await asyncio.sleep(wait_time)
                 current_delay *= self.retry_config.backoff
         
-        # 所有重试失败
-        logger.error(f"[{self.name}] LLM call failed after {self.retry_config.max_retries + 1} attempts")
+        logger.error(f"[{self.name}] LLM call failed after {attempts_made} attempts")
         raise last_error
 
     async def _stream_response_with_retry(
@@ -790,20 +847,21 @@ class BaseAgent(ABC):
         start_time = time.time()
         
         # 注入系统提示词
-        full_messages = [
-            {"role": "system", "content": self.system_prompt}
-        ] + messages
-        
+        full_messages = self._build_openai_chat_messages(messages)
+
+        resolved_max_tokens = normalize_max_tokens(
+            max_tokens if max_tokens is not None else self._get_max_tokens(),
+            source=self.name,
+        )
+
         params = {
             "model": self._get_model_name(),
             "messages": full_messages,
             "temperature": temperature if temperature is not None else self._get_temperature(),
-            "max_tokens": normalize_max_tokens(
-                max_tokens if max_tokens is not None else self._get_max_tokens(),
-                source=self.name,
-            ),
             "stream": stream
         }
+        if not self._should_omit_max_tokens():
+            params["max_tokens"] = resolved_max_tokens
         
         # 诊断日志：记录请求详情
         api_base = self.model_config.api_base or config.llm.api_base
@@ -811,7 +869,8 @@ class BaseAgent(ABC):
         logger.info(
             f"[{self.name}] Calling LLM - Model: {params['model']}, "
             f"API: {api_base}, Messages: {len(full_messages)}, "
-            f"Total chars: {total_chars}, Max tokens: {params['max_tokens']}"
+            f"Total chars: {total_chars}, Max tokens: {params.get('max_tokens', 'provider_default')}, "
+            f"Stream requested: {stream}, Callback stream: {self._should_prefer_streaming_requests()}"
         )
         
         try:
@@ -1047,6 +1106,72 @@ class BaseAgent(ABC):
         )
 
     @staticmethod
+    def _is_request_blocked_error(error: Exception) -> bool:
+        """识别中转/网关对请求体的泛化阻断。"""
+        error_lower = str(error or "").lower()
+        return any(
+            token in error_lower
+            for token in (
+                "request was blocked",
+                "your request was blocked",
+                "403",
+                "forbidden",
+                "permissiondenied",
+                "permission denied",
+            )
+        )
+
+    @classmethod
+    def _should_retry_stream_without_options(cls, error: Exception) -> bool:
+        """部分 OpenAI 兼容中转会把 stream_options 直接泛化成 403 blocked。"""
+        return cls._is_stream_options_unsupported(error) or cls._is_request_blocked_error(error)
+
+    def _should_include_stream_options(self) -> bool:
+        """是否在流式请求中附加用量统计参数。"""
+        if self._is_tsc5_api_base():
+            return False
+        return True
+
+    @staticmethod
+    def _extract_chat_completion_content(response: Any) -> str:
+        """从非流式 Chat Completion 响应中提取正文，兼容 SDK 对象和 dict。"""
+        if isinstance(response, str):
+            return response
+        choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+        if not choices:
+            raise Exception("API响应格式错误，缺少choices字段")
+        choice = choices[0]
+        message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+        if message is None:
+            raise Exception("API响应格式错误，缺少message字段")
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if content is None:
+            content = message.get("refusal") if isinstance(message, dict) else getattr(message, "refusal", None)
+        return str(content or "")
+
+    async def _yield_non_stream_fallback(
+        self,
+        params: dict,
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """流式请求被中转阻断时，退回非流式请求并一次性产出文本。"""
+        fallback_params = dict(params)
+        fallback_params["stream"] = False
+        fallback_params.pop("stream_options", None)
+        logger.warning(
+            f"[{self.name}] Streaming request was blocked by provider; retrying once without stream"
+        )
+        response = await self._create_chat_completion_with_rotation(fallback_params)
+        usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+        if usage is not None and usage_collector is not None:
+            usage_collector["usage"] = usage
+        content = self._extract_chat_completion_content(response)
+        if not content.strip():
+            from ..utils.retry import EmptyResponseError
+            raise EmptyResponseError(f"[{self.name}] LLM 非流式兜底返回空内容")
+        yield content
+
+    @staticmethod
     def _strip_stream_overlap(existing_text: str, incoming_text: str, max_overlap: int = 256) -> str:
         """去掉续传内容与已输出尾部的重叠前缀，避免重复显示。"""
         if not existing_text or not incoming_text:
@@ -1273,19 +1398,34 @@ class BaseAgent(ABC):
         """流式响应生成器"""
         try:
             request_params = dict(params)
-            if request_params.get("stream") and "stream_options" not in request_params:
+            if (
+                request_params.get("stream")
+                and "stream_options" not in request_params
+                and self._should_include_stream_options()
+            ):
                 request_params["stream_options"] = {"include_usage": True}
             try:
                 response = await self._create_chat_completion_with_rotation(request_params)
             except Exception as exc:
-                if "stream_options" in request_params and self._is_stream_options_unsupported(exc):
+                if "stream_options" in request_params and self._should_retry_stream_without_options(exc):
                     logger.info(
-                        f"[{self.name}] 当前模型接口不支持 stream_options.include_usage，退回流式估算统计"
+                        f"[{self.name}] 当前模型接口不兼容 stream_options.include_usage，退回普通流式请求"
                     )
                     if usage_collector is not None:
                         usage_collector["usage_unavailable_reason"] = "stream_options_unsupported"
                     request_params.pop("stream_options", None)
-                    response = await self._create_chat_completion_with_rotation(request_params)
+                    try:
+                        response = await self._create_chat_completion_with_rotation(request_params)
+                    except Exception as retry_exc:
+                        if self._is_request_blocked_error(retry_exc):
+                            async for chunk in self._yield_non_stream_fallback(params, usage_collector=usage_collector):
+                                yield chunk
+                            return
+                        raise
+                elif self._is_request_blocked_error(exc):
+                    async for chunk in self._yield_non_stream_fallback(params, usage_collector=usage_collector):
+                        yield chunk
+                    return
                 else:
                     raise
 

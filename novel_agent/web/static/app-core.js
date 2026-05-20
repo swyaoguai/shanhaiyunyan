@@ -122,89 +122,13 @@ const ui = {
 };
 
 let currentStreamAbort = null;
-const appRuntimeLifecycle = {
-    windowId: '',
-    enabled: false,
-    heartbeatTimer: null,
-    closeSent: false,
-    heartbeatIntervalMs: 5000
-};
-
-function createRuntimeWindowId() {
-    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-        return window.crypto.randomUUID();
-    }
-    return `win-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function postAppRuntimeEvent(path, useBeacon = false) {
-    if (!appRuntimeLifecycle.enabled || !appRuntimeLifecycle.windowId) return false;
-    const payload = JSON.stringify({ window_id: appRuntimeLifecycle.windowId });
-    if (useBeacon && navigator.sendBeacon) {
-        const blob = new Blob([payload], { type: 'application/json' });
-        return navigator.sendBeacon(path, blob);
-    }
-    fetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload,
-        keepalive: Boolean(useBeacon),
-        credentials: 'same-origin'
-    }).catch(() => {});
-    return true;
-}
-
-function stopAppRuntimeHeartbeat() {
-    if (appRuntimeLifecycle.heartbeatTimer) {
-        clearInterval(appRuntimeLifecycle.heartbeatTimer);
-        appRuntimeLifecycle.heartbeatTimer = null;
-    }
-}
-
-function notifyAppRuntimeWindowClosed() {
-    if (!appRuntimeLifecycle.enabled || appRuntimeLifecycle.closeSent) return;
-    appRuntimeLifecycle.closeSent = true;
-    stopAppRuntimeHeartbeat();
-    postAppRuntimeEvent('/api/app/window-closed', true);
-}
 
 async function initAppRuntimeLifecycle() {
-    if (appRuntimeLifecycle.windowId) return;
-    try {
-        const response = await fetch('/api/app/runtime', {
-            method: 'GET',
-            cache: 'no-store',
-            credentials: 'same-origin'
-        });
-        if (!response.ok) return;
-        const runtime = await response.json();
-        if (!runtime || !runtime.close_shutdown_enabled) return;
-
-        appRuntimeLifecycle.enabled = true;
-        appRuntimeLifecycle.windowId = createRuntimeWindowId();
-        appRuntimeLifecycle.heartbeatIntervalMs = Math.max(
-            Number(runtime.heartbeat_interval_ms || 5000),
-            2000
-        );
-
-        postAppRuntimeEvent('/api/app/window-heartbeat');
-        appRuntimeLifecycle.heartbeatTimer = setInterval(() => {
-            postAppRuntimeEvent('/api/app/window-heartbeat');
-        }, appRuntimeLifecycle.heartbeatIntervalMs);
-
-        window.addEventListener('pagehide', notifyAppRuntimeWindowClosed);
-        window.addEventListener('beforeunload', notifyAppRuntimeWindowClosed);
-    } catch (error) {
-        console.debug('[Runtime] 生命周期检测不可用:', error);
-    }
+    return false;
 }
 
 function resetAppRuntimeLifecycleForTests() {
-    stopAppRuntimeHeartbeat();
-    appRuntimeLifecycle.windowId = '';
-    appRuntimeLifecycle.enabled = false;
-    appRuntimeLifecycle.closeSent = false;
-    appRuntimeLifecycle.heartbeatIntervalMs = 5000;
+    return false;
 }
 
 function setStreamingButtonState(streaming) {
@@ -267,6 +191,9 @@ async function init() {
     setCopilotSessionHeader('加载中...');
     bindEvents();
     initAppRuntimeLifecycle();
+    if (typeof window.refreshAppVersionInfo === 'function') {
+        window.refreshAppVersionInfo();
+    }
     await loadSavedSettings(); // 加载保存的主题和背景设置（异步加载IndexedDB背景图片）
     restoreSidebarState(); // 恢复侧边栏状态
     loadKnowledgeCategories(); // 加载自定义资料库分类
@@ -507,6 +434,17 @@ function bindEvents() {
         item.addEventListener('click', () => switchModule(item.dataset.module));
     });
 
+    const shutdownButton = document.getElementById('app-shutdown-button');
+    if (shutdownButton && shutdownButton.dataset.bound !== 'true') {
+        shutdownButton.dataset.bound = 'true';
+        shutdownButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            if (typeof window.requestAppShutdown === 'function') {
+                window.requestAppShutdown(shutdownButton);
+            }
+        });
+    }
+
     // Copilot 开关
     if (ui.toggleCopilotBtn) {
         ui.toggleCopilotBtn.addEventListener('click', toggleCopilot);
@@ -651,6 +589,12 @@ function switchModule(moduleId) {
         } else {
             console.error('[switchModule] renderNovelToScriptInterface not found');
         }
+    } else if (normalizedModuleId === 'cover-images') {
+        if (typeof renderCoverImagesInterface === 'function') {
+            renderCoverImagesInterface();
+        } else {
+            console.error('[switchModule] renderCoverImagesInterface not found');
+        }
     } else if (normalizedModuleId === 'infinite-write') {
         // 无限续写模块
         if (typeof renderInfiniteWriteInterface === 'function') {
@@ -787,7 +731,6 @@ function getCopilotWelcomeHtml() {
     return `你好！我是你的写作助手。试试：
         <ul style="margin: 8px 0; padding-left: 20px;">
             <li>输入 <code>@</code> 引用角色、章节或设定</li>
-            <li>输入 <code>/</code> 查看显式命令，例如 <code>/create</code></li>
             <li>直接提问或发指令</li>
         </ul>`;
 }
@@ -920,7 +863,6 @@ function translateTechnicalText(text) {
         [/Max Tokens/gi, '最大输出长度'],
         [/Temperature/gi, '温度参数'],
         [/Markdown/gi, '格式化文本'],
-        [/Slash 命令/gi, '快捷命令'],
         [/Agent/gi, '助手'],
         [/Coordinator/gi, '创作协调器'],
         [/Communicator/gi, '沟通助手'],
@@ -2917,6 +2859,233 @@ function renderTaskPoolSummaryCard(taskPool) {
     `;
 }
 
+const runtimeMessageRenderers = new Map();
+
+function runtimeEscapeHtml(value) {
+    const text = String(value ?? '');
+    return window.escapeHtml ? window.escapeHtml(text) : text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function normalizeRuntimeMessage(raw) {
+    const source = raw && typeof raw === 'object' && raw.runtime_message && typeof raw.runtime_message === 'object'
+        ? raw.runtime_message
+        : raw;
+    if (!source || typeof source !== 'object') return null;
+    const content = source.content && typeof source.content === 'object'
+        ? source.content
+        : { text: String(source.content || source.message || '') };
+    return {
+        message_id: String(source.message_id || '').trim(),
+        role: String(source.role || 'event').trim() || 'event',
+        type: String(source.type || 'text').trim() || 'text',
+        content,
+        created_at: String(source.created_at || source.timestamp || '').trim(),
+        trace_id: String(source.trace_id || content.trace_id || content.context_snapshot_id || '').trim(),
+        task_id: String(source.task_id || content.task_id || '').trim(),
+        agent_name: String(source.agent_name || content.agent_name || content.assigned_agent || content.current_agent || '').trim(),
+        metadata: source.metadata && typeof source.metadata === 'object' ? source.metadata : {}
+    };
+}
+
+function registerRuntimeMessageRenderer(type, renderer) {
+    const normalizedType = String(type || '').trim();
+    if (!normalizedType || typeof renderer !== 'function') return;
+    runtimeMessageRenderers.set(normalizedType, renderer);
+}
+
+function formatRuntimeMessageMeta(message) {
+    const parts = [];
+    if (message.agent_name) parts.push(getAgentDisplayName(message.agent_name) || message.agent_name);
+    if (message.task_id) parts.push(message.task_id);
+    if (message.trace_id && message.trace_id !== message.task_id) parts.push(message.trace_id);
+    return parts.map(runtimeEscapeHtml).join(' · ');
+}
+
+function renderRuntimeMessageShell(message, title, bodyHtml, tone = 'neutral') {
+    const meta = formatRuntimeMessageMeta(message);
+    return `
+        <div class="copilot-runtime-message" data-runtime-message-type="${runtimeEscapeHtml(message.type)}" data-tone="${runtimeEscapeHtml(tone)}"
+            style="padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.04);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;">
+                <strong style="font-size: 13px; color: var(--text-primary);">${runtimeEscapeHtml(title || '运行消息')}</strong>
+                ${meta ? `<span style="font-size: 11px; color: var(--text-secondary);">${meta}</span>` : ''}
+            </div>
+            <div style="font-size: 12px; line-height: 1.7; color: var(--text-secondary); word-break: break-word;">${bodyHtml}</div>
+        </div>
+    `;
+}
+
+function renderRuntimeMessageFallback(message) {
+    const content = message.content && typeof message.content === 'object' ? message.content : {};
+    const text = String(content.text || content.message || content.content || '').trim()
+        || JSON.stringify(content, null, 2);
+    return renderRuntimeMessageShell(message, translateTechnicalText(message.type || 'text'), runtimeEscapeHtml(text));
+}
+
+function renderWorkflowRuntimeMessage(message) {
+    const content = message.content || {};
+    const workflow = content.workflow && typeof content.workflow === 'object' ? content.workflow : content;
+    const status = getWorkflowStatusLabel(workflow.status || content.status || '');
+    const stage = translateTechnicalText(String(workflow.stage || content.stage || '').trim());
+    const progress = formatWorkflowProgressText(workflow.last_progress || content.content || content.message || '');
+    const body = [
+        status ? `状态：${runtimeEscapeHtml(status)}` : '',
+        stage ? `阶段：${runtimeEscapeHtml(stage)}` : '',
+        progress ? `进展：${runtimeEscapeHtml(progress)}` : ''
+    ].filter(Boolean).join('<br>') || '工作流状态已更新';
+    return renderRuntimeMessageShell(message, '工作流事件', body, String(workflow.status || content.status || 'neutral'));
+}
+
+function renderTaskRuntimeMessage(message) {
+    const content = message.content || {};
+    const title = String(content.title || content.task_type || content.event_type || '任务事件').trim();
+    const status = translateTechnicalText(String(content.status || content.event_type || '').trim());
+    const agent = String(content.assigned_agent || content.agent_name || message.agent_name || '').trim();
+    const reason = String(content.route_reason || content.reason || '').trim();
+    const validation = content.output_validation && typeof content.output_validation === 'object'
+        ? (content.output_validation.passed === false ? '未通过' : '已通过')
+        : '';
+    const lines = [
+        status ? `状态：${runtimeEscapeHtml(status)}` : '',
+        agent ? `执行智能体：${runtimeEscapeHtml(getAgentDisplayName(agent) || agent)}` : '',
+        reason ? `路由依据：${runtimeEscapeHtml(translateTechnicalText(reason))}` : '',
+        validation ? `输出校验：${runtimeEscapeHtml(validation)}` : ''
+    ].filter(Boolean).join('<br>') || '任务状态已更新';
+    return renderRuntimeMessageShell(message, title, lines, String(content.status || 'neutral'));
+}
+
+function renderArtifactRuntimeMessage(message) {
+    const content = message.content || {};
+    const artifact = content.artifact && typeof content.artifact === 'object' ? content.artifact : content;
+    const refs = Array.isArray(artifact.refs) && artifact.refs.length
+        ? artifact.refs
+        : (Array.isArray(content.artifact_refs) ? content.artifact_refs : []);
+    const resultKeys = Array.isArray(content.result_keys) ? content.result_keys : [];
+    const title = String(artifact.title || content.title || artifact.artifact_type || '产物').trim();
+    const body = [
+        artifact.artifact_type ? `类型：${runtimeEscapeHtml(translateTechnicalText(artifact.artifact_type))}` : '',
+        artifact.created_by ? `创建者：${runtimeEscapeHtml(getAgentDisplayName(artifact.created_by) || artifact.created_by)}` : '',
+        refs.length ? `引用：${runtimeEscapeHtml(refs.slice(0, 4).join('、'))}` : '',
+        resultKeys.length ? `结果字段：${runtimeEscapeHtml(resultKeys.slice(0, 8).join('、'))}` : ''
+    ].filter(Boolean).join('<br>') || '产物已生成';
+    return renderRuntimeMessageShell(message, title, body, 'artifact');
+}
+
+function renderHandoffRuntimeMessage(message) {
+    const content = message.content || {};
+    const handoff = content.handoff && typeof content.handoff === 'object' ? content.handoff : content;
+    const summary = String(handoff.next_context_summary || '').trim()
+        || (Array.isArray(handoff.decisions) && handoff.decisions.length ? String(handoff.decisions[0] || '').trim() : '');
+    const risks = Array.isArray(handoff.risks) ? handoff.risks.filter(Boolean) : [];
+    const body = [
+        summary ? `摘要：${runtimeEscapeHtml(summary)}` : '',
+        Array.isArray(handoff.produced_context_keys) && handoff.produced_context_keys.length
+            ? `产生上下文：${runtimeEscapeHtml(handoff.produced_context_keys.join('、'))}`
+            : '',
+        risks.length ? `风险：${runtimeEscapeHtml(risks.slice(0, 4).join('、'))}` : ''
+    ].filter(Boolean).join('<br>') || '交接摘要已生成';
+    return renderRuntimeMessageShell(message, '交接摘要', body, 'handoff');
+}
+
+function renderContextDeltaRuntimeMessage(message) {
+    const content = message.content || {};
+    const delta = content.context_delta && typeof content.context_delta === 'object' ? content.context_delta : content;
+    const added = Array.isArray(delta.added_keys) ? delta.added_keys : [];
+    const updated = Array.isArray(delta.updated_keys) ? delta.updated_keys : [];
+    const removed = Array.isArray(delta.removed_keys) ? delta.removed_keys : [];
+    const body = [
+        delta.summary ? runtimeEscapeHtml(delta.summary) : '',
+        added.length ? `新增：${runtimeEscapeHtml(added.join('、'))}` : '',
+        updated.length ? `更新：${runtimeEscapeHtml(updated.join('、'))}` : '',
+        removed.length ? `移除：${runtimeEscapeHtml(removed.join('、'))}` : ''
+    ].filter(Boolean).join('<br>') || '上下文无结构性变化';
+    return renderRuntimeMessageShell(message, '上下文变更', body, 'context_delta');
+}
+
+function renderErrorRuntimeMessage(message) {
+    const content = message.content || {};
+    const text = String(content.message || content.error || content.reason || content.last_error || '').trim()
+        || '执行遇到问题';
+    return renderRuntimeMessageShell(message, '运行错误', runtimeEscapeHtml(translateTechnicalText(text)), 'error');
+}
+
+function renderRuntimeMessage(rawMessage) {
+    const message = normalizeRuntimeMessage(rawMessage);
+    if (!message) return '';
+    const renderer = runtimeMessageRenderers.get(message.type);
+    try {
+        return renderer ? renderer(message) : renderRuntimeMessageFallback(message);
+    } catch (error) {
+        console.warn('[Copilot] runtime message renderer failed', error);
+        return renderRuntimeMessageFallback(message);
+    }
+}
+
+function formatRuntimeMessageSummary(message) {
+    const content = message.content || {};
+    if (message.type === 'workflow') {
+        return formatWorkflowProgressText(content.last_progress || content.content || content.message || '')
+            || `${getAgentDisplayName(message.agent_name) || message.agent_name || '工作流'} ${translateTechnicalText(content.status || '已更新')}`;
+    }
+    if (message.type === 'artifact') {
+        const artifact = content.artifact && typeof content.artifact === 'object' ? content.artifact : content;
+        return `${getAgentDisplayName(message.agent_name) || message.agent_name || '助手'} 生成 ${translateTechnicalText(artifact.artifact_type || content.task_type || '产物')}`;
+    }
+    if (message.type === 'handoff') {
+        const handoff = content.handoff && typeof content.handoff === 'object' ? content.handoff : content;
+        return String(handoff.next_context_summary || '交接摘要已生成').trim();
+    }
+    if (message.type === 'context_delta') {
+        return String(content.summary || '上下文已更新').trim();
+    }
+    if (message.type === 'error') {
+        return translateTechnicalText(String(content.message || content.error || '执行遇到问题').trim());
+    }
+    return translateTechnicalText(String(content.title || content.event_type || content.status || '运行状态已更新').trim());
+}
+
+function appendStreamRuntimeMessage(aiDiv, rawMessage) {
+    const message = normalizeRuntimeMessage(rawMessage);
+    if (!aiDiv || !message) return;
+    const summary = formatRuntimeMessageSummary(message);
+    if (!summary || looksLikeProtocolFragment(summary)) return;
+
+    let traceEl = aiDiv.querySelector('.copilot-runtime-trace');
+    if (!traceEl) {
+        traceEl = document.createElement('div');
+        traceEl.className = 'copilot-runtime-trace';
+        const contentEl = aiDiv.querySelector('.msg-content');
+        aiDiv.insertBefore(traceEl, contentEl || null);
+    }
+
+    const dedupeKey = message.message_id || `${message.type}:${summary}`;
+    if (traceEl.dataset.lastRuntimeMessage === dedupeKey) return;
+    traceEl.dataset.lastRuntimeMessage = dedupeKey;
+
+    const lineEl = document.createElement('div');
+    lineEl.className = 'copilot-progress-trace-line';
+    lineEl.dataset.runtimeMessageType = message.type;
+    lineEl.textContent = summary;
+    traceEl.appendChild(lineEl);
+
+    while (traceEl.children.length > 6) {
+        traceEl.removeChild(traceEl.firstElementChild);
+    }
+    scrollCopilotToBottom();
+}
+
+registerRuntimeMessageRenderer('workflow', renderWorkflowRuntimeMessage);
+registerRuntimeMessageRenderer('task', renderTaskRuntimeMessage);
+registerRuntimeMessageRenderer('artifact', renderArtifactRuntimeMessage);
+registerRuntimeMessageRenderer('handoff', renderHandoffRuntimeMessage);
+registerRuntimeMessageRenderer('context_delta', renderContextDeltaRuntimeMessage);
+registerRuntimeMessageRenderer('error', renderErrorRuntimeMessage);
+
 function renderCreationContractCard(contractPayload) {
     if (!contractPayload || typeof contractPayload !== 'object') return '';
     const scope = contractPayload.scope && typeof contractPayload.scope === 'object' ? contractPayload.scope : {};
@@ -3307,6 +3476,10 @@ async function sendCopilotMessage() {
 
                 try {
                     const evt = JSON.parse(dataStr);
+                    const typedRuntimeMessage = normalizeRuntimeMessage(evt.runtime_message || evt.runtimeMessage);
+                    if (typedRuntimeMessage && evt.type !== 'chunk') {
+                        appendStreamRuntimeMessage(aiDiv, typedRuntimeMessage);
+                    }
 
                     if (evt.type === 'chunk') {
                         const visibleContent = streamTextFilter.push(evt.content || '');
@@ -3482,10 +3655,10 @@ function appendMessage(text, role, shouldScroll = true) {
     if (role === 'ai') {
         const content = document.createElement('div');
         content.className = 'msg-content';
-        if (typeof text === 'string' && /copilot-(contract|taskpool|route-status)/.test(text)) {
+        if (typeof text === 'string' && /copilot-(contract|taskpool|route-status|runtime-message)/.test(text)) {
             const rawText = String(text);
             const routeStatusMatch = rawText.match(/<div class="copilot-route-status">[\s\S]*$/);
-            const standaloneCardPattern = /^<div class="copilot-(?:contract-card|taskpool-card|route-status)[\s\S]*$/;
+            const standaloneCardPattern = /^<div class="copilot-(?:contract-card|taskpool-card|route-status|runtime-message)[\s\S]*$/;
             if (standaloneCardPattern.test(rawText.trim())) {
                 content.innerHTML = rawText;
             } else {
@@ -3714,6 +3887,10 @@ window.NovelAgentApp.core = {
     formatPlanDeliverableLabel,
     renderCreationContractCard,
     renderTaskPoolSummaryCard,
+    normalizeRuntimeMessage,
+    registerRuntimeMessageRenderer,
+    renderRuntimeMessage,
+    appendStreamRuntimeMessage,
     confirmCreationContract,
     resumeCreationContractFlow,
     parseCreationContractFromButton,
@@ -3760,6 +3937,10 @@ window.createCopilotStreamTextFilter = createCopilotStreamTextFilter;
 window.formatPlanDeliverableLabel = formatPlanDeliverableLabel;
 window.renderCreationContractCard = renderCreationContractCard;
 window.renderTaskPoolSummaryCard = renderTaskPoolSummaryCard;
+window.normalizeRuntimeMessage = normalizeRuntimeMessage;
+window.registerRuntimeMessageRenderer = registerRuntimeMessageRenderer;
+window.renderRuntimeMessage = renderRuntimeMessage;
+window.appendStreamRuntimeMessage = appendStreamRuntimeMessage;
 window.startNovelCollabRuntimePolling = startNovelCollabRuntimePolling;
 window.stopNovelCollabRuntimePolling = stopNovelCollabRuntimePolling;
 window.confirmCreationContract = confirmCreationContract;

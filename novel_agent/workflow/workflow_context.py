@@ -49,12 +49,20 @@ class AgentHandoff:
 
     artifact_id: str
     artifact_type: str
+    task_id: str = ""
+    agent_name: str = ""
+    context_snapshot_id: str = ""
     decisions: List[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
     new_facts: List[str] = field(default_factory=list)
     changed_facts: List[str] = field(default_factory=list)
     risks: List[str] = field(default_factory=list)
     next_context_summary: str = ""
+    artifact_refs: List[str] = field(default_factory=list)
+    context_delta_id: str = ""
+    consumed_context_keys: List[str] = field(default_factory=list)
+    produced_context_keys: List[str] = field(default_factory=list)
+    output_validation: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

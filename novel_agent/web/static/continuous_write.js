@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 无限续写功能模块（独立版本）
  * 与多Agent写作完全分离，有独立的数据存储
  */
@@ -12,6 +12,7 @@ function createInfiniteWriteProjectState() {
         totalWords: 0,
         selectedModel: '',
         selectedApiConfigId: '',
+        lastActiveApiConfigId: '',
         summaryInterval: 10,
         pendingSummaries: [],
         enableTrendsFusion: false,
@@ -24,7 +25,9 @@ function createInfiniteWriteProjectState() {
         showMemoryPreview: false,
         mainPanelCollapsed: false,
         activeView: 'panel',
-        activeChapterNumber: null
+        activeChapterNumber: null,
+        chapterSearchQuery: '',
+        chapterSortDescending: false
     };
 }
 
@@ -56,6 +59,7 @@ function applyInfiniteWriteProjectState(data = {}) {
     infiniteWriteState.totalWords = data.totalWords || defaults.totalWords;
     infiniteWriteState.selectedModel = data.selectedModel || defaults.selectedModel;
     infiniteWriteState.selectedApiConfigId = data.selectedApiConfigId || defaults.selectedApiConfigId;
+    infiniteWriteState.lastActiveApiConfigId = data.lastActiveApiConfigId || defaults.lastActiveApiConfigId;
     infiniteWriteState.summaryInterval = data.summaryInterval || defaults.summaryInterval;
     infiniteWriteState.pendingSummaries = Array.isArray(data.pendingSummaries) ? data.pendingSummaries : defaults.pendingSummaries;
     infiniteWriteState.enableTrendsFusion = Boolean(data.enableTrendsFusion);
@@ -75,6 +79,8 @@ function applyInfiniteWriteProjectState(data = {}) {
     infiniteWriteState.activeChapterNumber = typeof data.activeChapterNumber === 'number'
         ? data.activeChapterNumber
         : null;
+    infiniteWriteState.chapterSearchQuery = String(data.chapterSearchQuery || '').trim();
+    infiniteWriteState.chapterSortDescending = Boolean(data.chapterSortDescending);
 }
 
 function loadInfiniteWriteDataForCurrentProject() {
@@ -227,6 +233,120 @@ const IW_TREND_PLATFORMS = [
     { id: 'juejin', name: 'Juejin' },
     { id: 'smzdm', name: 'SMZDM' }
 ];
+function formatChapterNavDisplay(chapterNumber, title) {
+    if (typeof window.formatChapterDisplay === 'function') {
+        return window.formatChapterDisplay(chapterNumber, title);
+    }
+    const cleanTitle = String(title || '').replace(/^第?\s*\d+\s*[章节回]?\s*[:：、.\-\s]*/i, '').trim();
+    return cleanTitle ? `第${chapterNumber}章 ${cleanTitle}` : `第${chapterNumber}章`;
+}
+
+function getChapterNavNumber(chapter, fallback) {
+    if (typeof window.getChapterDisplayNumber === 'function') {
+        return window.getChapterDisplayNumber(chapter, fallback);
+    }
+    const parsed = Number(chapter?.chapter_number || chapter?.chapter || fallback || 1);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : (fallback || 1);
+}
+
+function normalizeChapterSearchText(value) {
+    return String(value || '').trim().toLocaleLowerCase('zh-CN');
+}
+
+function escapeChapterNavHtml(value) {
+    if (typeof window.escapeHtml === 'function') {
+        return window.escapeHtml(value);
+    }
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getChapterNavEntries(chapters, options = {}) {
+    const query = normalizeChapterSearchText(options.query);
+    const descending = Boolean(options.descending);
+    const entries = (Array.isArray(chapters) ? chapters : [])
+        .map((chapter, index) => {
+            const chapterNumber = getChapterNavNumber(chapter, index + 1);
+            const title = String(chapter?.title || chapter?.name || '').trim();
+            const displayText = formatChapterNavDisplay(chapterNumber, title);
+            const searchableText = normalizeChapterSearchText([
+                title,
+                displayText,
+                `第${chapterNumber}章`,
+                String(chapterNumber)
+            ].filter(Boolean).join(' '));
+            return {
+                chapter,
+                index,
+                chapterNumber,
+                title,
+                displayText,
+                searchableText
+            };
+        })
+        .filter((entry) => !query || entry.searchableText.includes(query));
+
+    if (descending) {
+        entries.sort((a, b) => {
+            if (b.chapterNumber !== a.chapterNumber) {
+                return b.chapterNumber - a.chapterNumber;
+            }
+            return b.index - a.index;
+        });
+    }
+
+    return entries;
+}
+
+function updateChapterNavControls(scope, state, matchedCount, totalCount) {
+    const root = typeof scope === 'string' ? document.getElementById(scope) : scope;
+    if (!root) return;
+
+    const tools = root.querySelector('.chapter-nav-tools');
+    const meta = root.querySelector('.chapter-nav-result-meta');
+    const searchInput = root.querySelector('.chapter-nav-search-input');
+    const orderToggle = root.querySelector('.chapter-nav-order-toggle');
+    const query = String(state?.chapterSearchQuery || '').trim();
+    const descending = Boolean(state?.chapterSortDescending);
+
+    if (tools) {
+        tools.style.display = totalCount > 0 ? '' : 'none';
+    }
+    if (searchInput && searchInput.value !== query) {
+        searchInput.value = query;
+    }
+    if (orderToggle) {
+        orderToggle.classList.toggle('is-active', descending);
+        orderToggle.setAttribute('aria-pressed', descending ? 'true' : 'false');
+        orderToggle.title = descending ? '切换为正序查看章节' : '切换为倒序查看章节';
+        const label = orderToggle.querySelector('span');
+        if (label) {
+            label.textContent = descending ? '倒序' : '正序';
+        }
+    }
+    if (meta) {
+        if (totalCount === 0) {
+            meta.textContent = '';
+        } else if (query) {
+            meta.textContent = `匹配 ${matchedCount}/${totalCount} 章`;
+        } else {
+            meta.textContent = `共 ${totalCount} 章`;
+        }
+    }
+}
+
+function renderChapterNavNoMatch(query) {
+    return `
+        <div class="nav-empty-hint chapter-nav-empty">
+            <p>没有匹配章节</p>
+            <p class="hint-sub">试试章节名或章节号：${escapeChapterNavHtml(String(query || '').trim())}</p>
+        </div>
+    `;
+}
 
 function renderInfiniteWriteTrendPlatformOptions() {
     return IW_TREND_PLATFORMS.map((platform) => `
@@ -242,9 +362,9 @@ function renderInfiniteWriteNavPanel() {
 
     const navList = document.getElementById('nav-list-container');
     if (!navList) return;
-    
+
     navList.innerHTML = '';
-    
+
     // 创作入口
     const startEntry = document.createElement('div');
     startEntry.className = `list-item ${infiniteWriteState.activeView === 'panel' ? 'active' : ''}`;
@@ -268,12 +388,12 @@ function renderInfiniteWriteNavPanel() {
         }
     });
     navList.appendChild(startEntry);
-    
+
     // 分隔线
     const sep = document.createElement('div');
     sep.style.cssText = 'height: 1px; background: var(--border-color); margin: 12px 8px;';
     navList.appendChild(sep);
-    
+
     // 章节列表标题
     const chapterTitle = document.createElement('div');
     chapterTitle.style.cssText = 'font-size: 11px; color: var(--text-secondary); padding: 8px 12px; opacity: 0.7; display: flex; align-items: center; justify-content: space-between;';
@@ -282,13 +402,46 @@ function renderInfiniteWriteNavPanel() {
         <span id="iw-nav-total-words" style="font-size: 10px;">${infiniteWriteState.totalWords.toLocaleString()}字</span>
     `;
     navList.appendChild(chapterTitle);
-    
+
+    const chapterTools = document.createElement('div');
+    chapterTools.className = 'chapter-nav-tools';
+    chapterTools.id = 'iw-nav-chapter-tools';
+    chapterTools.innerHTML = `
+        <label class="chapter-nav-search" for="iw-nav-chapter-search">
+            <i class="ri-search-line" aria-hidden="true"></i>
+            <input id="iw-nav-chapter-search" class="chapter-nav-search-input" type="search"
+                value="${escapeChapterNavHtml(infiniteWriteState.chapterSearchQuery)}"
+                placeholder="搜索章节名或章节号" autocomplete="off">
+        </label>
+        <button id="iw-nav-order-toggle" type="button" class="chapter-nav-order-toggle"
+            aria-pressed="${infiniteWriteState.chapterSortDescending ? 'true' : 'false'}"
+            title="${infiniteWriteState.chapterSortDescending ? '切换为正序查看章节' : '切换为倒序查看章节'}">
+            <i class="ri-sort-desc" aria-hidden="true"></i>
+            <span>${infiniteWriteState.chapterSortDescending ? '倒序' : '正序'}</span>
+        </button>
+        <div id="iw-nav-search-meta" class="chapter-nav-result-meta"></div>
+    `;
+    navList.appendChild(chapterTools);
+
     // 章节列表容器
     const chapterList = document.createElement('div');
     chapterList.id = 'iw-nav-chapter-list';
-    chapterList.style.cssText = 'max-height: calc(100vh - 300px); overflow-y: auto;';
+    chapterList.style.cssText = 'max-height: calc(100vh - 360px); overflow-y: auto;';
     navList.appendChild(chapterList);
-    
+
+    const searchInput = chapterTools.querySelector('#iw-nav-chapter-search');
+    const orderToggle = chapterTools.querySelector('#iw-nav-order-toggle');
+    searchInput?.addEventListener('input', () => {
+        infiniteWriteState.chapterSearchQuery = searchInput.value.trim();
+        saveInfiniteWriteData();
+        loadInfiniteWriteNavChapterList();
+    });
+    orderToggle?.addEventListener('click', () => {
+        infiniteWriteState.chapterSortDescending = !infiniteWriteState.chapterSortDescending;
+        saveInfiniteWriteData();
+        loadInfiniteWriteNavChapterList();
+    });
+
     // 加载章节列表
     loadInfiniteWriteNavChapterList();
 }
@@ -299,13 +452,19 @@ function loadInfiniteWriteNavChapterList() {
     if (!container) return;
 
     loadInfiniteWriteDataForCurrentProject();
-    
+
     // 更新总字数显示
     const totalWordsEl = document.getElementById('iw-nav-total-words');
     if (totalWordsEl) {
         totalWordsEl.textContent = infiniteWriteState.totalWords.toLocaleString() + '字';
     }
-    
+
+    const chapterEntries = getChapterNavEntries(infiniteWriteState.chapters, {
+        query: infiniteWriteState.chapterSearchQuery,
+        descending: infiniteWriteState.chapterSortDescending
+    });
+    updateChapterNavControls(document, infiniteWriteState, chapterEntries.length, infiniteWriteState.chapters.length);
+
     if (infiniteWriteState.chapters.length === 0) {
         container.innerHTML = `
             <div style="padding: 20px 12px; text-align: center; color: var(--text-secondary); font-size: 11px; opacity: 0.7;">
@@ -316,13 +475,20 @@ function loadInfiniteWriteNavChapterList() {
         `;
         return;
     }
-    
+
+    if (chapterEntries.length === 0) {
+        container.innerHTML = renderChapterNavNoMatch(infiniteWriteState.chapterSearchQuery);
+        return;
+    }
+
     // 渲染章节列表
-    container.innerHTML = infiniteWriteState.chapters.map((ch, index) => `
-        <div class="iw-nav-chapter list-item ${infiniteWriteState.activeView === 'chapter' && infiniteWriteState.activeChapterNumber === ch.chapter_number ? 'active' : ''}" data-chapter="${index}" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+    container.innerHTML = chapterEntries.map((entry) => {
+        const ch = entry.chapter;
+        return `
+        <div class="iw-nav-chapter list-item ${infiniteWriteState.activeView === 'chapter' && infiniteWriteState.activeChapterNumber === ch.chapter_number ? 'active' : ''}" data-chapter="${entry.index}" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
             <i class="ri-file-text-line" style="opacity: 0.5;"></i>
             <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px;">
-                ${formatChapterDisplay(ch.chapter_number, ch.title)}
+                ${escapeChapterNavHtml(entry.displayText)}
             </span>
             <span class="iw-nav-word-count" style="color: var(--text-secondary); font-size: 10px; flex-shrink: 0;">
                 ${(ch.word_count || 0).toLocaleString()}字
@@ -336,8 +502,9 @@ function loadInfiniteWriteNavChapterList() {
                 </button>
             </div>
         </div>
-    `).join('');
-    
+    `;
+    }).join('');
+
     // 绑定点击事件
     container.querySelectorAll('.iw-nav-chapter').forEach(item => {
         window.makeElementActivatable(item, () => {
@@ -407,6 +574,8 @@ const COLLAB_TRACE_NAMED_FILTERS_STORAGE_KEY = 'collab_trace_named_filters';
 
 const multiAgentWriteState = {
     activeView: 'chapters',
+    chapterSearchQuery: '',
+    chapterSortDescending: false,
     collabTraceFilters: {
         stage: 'all',
         type: 'all'
@@ -472,6 +641,14 @@ function normalizeCollabExecutionTraceEvent(event) {
     const normalized = { ...event };
     if (!normalized.timestamp && normalized.created_at) {
         normalized.timestamp = normalized.created_at;
+    }
+    if (!normalized.runtime_message && normalized.runtime_event && typeof normalized.runtime_event === 'object') {
+        const runtimePayload = normalized.runtime_event.payload && typeof normalized.runtime_event.payload === 'object'
+            ? normalized.runtime_event.payload
+            : {};
+        if (runtimePayload.runtime_message && typeof runtimePayload.runtime_message === 'object') {
+            normalized.runtime_message = runtimePayload.runtime_message;
+        }
     }
     delete normalized.created_at;
     return normalized;
@@ -1009,6 +1186,9 @@ function renderCollabExecutionTimeline(events, filters = {}) {
                     timestamp: at,
                     stage: stageMeta.label
                 };
+                const runtimeMessageHtml = event.runtime_message && typeof window.renderRuntimeMessage === 'function'
+                    ? window.renderRuntimeMessage(event.runtime_message)
+                    : '';
                 return `
                     <div id="${escapeHtml(traceItemId)}" class="collab-trace-item ${isLatestMatch ? 'is-latest-match' : ''}" data-trace-stage="${escapeHtml(stageMeta.key)}" data-trace-type="${escapeHtml(type)}" style="position: relative; padding: 14px 16px 14px 22px; background: ${isLatestMatch ? 'rgba(99, 102, 241, 0.10)' : 'rgba(255,255,255,0.03)'}; border: 1px solid ${isLatestMatch ? 'rgba(99, 102, 241, 0.35)' : 'var(--border-color)'}; border-radius: 12px; box-shadow: ${isLatestMatch ? '0 0 0 1px rgba(99, 102, 241, 0.12) inset' : 'none'};">
                         <span style="position: absolute; left: 10px; top: 20px; width: 8px; height: 8px; border-radius: 999px; background: var(--accent-color);"></span>
@@ -1028,6 +1208,7 @@ function renderCollabExecutionTimeline(events, filters = {}) {
                         ${at ? `<div style="font-size: 11px; color: var(--text-secondary); opacity: 0.8;">${escapeHtml(at)}</div>` : ''}
                         ${isExpanded ? `
                             <div class="collab-trace-item-details" style="margin-top: 10px; padding: 12px; border-radius: 10px; background: rgba(0,0,0,0.16); border: 1px dashed var(--border-color);">
+                                ${runtimeMessageHtml ? `<div style="margin-bottom: 10px;">${runtimeMessageHtml}</div>` : ''}
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">事件详情</div>
                                 <pre style="margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--text-secondary);">${escapeHtml(JSON.stringify(detailPayload, null, 2))}</pre>
                             </div>
@@ -1235,6 +1416,95 @@ function getCollabNextReadyTasks(tasks) {
     });
 }
 
+function formatCollabDetailList(items, emptyText = '未记录') {
+    const normalized = Array.isArray(items)
+        ? items.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+    return normalized.length ? normalized.join('、') : emptyText;
+}
+
+function buildCollabInfoChainHtml(metadata, inputs, assignedAgent, resultText) {
+    const requiredKeys = Array.isArray(metadata.required_context_keys) ? metadata.required_context_keys : [];
+    const missingKeys = Array.isArray(metadata.missing_context_keys) ? metadata.missing_context_keys : [];
+    const outputValidation = metadata.output_validation && typeof metadata.output_validation === 'object'
+        ? metadata.output_validation
+        : {};
+    const handoff = metadata.handoff && typeof metadata.handoff === 'object'
+        ? metadata.handoff
+        : {};
+    const contextDelta = metadata.context_delta && typeof metadata.context_delta === 'object'
+        ? metadata.context_delta
+        : {};
+    const consumedKeys = Array.isArray(handoff.consumed_context_keys) && handoff.consumed_context_keys.length
+        ? handoff.consumed_context_keys
+        : requiredKeys;
+    const producedKeys = Array.isArray(handoff.produced_context_keys) && handoff.produced_context_keys.length
+        ? handoff.produced_context_keys
+        : [
+            ...(Array.isArray(contextDelta.added_keys) ? contextDelta.added_keys : []),
+            ...(Array.isArray(contextDelta.updated_keys) ? contextDelta.updated_keys : [])
+        ];
+    const expectedOutputs = Array.isArray(outputValidation.expected_outputs) ? outputValidation.expected_outputs : [];
+    const missingOutputs = Array.isArray(outputValidation.missing_outputs) ? outputValidation.missing_outputs : [];
+    const warningOutputs = Array.isArray(outputValidation.warning_outputs) ? outputValidation.warning_outputs : [];
+    const validationKnown = Object.prototype.hasOwnProperty.call(outputValidation, 'passed');
+    const validationText = validationKnown
+        ? (outputValidation.passed
+            ? `已通过${warningOutputs.length ? `，建议补充：${formatCollabDetailList(warningOutputs)}` : ''}`
+            : `未通过，缺少：${formatCollabDetailList(missingOutputs)}`)
+        : '未记录';
+    const handoffSummary = String(handoff.next_context_summary || '').trim()
+        || (Array.isArray(handoff.decisions) && handoff.decisions.length ? String(handoff.decisions[0] || '').trim() : '')
+        || '未记录';
+    const deltaSummary = String(contextDelta.summary || '').trim() || '未记录';
+    const inputKeys = Object.keys(inputs || {});
+    const sourceSummary = metadata.source_of_truth_summary && typeof metadata.source_of_truth_summary === 'object'
+        ? metadata.source_of_truth_summary
+        : {};
+
+    return `
+        <div style="padding: 14px; border-radius: 12px; border: 1px solid rgba(99, 102, 241, 0.32); background: rgba(99, 102, 241, 0.08);">
+            <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 10px;">信息链路</div>
+            <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px;">
+                <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: #c7d2fe; margin-bottom: 6px;">输入上下文</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">${escapeHtml(formatCollabDetailList(consumedKeys.length ? consumedKeys : inputKeys))}</div>
+                </div>
+                <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: #c7d2fe; margin-bottom: 6px;">子 Agent</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">${escapeHtml(assignedAgent || handoff.agent_name || '未分配')}</div>
+                </div>
+                <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: #c7d2fe; margin-bottom: 6px;">输出产物</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7; word-break: break-word;">${escapeHtml(resultText)}</div>
+                </div>
+                <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: #c7d2fe; margin-bottom: 6px;">上下文变更</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">${escapeHtml(formatCollabDetailList(producedKeys))}</div>
+                </div>
+                <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: #c7d2fe; margin-bottom: 6px;">后续交接</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">${escapeHtml(handoffSummary)}</div>
+                </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px;">
+                <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                    必需上下文：${escapeHtml(formatCollabDetailList(requiredKeys))}
+                    ${missingKeys.length ? `<br>缺失：${escapeHtml(formatCollabDetailList(missingKeys))}` : ''}
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                    输出校验：${escapeHtml(validationText)}
+                    ${expectedOutputs.length ? `<br>期望：${escapeHtml(formatCollabDetailList(expectedOutputs))}` : ''}
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                    Delta：${escapeHtml(deltaSummary)}
+                    ${Object.keys(sourceSummary).length ? `<br>来源：${escapeHtml(JSON.stringify(sourceSummary))}` : ''}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function showCollabTaskDetail(task) {
     const modal = document.getElementById('modal-container');
     if (!modal || !task || typeof task !== 'object') return;
@@ -1268,6 +1538,7 @@ function showCollabTaskDetail(task) {
         summaryHints.push(`产物类型：${getCollabResultDisplayLabel('', taskType, metadata.result_kind)}`);
     }
     const summaryText = summaryHints.length ? summaryHints.join('；') : '这一步主要围绕当前任务素材继续往下推进。';
+    const infoChainHtml = buildCollabInfoChainHtml(metadata, inputs, assignedAgent, resultText);
 
     modal.classList.remove('hidden');
     modal.innerHTML = `
@@ -1306,6 +1577,7 @@ function showCollabTaskDetail(task) {
                         <div style="margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.8;">${escapeHtml(summaryText)}</div>
                         <pre style="margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--text-secondary);">${escapeHtml(JSON.stringify(inputs, null, 2) || '{}')}</pre>
                     </div>
+                    ${infoChainHtml}
                     <div style="padding: 14px; border-radius: 12px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03);">
                         <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px;">前面要先完成什么</div>
                         <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">${escapeHtml(dependencyText)}</div>
@@ -1881,46 +2153,94 @@ function renderMultiAgentWriteNavPanel() {
         `;
         chaptersContent.appendChild(emptyHint);
     } else {
-        chapters.forEach((ch, index) => {
-            const chapterItem = document.createElement('div');
-            chapterItem.className = 'nav-chapter-item';
-            const chapterNumber = typeof getChapterDisplayNumber === 'function'
-                ? getChapterDisplayNumber(ch, index + 1)
-                : (Number(ch?.chapter_number || index + 1) || (index + 1));
-            chapterItem.innerHTML = `
-                <i class="ri-file-text-line chapter-icon"></i>
-                <span class="chapter-title">${formatChapterDisplay(chapterNumber, ch.title)}</span>
-                <div class="chapter-actions">
-                    <button class="edit-btn" title="编辑"><i class="ri-edit-line"></i></button>
-                    <button class="delete-btn" title="删除"><i class="ri-delete-bin-line"></i></button>
-                </div>
-            `;
+        const chapterTools = document.createElement('div');
+        chapterTools.className = 'chapter-nav-tools';
+        chapterTools.id = 'collab-chapter-tools';
+        chapterTools.innerHTML = `
+            <label class="chapter-nav-search" for="collab-chapter-search">
+                <i class="ri-search-line" aria-hidden="true"></i>
+                <input id="collab-chapter-search" class="chapter-nav-search-input" type="search"
+                    value="${escapeChapterNavHtml(multiAgentWriteState.chapterSearchQuery)}"
+                    placeholder="搜索章节名或章节号" autocomplete="off">
+            </label>
+            <button id="collab-chapter-order-toggle" type="button" class="chapter-nav-order-toggle"
+                aria-pressed="${multiAgentWriteState.chapterSortDescending ? 'true' : 'false'}"
+                title="${multiAgentWriteState.chapterSortDescending ? '切换为正序查看章节' : '切换为倒序查看章节'}">
+                <i class="ri-sort-desc" aria-hidden="true"></i>
+                <span>${multiAgentWriteState.chapterSortDescending ? '倒序' : '正序'}</span>
+            </button>
+            <div id="collab-chapter-search-meta" class="chapter-nav-result-meta"></div>
+        `;
+        chaptersContent.appendChild(chapterTools);
 
-            chapterItem.querySelector('.edit-btn').addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (typeof editChapterTitle === 'function') {
-                    editChapterTitle(index);
-                }
+        const chapterList = document.createElement('div');
+        chapterList.className = 'chapter-nav-list';
+        chapterList.id = 'collab-chapter-list';
+        chaptersContent.appendChild(chapterList);
+
+        const renderCollabChapterRows = () => {
+            const chapterEntries = getChapterNavEntries(chapters, {
+                query: multiAgentWriteState.chapterSearchQuery,
+                descending: multiAgentWriteState.chapterSortDescending
             });
+            updateChapterNavControls(chaptersContent, multiAgentWriteState, chapterEntries.length, chapters.length);
 
-            chapterItem.querySelector('.delete-btn').addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (typeof deleteChapter === 'function') {
-                    deleteChapter(index);
-                }
+            if (chapterEntries.length === 0) {
+                chapterList.innerHTML = renderChapterNavNoMatch(multiAgentWriteState.chapterSearchQuery);
+                return;
+            }
+
+            chapterList.innerHTML = '';
+            chapterEntries.forEach((entry) => {
+                const index = entry.index;
+                const chapterItem = document.createElement('div');
+                chapterItem.className = 'nav-chapter-item';
+                chapterItem.innerHTML = `
+                    <i class="ri-file-text-line chapter-icon"></i>
+                    <span class="chapter-title"></span>
+                    <div class="chapter-actions">
+                        <button class="edit-btn" title="编辑"><i class="ri-edit-line"></i></button>
+                        <button class="delete-btn" title="删除"><i class="ri-delete-bin-line"></i></button>
+                    </div>
+                `;
+                chapterItem.querySelector('.chapter-title').textContent = entry.displayText;
+
+                chapterItem.querySelector('.edit-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (typeof editChapterTitle === 'function') {
+                        editChapterTitle(index);
+                    }
+                });
+
+                chapterItem.querySelector('.delete-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (typeof deleteChapter === 'function') {
+                        deleteChapter(index);
+                    }
+                });
+
+                chapterItem.addEventListener('click', () => {
+                    setMultiAgentWriteActiveView('chapters');
+                    document.querySelectorAll('.nav-chapter-item').forEach(el => el.classList.remove('active'));
+                    chapterItem.classList.add('active');
+                    if (typeof openChapterEditor === 'function') {
+                        openChapterEditor(index);
+                    }
+                });
+
+                chapterList.appendChild(chapterItem);
             });
+        };
 
-            chapterItem.addEventListener('click', () => {
-                setMultiAgentWriteActiveView('chapters');
-                document.querySelectorAll('.nav-chapter-item').forEach(el => el.classList.remove('active'));
-                chapterItem.classList.add('active');
-                if (typeof openChapterEditor === 'function') {
-                    openChapterEditor(index);
-                }
-            });
-
-            chaptersContent.appendChild(chapterItem);
+        chapterTools.querySelector('#collab-chapter-search')?.addEventListener('input', (event) => {
+            multiAgentWriteState.chapterSearchQuery = event.target.value.trim();
+            renderCollabChapterRows();
         });
+        chapterTools.querySelector('#collab-chapter-order-toggle')?.addEventListener('click', () => {
+            multiAgentWriteState.chapterSortDescending = !multiAgentWriteState.chapterSortDescending;
+            renderCollabChapterRows();
+        });
+        renderCollabChapterRows();
     }
 
     chaptersPanel.appendChild(chaptersContent);
@@ -2023,10 +2343,10 @@ function renderMultiAgentWriteNavPanel() {
 async function loadInfiniteWriteChapterList() {
     const container = document.getElementById('infinite-write-chapter-list');
     if (!container) return;
-    
+
     try {
         loadInfiniteWriteDataForCurrentProject();
-        
+
         if (infiniteWriteState.chapters.length === 0) {
             container.innerHTML = `
                 <div style="padding: 12px; text-align: center; color: var(--text-secondary); font-size: 11px; opacity: 0.7;">
@@ -2035,19 +2355,29 @@ async function loadInfiniteWriteChapterList() {
             `;
             return;
         }
-        
+
+        const chapterEntries = getChapterNavEntries(infiniteWriteState.chapters, {
+            query: infiniteWriteState.chapterSearchQuery,
+            descending: infiniteWriteState.chapterSortDescending
+        });
+
+        if (chapterEntries.length === 0) {
+            container.innerHTML = renderChapterNavNoMatch(infiniteWriteState.chapterSearchQuery);
+            return;
+        }
+
         // 渲染章节列表
-        container.innerHTML = infiniteWriteState.chapters.map((ch, index) => `
-            <div class="iw-chapter-item list-item" data-chapter="${index}" style="padding: 8px 12px; font-size: 12px; cursor: pointer;">
+        container.innerHTML = chapterEntries.map((entry) => `
+            <div class="iw-chapter-item list-item" data-chapter="${entry.index}" style="padding: 8px 12px; font-size: 12px; cursor: pointer;">
                 <i class="ri-file-text-line" style="opacity: 0.5; margin-right: 6px;"></i>
                 <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    ${formatChapterDisplay(ch.chapter_number, ch.title)}
+                    ${escapeChapterNavHtml(entry.displayText)}
                 </span>
                 <span style="color: var(--text-secondary); font-size: 10px; margin-left: 4px;">
-                    ${(ch.word_count || 0).toLocaleString()}字                </span>
+                    ${(entry.chapter.word_count || 0).toLocaleString()}字                </span>
             </div>
         `).join('');
-        
+
         // 绑定点击事件
         container.querySelectorAll('.iw-chapter-item').forEach(item => {
             item.addEventListener('click', () => {
@@ -2058,7 +2388,7 @@ async function loadInfiniteWriteChapterList() {
                 }
             });
         });
-        
+
     } catch (e) {
         console.error('[InfiniteWrite] 加载章节列表失败:', e);
     }
@@ -2076,10 +2406,10 @@ async function renderInfiniteWriteInterface() {
     if (typeof updateBreadcrumbs === 'function') {
         updateBreadcrumbs(['仪表盘', '无限续写']);
     }
-    
+
     const workspace = document.getElementById('main-view');
     if (!workspace) return;
-    
+
     // 先加载全局API配置
     await loadGlobalApiConfigForInfiniteWrite();
     await loadInfiniteWriteContinuationContext();
@@ -2090,17 +2420,17 @@ async function renderInfiniteWriteInterface() {
     if (resolvedConfigId !== infiniteWriteState.selectedApiConfigId) {
         infiniteWriteState.selectedApiConfigId = resolvedConfigId;
     }
-    
+
     // 获取保存的模型或使用全局配置的模型
     let savedModel = infiniteWriteState.selectedModel || '';
     if (!savedModel && infiniteWriteState.globalApiConfig) {
         savedModel = infiniteWriteState.globalApiConfig.model || '';
     }
-    
+
     // 检查全局配置状态
     const globalConfigured = infiniteWriteState.globalApiConfig && infiniteWriteState.globalApiConfig.is_configured;
     const globalModel = infiniteWriteState.globalApiConfig?.model || '';
-    
+
     workspace.innerHTML = `
         <div style="position: relative; min-height: 100%; padding: 30px 20px 90px;">
             <button id="iw-toggle-panel-fab" class="icon-btn" style="position: absolute; right: 24px; bottom: 24px; width: 52px; height: 52px; border-radius: 999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 16px 32px rgba(0,0,0,0.35); background: rgba(139, 92, 246, 0.18) !important; border: 1px solid rgba(139, 92, 246, 0.35) !important; color: #c4b5fd;" title="${infiniteWriteState.mainPanelCollapsed ? '展开创作面板' : '折叠创作面板'}">
@@ -2115,10 +2445,10 @@ async function renderInfiniteWriteInterface() {
                 </h1>
                 <p style="color: var(--text-secondary); font-size: 14px;">独立创作模式，拥有专属章节列表和统计数据</p>
             </div>
-            
+
             <!-- 主面板内容区域 -->
             <div id="iw-main-panel-content" style="${infiniteWriteState.mainPanelCollapsed ? 'display: none;' : ''}">
-            
+
             <!-- 全局API配置状态提示 -->
             ${!globalConfigured ? `
             <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 12px; padding: 16px; margin-bottom: 24px;">
@@ -2132,14 +2462,14 @@ async function renderInfiniteWriteInterface() {
                 </div>
             </div>
             ` : ''}
-            
+
             <!-- 模型选择和配置 -->
             <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 16px; font-size: 15px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                     <i class="ri-settings-3-line"></i>
                     创作配置
                 </h3>
-                
+
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
                     <!-- API配置选择 -->
                     <div>
@@ -2160,7 +2490,7 @@ async function renderInfiniteWriteInterface() {
                             }).join('')}
                         </select>
                     </div>
-                    
+
                     <!-- 模型选择 -->
                     <div>
                         <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">
@@ -2181,7 +2511,7 @@ async function renderInfiniteWriteInterface() {
                         </div>
                     </div>
                 </div>
-                
+
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                     <!-- 每章字数 -->
                     <div>
@@ -2191,7 +2521,7 @@ async function renderInfiniteWriteInterface() {
                         <input type="number" id="iw-words-per-chapter" value="${infiniteWriteState.config.wordsPerChapter}" min="1000" max="5000"
                             style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px;">
                     </div>
-                    
+
                     <!-- 总结间隔 -->
                     <div>
                         <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">
@@ -2205,7 +2535,7 @@ async function renderInfiniteWriteInterface() {
                     </div>
                 </div>
             </div>
-            
+
             <!-- 状态卡片 -->
             <div id="iw-status-card" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
                 <div style="display: flex; align-items: center; gap: 12px;">
@@ -2219,14 +2549,14 @@ async function renderInfiniteWriteInterface() {
             </div>
 
             ${renderInfiniteWriteCharacterAnchors()}
-            
+
             <!-- 开始新故事区域（当没有章节时显示） -->
             <div id="iw-start-section" style="${infiniteWriteState.chapters.length > 0 ? 'display: none;' : ''} background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 16px; font-size: 16px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                     <i class="ri-lightbulb-line" style="color: #f59e0b;"></i>
                     开始新故事
                 </h3>
-                
+
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 12px; margin-bottom: 8px; color: var(--text-secondary);">
                         故事开头或灵感 <span style="color: #ef4444;">*</span>
@@ -2236,20 +2566,20 @@ async function renderInfiniteWriteInterface() {
 例如：在一个被永恒迷雾笼罩的大陆上，年轻的猎魔人林风第一次踏出了村庄的边界..."
                         style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 14px; color: var(--text-primary); border-radius: 8px; font-size: 14px; line-height: 1.6; resize: vertical;"></textarea>
                 </div>
-                
+
                 <button id="iw-start-btn" style="width: 100%; padding: 14px; background: linear-gradient(135deg, #8b5cf6, #6366f1); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px;">
                     <i class="ri-play-circle-line"></i> 开始创作第一章                </button>
                 <button id="iw-import-btn" style="width: 100%; margin-top: 10px; padding: 12px; background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 8px; cursor: pointer; font-weight: 500; font-size: 14px;">
                     <i class="ri-upload-cloud-2-line"></i> 导入已有小说（txt/md/docx）                </button>
             </div>
-            
+
             <!-- 续写控制区域（当有章节时显示） -->
             <div id="iw-control-section" style="${infiniteWriteState.chapters.length === 0 ? 'display: none;' : ''} background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 16px; font-size: 16px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                     <i class="ri-tools-line"></i>
                     续写控制
                 </h3>
-                
+
                 <!-- 添加灵感 -->
                 <div style="margin-bottom: 20px; padding: 16px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px;">
                     <label style="display: block; font-size: 13px; margin-bottom: 8px; color: #f59e0b; font-weight: 500;">
@@ -2258,7 +2588,7 @@ async function renderInfiniteWriteInterface() {
                     <textarea id="iw-inspiration" rows="2" placeholder="加入新灵感，会在下一章中自然融入..."
                         style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px; resize: vertical;"></textarea>
                 </div>
-                
+
                 <!-- 剧情纠正 -->
                 <div style="margin-bottom: 20px; padding: 16px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px;">
                     <label style="display: block; font-size: 13px; margin-bottom: 8px; color: #ef4444; font-weight: 500;">
@@ -2267,7 +2597,7 @@ async function renderInfiniteWriteInterface() {
                     <textarea id="iw-correction" rows="2" placeholder="如果剧情走向不对，在这里纠正..."
                         style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 10px; color: var(--text-primary); border-radius: 6px; font-size: 13px; resize: vertical;"></textarea>
                 </div>
-                
+
                 <!-- 操作按钮 -->
                 <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                     <button id="iw-continue-btn" style="flex: 1; min-width: 200px; padding: 14px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px;">
@@ -2298,7 +2628,7 @@ async function renderInfiniteWriteInterface() {
                     ${renderInfiniteWriteCharacterAnchors() || '<div style="padding: 14px; color: var(--text-secondary); font-size: 13px; border: 1px dashed var(--border-color); border-radius: 8px;">当前还没有可展示的系统记忆。</div>'}
                 </div>
             </div>
-            
+
             <!-- 待确认总结区域 -->
             <div id="iw-pending-summaries" style="display: none; background: rgba(100, 180, 255, 0.1); border: 1px solid rgba(100, 180, 255, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 12px; font-size: 15px; color: #7dd3fc; display: flex; align-items: center; gap: 8px;">
@@ -2307,9 +2637,9 @@ async function renderInfiniteWriteInterface() {
                 </h3>
                 <div id="iw-summary-content"></div>
             </div>
-            
+
             <!-- 章节列表已移至左侧导航面板，此处不再重复显示 -->
-            
+
             <!-- 热点灵感面板 -->
             <div id="iw-trends-container" style="${infiniteWriteState.showTrends ? '' : 'display: none;'} margin-top: 24px;">
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
@@ -2327,7 +2657,7 @@ async function renderInfiniteWriteInterface() {
                     <!-- 热点面板将在这里渲染 -->
                 </div>
             </div>
-            
+
             <!-- 使用提示 -->
             <div style="margin-top: 24px; background: rgba(100,180,255,0.1); border: 1px solid rgba(100,180,255,0.3); border-radius: 12px; padding: 20px;">
                 <h3 style="margin-bottom: 12px; font-size: 14px; color: #7dd3fc;">💡 无限续写特点</h3>
@@ -2342,7 +2672,7 @@ async function renderInfiniteWriteInterface() {
                     <li><strong>协作迁移</strong>：可将当前章节迁移到协作项目继续编辑</li>
                 </ul>
             </div>
-            
+
             </div><!-- 主面板内容区域结束 -->
             <div id="iw-main-panel-collapsed-hint" style="${infiniteWriteState.mainPanelCollapsed ? '' : 'display: none;'} max-width: 900px; margin: 0 auto; padding: 40px 32px; border: 1px dashed rgba(139, 92, 246, 0.35); border-radius: 16px; background: rgba(255,255,255,0.03); text-align: center;">
                 <div style="font-size: 18px; color: var(--text-primary); margin-bottom: 8px;">创作面板已折叠</div>
@@ -2351,7 +2681,7 @@ async function renderInfiniteWriteInterface() {
             </div>
         </div>
     `;
-    
+
     // 绑定主面板折叠按钮事件
     const toggleMainPanelBtn = document.getElementById('iw-toggle-panel-fab');
     if (toggleMainPanelBtn) {
@@ -2369,13 +2699,13 @@ async function renderInfiniteWriteInterface() {
             saveInfiniteWriteData();
         });
     }
-    
+
     // 绑定事件
     bindInfiniteWriteEvents();
-    
+
     // 更新左侧导航的章节列表
     loadInfiniteWriteNavChapterList();
-    
+
     // 初始化热点面板
     initInfiniteWriteTrends();
 }
@@ -2386,17 +2716,17 @@ async function initInfiniteWriteTrends() {
     if (typeof loadTrendsConfig === 'function') {
         await loadTrendsConfig();
     }
-    
+
     // 检查热点服务状态
     if (typeof checkTrendsService === 'function') {
         await checkTrendsService();
     }
-    
+
     // 检查是否在无限续写中显示热点
     if (typeof trendsState !== 'undefined' && trendsState.config) {
         infiniteWriteState.showTrends = trendsState.config.showInInfiniteWrite !== false;
     }
-    
+
     // 渲染热点面板
     if (infiniteWriteState.showTrends && typeof renderTrendsPanel === 'function') {
         renderTrendsPanel('iw-trends-panel', {
@@ -2409,7 +2739,7 @@ async function initInfiniteWriteTrends() {
             }
         });
     }
-    
+
     // 绑定热点开关事件
     const trendsToggle = document.getElementById('iw-trends-toggle');
     if (trendsToggle) {
@@ -2419,12 +2749,12 @@ async function initInfiniteWriteTrends() {
             if (container) {
                 container.style.display = e.target.checked ? '' : 'none';
             }
-            
+
             // 保存设置
             if (typeof saveTrendsVisibility === 'function') {
                 saveTrendsVisibility(e.target.checked);
             }
-            
+
             // 如果开启，渲染面板
             if (e.target.checked && typeof renderTrendsPanel === 'function') {
                 renderTrendsPanel('iw-trends-panel', {
@@ -2480,28 +2810,25 @@ async function loadGlobalApiConfigForInfiniteWrite() {
         ]);
         infiniteWriteState.apiConfigs = configsData.configs || [];
         infiniteWriteState.activeConfigId = configsData.active_config_id || '';
-        
+
         // 获取当前激活的配置
         const activeConfig = infiniteWriteState.apiConfigs.find(c => c.id === infiniteWriteState.activeConfigId);
         const resolvedGlobalModel = configsData.active_model || globalData?.model || (activeConfig?.models?.[0]) || '';
-        
+
         // 构建兼容的全局配置对象
         infiniteWriteState.globalApiConfig = {
             is_configured: Boolean(globalData?.is_configured || (infiniteWriteState.apiConfigs.length > 0 && activeConfig)),
             model: resolvedGlobalModel,
             api_base: activeConfig?.api_base || globalData?.api_base || ''
         };
-        
-        // 如果没有选中的API配置，使用激活的配置
-        if (!infiniteWriteState.selectedApiConfigId && infiniteWriteState.activeConfigId) {
-            infiniteWriteState.selectedApiConfigId = infiniteWriteState.activeConfigId;
-        }
+
+        syncInfiniteWriteApiConfigSelectionWithActive();
 
         const resolvedConfigId = resolveInfiniteWriteApiConfigId(infiniteWriteState.selectedApiConfigId);
         if (resolvedConfigId !== infiniteWriteState.selectedApiConfigId) {
             infiniteWriteState.selectedApiConfigId = resolvedConfigId;
         }
-        
+
         console.log('[InfiniteWrite] API配置已加载', infiniteWriteState.apiConfigs.length, '个配置，当前激活', infiniteWriteState.activeConfigId);
     } catch (e) {
         console.error('[InfiniteWrite] 加载API配置失败:', e);
@@ -2511,6 +2838,35 @@ async function loadGlobalApiConfigForInfiniteWrite() {
 }
 
 // ===== 渲染模型选项 =====
+function syncInfiniteWriteApiConfigSelectionWithActive() {
+    const activeId = String(infiniteWriteState.activeConfigId || '').trim();
+    const selectedId = String(infiniteWriteState.selectedApiConfigId || '').trim();
+    const lastActiveId = String(infiniteWriteState.lastActiveApiConfigId || '').trim();
+    let changed = false;
+
+    if (activeId) {
+        const shouldFollowActive =
+            !selectedId
+            || (!lastActiveId && selectedId !== activeId)
+            || (lastActiveId && selectedId === lastActiveId && lastActiveId !== activeId);
+
+        if (shouldFollowActive) {
+            infiniteWriteState.selectedApiConfigId = activeId;
+            infiniteWriteState.selectedModel = '';
+            changed = true;
+        }
+    }
+
+    if (infiniteWriteState.lastActiveApiConfigId !== activeId) {
+        infiniteWriteState.lastActiveApiConfigId = activeId;
+        changed = true;
+    }
+
+    if (changed) {
+        saveInfiniteWriteData();
+    }
+}
+
 function resolveInfiniteWriteApiConfigId(preferredConfigId = infiniteWriteState.selectedApiConfigId) {
     const targetId = String(preferredConfigId || '').trim();
     if (targetId && infiniteWriteState.apiConfigs.some(config => config.id === targetId)) {
@@ -2546,11 +2902,11 @@ function getSelectedApiConfigIdForInfiniteWrite() {
     if (select && select.value) {
         return select.value;
     }
-    
+
     if (infiniteWriteState.selectedApiConfigId) {
         return resolveInfiniteWriteApiConfigId(infiniteWriteState.selectedApiConfigId);
     }
-    
+
     return resolveInfiniteWriteApiConfigId(infiniteWriteState.activeConfigId);
 }
 
@@ -2566,11 +2922,12 @@ function bindInfiniteWriteEvents() {
             apiConfigSelect.value = resolvedConfigId;
             console.log('[InfiniteWrite] 初始化API配置ID:', apiConfigSelect.value);
         }
-        
+
         apiConfigSelect.addEventListener('change', (e) => {
             const configId = e.target.value;
             infiniteWriteState.selectedApiConfigId = configId;
-            
+            infiniteWriteState.lastActiveApiConfigId = infiniteWriteState.activeConfigId || '';
+
             // 更新模型列表
             const modelSelect = document.getElementById('iw-model-input');
             if (modelSelect) {
@@ -2578,16 +2935,16 @@ function bindInfiniteWriteEvents() {
                 // 自动回退到当前下拉框可用的首个模型，包括全局模型回退项
                 infiniteWriteState.selectedModel = modelSelect.value || '';
             }
-            
+
             saveInfiniteWriteData();
-            
+
             const config = infiniteWriteState.apiConfigs.find(c => c.id === configId);
             if (config) {
                 showToast(`已选择: ${config.name}`);
             }
         });
     }
-    
+
     // 自定义模型按钮
     const customModelBtn = document.getElementById('iw-custom-model-btn');
     if (customModelBtn) {
@@ -2600,7 +2957,7 @@ function bindInfiniteWriteEvents() {
             }
         });
     }
-    
+
     // 模型下拉选择
     const modelSelect = document.getElementById('iw-model-input');
     if (modelSelect && modelSelect.tagName === 'SELECT') {
@@ -2610,14 +2967,14 @@ function bindInfiniteWriteEvents() {
             console.log('[InfiniteWrite] 初始化模型名:', modelSelect.value);
             saveInfiniteWriteData();
         }
-        
+
         modelSelect.addEventListener('change', (e) => {
             infiniteWriteState.selectedModel = e.target.value;
             console.log('[InfiniteWrite] 用户切换模型:', e.target.value);
             saveInfiniteWriteData();
         });
     }
-    
+
     // 自定义模型输入框
     const customModelInput = document.getElementById('iw-custom-model-input');
     if (customModelInput) {
@@ -2639,7 +2996,7 @@ function bindInfiniteWriteEvents() {
             }
         });
     }
-    
+
     // 字数配置
     const wordsInput = document.getElementById('iw-words-per-chapter');
     if (wordsInput) {
@@ -2648,7 +3005,7 @@ function bindInfiniteWriteEvents() {
             saveInfiniteWriteData();
         });
     }
-    
+
     // 总结间隔
     const intervalSelect = document.getElementById('iw-summary-interval');
     if (intervalSelect) {
@@ -2657,7 +3014,7 @@ function bindInfiniteWriteEvents() {
             saveInfiniteWriteData();
         });
     }
-    
+
     // 开始创作
     const startBtn = document.getElementById('iw-start-btn');
     if (startBtn) {
@@ -2693,19 +3050,19 @@ function bindInfiniteWriteEvents() {
     if (exportDocxBtn) {
         exportDocxBtn.addEventListener('click', () => exportInfiniteWriteFile('docx'));
     }
-    
+
     // 续写
     const continueBtn = document.getElementById('iw-continue-btn');
     if (continueBtn) {
         continueBtn.addEventListener('click', continueInfiniteWrite);
     }
-    
+
     // 重置
     const resetBtn = document.getElementById('iw-reset-btn');
     if (resetBtn) {
         resetBtn.addEventListener('click', resetInfiniteWrite);
     }
-    
+
     // 完结故事
     const finishBtn = document.getElementById('iw-finish-btn');
     if (finishBtn) {
@@ -2720,23 +3077,23 @@ function getSelectedModelForInfiniteWrite() {
     if (customInput && customInput.value.trim()) {
         return customInput.value.trim();
     }
-    
+
     // 使用下拉选择的模型
     const select = document.getElementById('iw-model-input');
     if (select && select.value) {
         return select.value;
     }
-    
+
     // 使用保存的模型
     if (infiniteWriteState.selectedModel) {
         return infiniteWriteState.selectedModel;
     }
-    
+
     // 使用全局配置的模型
     if (infiniteWriteState.globalApiConfig && infiniteWriteState.globalApiConfig.model) {
         return infiniteWriteState.globalApiConfig.model;
     }
-    
+
     return '';
 }
 
@@ -2745,30 +3102,30 @@ async function startInfiniteWrite() {
     const storyBeginning = document.getElementById('iw-story-beginning')?.value.trim();
     const model = getSelectedModelForInfiniteWrite();
     const wordsPerChapter = parseInt(document.getElementById('iw-words-per-chapter')?.value) || 2500;
-    
+
     if (!storyBeginning) {
         showToast('请输入故事开头或灵感', 'error');
         return;
     }
-    
+
     if (!model) {
         showToast('请先在设置中配置全局API，或选择一个模型', 'error');
         return;
     }
-    
+
     const btn = document.getElementById('iw-start-btn');
-    
+
     // 设置运行状态
     infiniteWriteState.isRunning = true;
-    
+
     if (btn) {
         btn.disabled = true;
         btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 正在创作第一章...';
     }
-    
+
     // 更新状态指示器
     updateRunningStatus(true);
-    
+
     try {
         // 重置状态
         infiniteWriteState.sessionId = 'infinite_' + Date.now();
@@ -2777,10 +3134,10 @@ async function startInfiniteWrite() {
         infiniteWriteState.totalWords = 0;
         infiniteWriteState.selectedModel = model;
         infiniteWriteState.config.wordsPerChapter = wordsPerChapter;
-        
+
         // 获取选中的API配置ID
         const apiConfigId = getSelectedApiConfigIdForInfiniteWrite();
-        
+
         // 调用后端API
         const result = await apiCall('/api/continuous-write/start', 'POST', {
             story_beginning: storyBeginning,
@@ -2792,10 +3149,10 @@ async function startInfiniteWrite() {
             trends_platforms: infiniteWriteState.selectedTrendsPlatforms,
             trends_query: storyBeginning.substring(0, 100) // 使用故事开头作为搜索关键词
         });
-        
+
         if (result.success && result.chapter) {
             showToast('第一章创作完成！请预览后确认是否保留 ✨');
-            
+
             // 先显示预览，让用户确认后才保存到章节列表
             showInfiniteWriteChapterPreviewWithConfirm(result.chapter, true);
         } else {
@@ -2810,7 +3167,7 @@ async function startInfiniteWrite() {
         // 恢复运行状态
         infiniteWriteState.isRunning = false;
         updateRunningStatus(false);
-        
+
         // 恢复按钮状态
         const startBtn = document.getElementById('iw-start-btn');
         if (startBtn) {
@@ -2834,7 +3191,7 @@ function showInfiniteWriteImportDialog() {
                     导入小说到无限续写
                 </h3>
                 <p style="margin: 0 0 12px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7;">
-                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>，导入后会立即自动整理无限续写记忆。
+                    支持 <code>.txt</code> / <code>.md</code> / <code>.docx</code>，导入后会立即自动整理无限续写记忆，并反向补全角色卡、世界观和大纲。
                 </p>
                 ${hasExisting ? `
                 <div style="margin-bottom: 12px; padding: 10px; border-radius: 8px; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; font-size: 12px;">
@@ -2889,12 +3246,17 @@ function showInfiniteWriteImportDialog() {
             infiniteWriteState.currentChapter = response.current_chapter || infiniteWriteState.chapters.length;
             infiniteWriteState.totalWords = response.total_words || 0;
             infiniteWriteState.pendingSummaries = [];
+    infiniteWriteState.chapterSearchQuery = '';
+    infiniteWriteState.chapterSortDescending = false;
             infiniteWriteState.isRunning = false;
 
             saveInfiniteWriteData();
             closeModal();
             renderInfiniteWriteInterface();
-            showToast(`已导入 ${response.imported_chapters || 0} 章，记忆整理完成`, 'success');
+            const supplement = response.material_supplement || {};
+            const added = Number(supplement.total_added || 0);
+            const suffix = added > 0 ? `，补全 ${added} 条资料` : '，资料已检查';
+            showToast(`已导入 ${response.imported_chapters || 0} 章，记忆整理完成${suffix}`, 'success');
         } catch (e) {
             showToast(`导入失败: ${e.message}`, 'error');
         } finally {
@@ -2909,26 +3271,26 @@ async function continueInfiniteWrite() {
     const inspiration = document.getElementById('iw-inspiration')?.value.trim() || '';
     const correction = document.getElementById('iw-correction')?.value.trim() || '';
     const model = getSelectedModelForInfiniteWrite();
-    
+
     if (!model) {
         showToast('请先在设置中配置全局API，或选择一个模型', 'error');
         return;
     }
-    
+
     const btn = document.getElementById('iw-continue-btn');
     const originalBtnHtml = btn ? btn.innerHTML : '';
-    
+
     // 设置运行状态
     infiniteWriteState.isRunning = true;
-    
+
     if (btn) {
         btn.disabled = true;
         btn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 续写中...';
     }
-    
+
     // 更新状态指示器
     updateRunningStatus(true);
-    
+
     try {
         // 如果有纠正内容，先添加
         if (correction) {
@@ -2942,10 +3304,10 @@ async function continueInfiniteWrite() {
                 console.log('[InfiniteWrite] 添加纠正时会话可能不存在，继续执行');
             }
         }
-        
+
         // 获取选中的API配置ID
         const apiConfigId = getSelectedApiConfigIdForInfiniteWrite();
-        
+
         // 尝试续写
         let result;
         try {
@@ -2962,26 +3324,26 @@ async function continueInfiniteWrite() {
             if (continueError.message && (continueError.message.includes('会话不存在') || continueError.message.includes('404'))) {
                 console.log('[InfiniteWrite] 会话不存在，尝试重新初始化...');
                 showToast('会话已过期，正在恢复会话...', 'info');
-                
+
                 // 从现有章节构建上下文
                 const lastChapter = infiniteWriteState.chapters[infiniteWriteState.chapters.length - 1];
                 const currentChapterCount = infiniteWriteState.chapters.length;
-                
+
                 // 构建更完整的上下文，包含最近章节的关键信息
                 let storyContext = `【会话恢复 - 续写第${currentChapterCount + 1}章】\n`;
                 storyContext += `已完成${currentChapterCount}章，共${infiniteWriteState.totalWords.toLocaleString()}字。\n\n`;
-                
+
                 if (lastChapter) {
                     storyContext += `【最近一章摘要】\n`;
                     storyContext += `${formatChapterDisplay(lastChapter.chapter_number, lastChapter.title)}\n`;
                     storyContext += lastChapter.content ? lastChapter.content.substring(0, 1500) : '';
                     storyContext += '\n\n';
                 }
-                
+
                 if (inspiration) {
                     storyContext += `【新灵感】${inspiration}\n`;
                 }
-                
+
                 // 重新开始会话，传递当前章节号和完整章节数据以便正确续写
                 // 关键修复：传递 recovered_chapters，确保后端有完整上下文
                 const startResult = await apiCall('/api/continuous-write/start', 'POST', {
@@ -2993,7 +3355,7 @@ async function continueInfiniteWrite() {
                     current_chapter: currentChapterCount,  // 当前章节数
                     recovered_chapters: infiniteWriteState.chapters  // 关键：传递完整章节数据，确保上下文连贯
                 });
-                
+
                 if (startResult.success && startResult.chapter) {
                     result = startResult;
                     showToast(`会话已恢复，正在创作第${startResult.chapter.chapter_number}章`, 'success');
@@ -3004,16 +3366,16 @@ async function continueInfiniteWrite() {
                 throw continueError;
             }
         }
-        
+
         if (result.success && result.chapter) {
             showToast(`第${result.chapter.chapter_number}章创作完成！请预览后确认是否保留 ✨`);
-            
+
             // 清空输入框
             const inspirationEl = document.getElementById('iw-inspiration');
             const correctionEl = document.getElementById('iw-correction');
             if (inspirationEl) inspirationEl.value = '';
             if (correctionEl) correctionEl.value = '';
-            
+
             // 先显示预览，让用户确认后才保存到章节列表
             showInfiniteWriteChapterPreviewWithConfirm(result.chapter, false);
         } else {
@@ -3028,7 +3390,7 @@ async function continueInfiniteWrite() {
         // 恢复运行状态
         infiniteWriteState.isRunning = false;
         updateRunningStatus(false);
-        
+
         // 恢复按钮状态
         const continueBtn = document.getElementById('iw-continue-btn');
         if (continueBtn) {
@@ -3042,7 +3404,7 @@ async function continueInfiniteWrite() {
 function updateRunningStatus(isRunning) {
     const indicator = document.getElementById('iw-status-indicator');
     const statusText = document.getElementById('iw-status-text');
-    
+
     if (isRunning) {
         if (indicator) {
             indicator.style.background = '#f59e0b';
@@ -3069,21 +3431,21 @@ function updateRunningStatus(isRunning) {
 async function checkAndGenerateSummary() {
     const chapterCount = infiniteWriteState.chapters.length;
     const interval = infiniteWriteState.summaryInterval;
-    
+
     // 检查是否到达总结节点
     if (chapterCount > 0 && chapterCount % interval === 0) {
         const startChapter = chapterCount - interval + 1;
         const endChapter = chapterCount;
-        
+
         showToast(`正在生成第${startChapter}-${endChapter}章的剧情总结...`, 'info');
-        
+
         try {
             // 获取这些章节的内容
             const chaptersToSummarize = infiniteWriteState.chapters.slice(-interval);
             const content = chaptersToSummarize.map(ch =>
                 `${formatChapterDisplay(ch.chapter_number, ch.title)}\n${ch.content || ''}`
             ).join('\n\n---\n\n');
-            
+
             // 调用API生成总结
             const result = await apiCall('/api/chat', 'POST', {
                 message: `请为以下${interval}章内容生成一个简洁的剧情总结，包括：
@@ -3096,7 +3458,7 @@ async function checkAndGenerateSummary() {
 ${content.substring(0, 8000)}`,
                 session_id: 'summary_' + Date.now()
             });
-            
+
             if (result.reply) {
                 // 显示待确认总结
                 showPendingSummary({
@@ -3121,14 +3483,14 @@ function showPendingSummary(summary) {
         infiniteWriteState.pendingSummaries.push(summary);
     }
     saveInfiniteWriteData();
-    
+
     const container = document.getElementById('iw-pending-summaries');
     const contentEl = document.getElementById('iw-summary-content');
-    
+
     if (!container || !contentEl) return;
-    
+
     container.style.display = 'block';
-    
+
     contentEl.innerHTML = `
         <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 16px; margin-bottom: 12px;">
             <div style="font-weight: 500; color: var(--text-primary); margin-bottom: 8px;">
@@ -3150,7 +3512,7 @@ function showPendingSummary(summary) {
             </button>
         </div>
     `;
-    
+
     // 绑定事件
     document.getElementById('confirm-summary-btn')?.addEventListener('click', () => confirmSummary(summary));
     document.getElementById('skip-summary-btn')?.addEventListener('click', () => skipSummary(summary));
@@ -3169,7 +3531,7 @@ async function confirmSummary(summary) {
         btn.disabled = true;
         btn.innerHTML = '<i class="ri-loader-4-line"></i> 存储中...';
     }
-    
+
     try {
         // 调用知识库API存储
         const result = await apiCall('/api/knowledge-base/infinite-summary', 'POST', {
@@ -3182,19 +3544,19 @@ async function confirmSummary(summary) {
         if (!result || result.success !== true) {
             throw new Error((result && result.error) || '知识库存储失败');
         }
-        
+
         // 从待确认列表移除
         infiniteWriteState.pendingSummaries = infiniteWriteState.pendingSummaries.filter(
             s => s.timestamp !== summary.timestamp
         );
         saveInfiniteWriteData();
-        
+
         showToast('剧情总结已存入知识库 ✨', 'success');
-        
+
         // 隐藏确认区域
         const container = document.getElementById('iw-pending-summaries');
         if (container) container.style.display = 'none';
-        
+
     } catch (e) {
         const msg = (e && e.message) ? e.message : '未知错误';
         if (msg.includes('未配置') || msg.includes('暂不可用') || msg.includes('503')) {
@@ -3216,10 +3578,10 @@ function skipSummary(summary) {
         s => s.timestamp !== summary.timestamp
     );
     saveInfiniteWriteData();
-    
+
     const container = document.getElementById('iw-pending-summaries');
     if (container) container.style.display = 'none';
-    
+
     showToast('已跳过此次总结');
 }
 
@@ -3227,7 +3589,7 @@ function skipSummary(summary) {
 function editSummary(summary) {
     const contentEl = document.getElementById('iw-summary-content');
     if (!contentEl) return;
-    
+
     contentEl.innerHTML = `
         <div style="margin-bottom: 12px;">
             <div style="font-weight: 500; color: var(--text-primary); margin-bottom: 8px;">
@@ -3244,7 +3606,7 @@ function editSummary(summary) {
             </button>
         </div>
     `;
-    
+
     document.getElementById('save-edited-summary-btn')?.addEventListener('click', () => {
         const textarea = document.getElementById('edit-summary-textarea');
         if (textarea) {
@@ -3253,7 +3615,7 @@ function editSummary(summary) {
             confirmSummary(summary);
         }
     });
-    
+
     document.getElementById('cancel-edit-summary-btn')?.addEventListener('click', () => {
         showPendingSummary(summary);
     });
@@ -3264,20 +3626,20 @@ function resetInfiniteWrite() {
     if (!confirm('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销。')) {
         return;
     }
-    
+
     // 重置状态
     infiniteWriteState.sessionId = 'infinite_' + Date.now();
     infiniteWriteState.chapters = [];
     infiniteWriteState.currentChapter = 0;
     infiniteWriteState.totalWords = 0;
     infiniteWriteState.pendingSummaries = [];
-    
+
     // 清除本地存储
     clearInfiniteWriteDataForProject();
     setInfiniteWriteActiveView('panel');
-    
+
     showToast('已重置，可以开始新故事');
-    
+
     // 刷新界面
     renderInfiniteWriteInterface();
     loadInfiniteWriteChapterList();
@@ -3288,24 +3650,24 @@ function updateInfiniteWriteUI() {
     // 更新状态指示器
     const indicator = document.getElementById('iw-status-indicator');
     const statusText = document.getElementById('iw-status-text');
-    
+
     if (indicator) {
         indicator.style.background = infiniteWriteState.chapters.length > 0 ? '#22c55e' : '#666';
     }
-    
+
     if (statusText) {
         statusText.textContent = infiniteWriteState.chapters.length > 0
             ? `已创作${infiniteWriteState.chapters.length}章，共${infiniteWriteState.totalWords.toLocaleString()}字`
             : '尚未开始，请输入故事开头';
     }
-    
+
     // 显示/隐藏区域
     const startSection = document.getElementById('iw-start-section');
     const controlSection = document.getElementById('iw-control-section');
-    
+
     if (startSection) startSection.style.display = infiniteWriteState.chapters.length === 0 ? 'block' : 'none';
     if (controlSection) controlSection.style.display = infiniteWriteState.chapters.length > 0 ? 'block' : 'none';
-    
+
     // 更新左侧导航的总字数和章节列表
     loadInfiniteWriteNavChapterList();
 }
@@ -3314,26 +3676,36 @@ function updateInfiniteWriteUI() {
 function renderInfiniteWriteChaptersList() {
     const container = document.getElementById('iw-chapters-list');
     if (!container) return;
-    
+
     if (infiniteWriteState.chapters.length === 0) {
         container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 20px;">暂无章节</div>';
         return;
     }
-    
-    container.innerHTML = infiniteWriteState.chapters.map(ch => `
-        <div class="iw-chapter-card" data-chapter="${ch.chapter_number}" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; cursor: pointer; transition: all 0.2s;">
+
+    const chapterEntries = getChapterNavEntries(infiniteWriteState.chapters, {
+        query: infiniteWriteState.chapterSearchQuery,
+        descending: infiniteWriteState.chapterSortDescending
+    });
+
+    if (chapterEntries.length === 0) {
+        container.innerHTML = renderChapterNavNoMatch(infiniteWriteState.chapterSearchQuery);
+        return;
+    }
+
+    container.innerHTML = chapterEntries.map(entry => `
+        <div class="iw-chapter-card" data-chapter="${entry.chapter.chapter_number}" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; cursor: pointer; transition: all 0.2s;">
             <div style="display: flex; align-items: center; gap: 12px;">
-                <span style="font-weight: 600; color: var(--text-primary);">第${ch.chapter_number}章</span>
-                <span style="color: var(--text-secondary); font-size: 13px;">${ch.title || ''}</span>
+                <span style="font-weight: 600; color: var(--text-primary);">第${entry.chapterNumber}章</span>
+                <span style="color: var(--text-secondary); font-size: 13px;">${escapeChapterNavHtml(entry.title)}</span>
                 <div style="flex: 1;"></div>
-                <span style="font-size: 12px; color: var(--text-secondary);">${(ch.word_count || 0).toLocaleString()} 字</span>
+                <span style="font-size: 12px; color: var(--text-secondary);">${(entry.chapter.word_count || 0).toLocaleString()} 字</span>
             </div>
             <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary); line-height: 1.6; max-height: 40px; overflow: hidden; text-overflow: ellipsis;">
-                ${ch.summary || (ch.content ? ch.content.substring(0, 100) : '') || ''}
+                ${escapeChapterNavHtml(entry.chapter.summary || (entry.chapter.content ? entry.chapter.content.substring(0, 100) : '') || '')}
             </p>
         </div>
     `).join('');
-    
+
     // 绑定点击事件
     container.querySelectorAll('.iw-chapter-card').forEach(card => {
         card.addEventListener('click', () => {
@@ -3386,21 +3758,21 @@ async function deleteInfiniteWriteChapterFrom(chapterNumber) {
         showToast(`未找到第${chapterNumber}章`, 'error');
         return;
     }
-    
+
     const removed = infiniteWriteState.chapters.slice(idx);
     const removedNumbers = removed.map(ch => ch.chapter_number).filter(n => typeof n === 'number');
-    
+
     infiniteWriteState.chapters = infiniteWriteState.chapters.slice(0, idx);
     recomputeInfiniteWriteStats();
     saveInfiniteWriteData();
-    
+
     updateInfiniteWriteUI();
     renderInfiniteWriteChaptersList();
     loadInfiniteWriteChapterList();
     loadInfiniteWriteNavChapterList();
-    
+
     await syncInfiniteWriteSession(removedNumbers);
-    
+
     showToast(`已删除第${chapterNumber}章及之后的章节`);
 }
 
@@ -3410,36 +3782,36 @@ async function regenerateInfiniteWriteChapter(chapterNumber) {
         showToast('请先在设置中配置全局API，或选择一个模型', 'error');
         return;
     }
-    
+
     const apiConfigId = getSelectedApiConfigIdForInfiniteWrite();
     const inspiration = document.getElementById('iw-inspiration')?.value.trim() || '';
-    
+
     const backup = {
         chapters: [...infiniteWriteState.chapters],
         currentChapter: infiniteWriteState.currentChapter,
         totalWords: infiniteWriteState.totalWords
     };
-    
+
     const idx = infiniteWriteState.chapters.findIndex(ch => ch.chapter_number === chapterNumber);
     if (idx === -1) {
         showToast(`未找到第${chapterNumber}章`, 'error');
         return;
     }
-    
+
     const removed = infiniteWriteState.chapters.slice(idx);
     const removedNumbers = removed.map(ch => ch.chapter_number).filter(n => typeof n === 'number');
-    
+
     infiniteWriteState.chapters = infiniteWriteState.chapters.slice(0, idx);
     recomputeInfiniteWriteStats();
     saveInfiniteWriteData();
-    
+
     updateInfiniteWriteUI();
     renderInfiniteWriteChaptersList();
     loadInfiniteWriteChapterList();
     loadInfiniteWriteNavChapterList();
-    
+
     await syncInfiniteWriteSession(removedNumbers);
-    
+
     try {
         const result = await apiCall('/api/continuous-write/regenerate', 'POST', {
             session_id: infiniteWriteState.sessionId,
@@ -3450,26 +3822,26 @@ async function regenerateInfiniteWriteChapter(chapterNumber) {
             enable_trends: infiniteWriteState.enableTrendsFusion,
             trends_platforms: infiniteWriteState.selectedTrendsPlatforms
         });
-        
+
         if (result.success && result.chapter) {
             showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
             const isFirst = chapterNumber === 1;
             showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirst);
             return;
         }
-        
+
         throw new Error(result.error || '重新生成失败');
     } catch (e) {
         infiniteWriteState.chapters = backup.chapters;
         infiniteWriteState.currentChapter = backup.currentChapter;
         infiniteWriteState.totalWords = backup.totalWords;
         saveInfiniteWriteData();
-        
+
         updateInfiniteWriteUI();
         renderInfiniteWriteChaptersList();
         loadInfiniteWriteChapterList();
         loadInfiniteWriteNavChapterList();
-        
+
         showInfiniteWriteError('重新生成失败', e.message);
     }
 }
@@ -3515,9 +3887,9 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
     });
     const modal = document.getElementById('modal-container');
     if (!modal) return;
-    
+
     modal.classList.remove('hidden');
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 800px; max-width: 100%; max-height: 90vh; display: flex; flex-direction: column;">
@@ -3563,7 +3935,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
         chapterNumber: chapter.chapter_number,
         isFirstChapter: isFirstChapter
     });
-    
+
     // 放弃本章
     document.getElementById('iw-discard-btn')?.addEventListener('click', () => {
         if (confirm('确定要放弃这一章吗？内容将不会被保存。')) {
@@ -3572,7 +3944,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
             showToast('已放弃本章，可以重新创作');
         }
     });
-    
+
     // 保留到列表
     document.getElementById('iw-keep-btn')?.addEventListener('click', () => {
         // 保存章节到无限续写列表
@@ -3581,17 +3953,17 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
         infiniteWriteState.totalWords += chapter.word_count || 0;
         setInfiniteWriteActiveView('chapter', chapter.chapter_number);
         saveInfiniteWriteData();
-        
+
         // 更新界面
         updateInfiniteWriteUI();
         renderInfiniteWriteChaptersList();
         loadInfiniteWriteChapterList();
-        
+
         // 检查是否需要生成总结（仅非第一章）
         if (!isFirstChapter) {
             checkAndGenerateSummary();
         }
-        
+
         modal.classList.add('hidden');
         modal.innerHTML = '';
         showToast(`第${chapter.chapter_number}章已保留到列表 ✓`);
@@ -3600,7 +3972,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
             window.showInfiniteWriteChapterEditor(chapter);
         }
     });
-    
+
     // 重新生成本章（预览态）
     document.getElementById('iw-regenerate-preview-btn')?.addEventListener('click', async () => {
         const chapterNumber = chapter.chapter_number;
@@ -3618,9 +3990,9 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
 function showInfiniteWriteChapterPreview(chapter) {
     const modal = document.getElementById('modal-container');
     if (!modal) return;
-    
+
     modal.classList.remove('hidden');
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 800px; max-width: 100%; max-height: 90vh; display: flex; flex-direction: column;">
@@ -3657,13 +4029,13 @@ function showInfiniteWriteChapterPreview(chapter) {
             </div>
         </div>
     `;
-    
+
     document.getElementById('close-iw-preview')?.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
-    
+
+
     // 删除本章及之后章节
     document.getElementById('iw-delete-chapter-btn')?.addEventListener('click', async () => {
         const confirmed = confirm(`确定要删除第${chapter.chapter_number}章及之后章节吗？\n\n此操作不可撤销。`);
@@ -3672,7 +4044,7 @@ function showInfiniteWriteChapterPreview(chapter) {
         modal.innerHTML = '';
         await deleteInfiniteWriteChapterFrom(chapter.chapter_number);
     });
-    
+
     // 重新生成本章
     document.getElementById('iw-regenerate-chapter-btn')?.addEventListener('click', async () => {
         const confirmed = confirm(`确定要重新生成第${chapter.chapter_number}章吗？\n\n将删除本章及之后章节并重新生成。`);
@@ -3681,7 +4053,7 @@ function showInfiniteWriteChapterPreview(chapter) {
         modal.innerHTML = '';
         await regenerateInfiniteWriteChapter(chapter.chapter_number);
     });
-    
+
     // 点击背景关闭
     modal.addEventListener('click', (e) => {
         if (e.target === modal.firstElementChild) {
@@ -3705,10 +4077,10 @@ async function saveChapterToProject(chapter) {
             exists: !!outline[chapter.chapter_number - 1],
             existingTitle: outline[chapter.chapter_number - 1]?.title || ''
         });
-        
+
         const chapterNum = chapter.chapter_number;
         const chapterIndex = chapterNum - 1;
-        
+
         // 准备章节数据
         const chapterData = {
             title: chapter.title || `第${chapterNum}章`,
@@ -3718,7 +4090,7 @@ async function saveChapterToProject(chapter) {
             created_from: 'infinite_write',
             created_at: new Date().toISOString()
         };
-        
+
         // 检查章节是否已存在
         if (outline[chapterIndex]) {
             console.log('[InfiniteWrite] saveToProject: chapter exists, ask overwrite');
@@ -3744,15 +4116,15 @@ async function saveChapterToProject(chapter) {
             outline.push(chapterData);
             showToast(`已创建并保存第${chapterNum}章 ✓`);
         }
-        
+
         // 保存到项目
         await apiCall('/api/project-data/chapters', 'POST', { data: outline });
-        
+
         // 刷新项目数据
         if (window.store && window.store.projectData) {
             window.store.projectData.chapters = outline;
         }
-        
+
     } catch (e) {
         showToast('保存失败: ' + e.message, 'error');
         console.error('[InfiniteWrite] 保存章节到项目失败', e);
@@ -3769,6 +4141,7 @@ function saveInfiniteWriteData() {
         totalWords: infiniteWriteState.totalWords,
         selectedModel: infiniteWriteState.selectedModel,
         selectedApiConfigId: infiniteWriteState.selectedApiConfigId,
+        lastActiveApiConfigId: infiniteWriteState.lastActiveApiConfigId,
         summaryInterval: infiniteWriteState.summaryInterval,
         pendingSummaries: infiniteWriteState.pendingSummaries,
         enableTrendsFusion: infiniteWriteState.enableTrendsFusion,
@@ -3776,9 +4149,11 @@ function saveInfiniteWriteData() {
         config: infiniteWriteState.config,
         mainPanelCollapsed: infiniteWriteState.mainPanelCollapsed,
         activeView: infiniteWriteState.activeView,
-        activeChapterNumber: infiniteWriteState.activeChapterNumber
+        activeChapterNumber: infiniteWriteState.activeChapterNumber,
+        chapterSearchQuery: infiniteWriteState.chapterSearchQuery,
+        chapterSortDescending: infiniteWriteState.chapterSortDescending
     };
-    
+
     const payload = JSON.stringify(data);
     console.log('[InfiniteWrite] save: chapters =', data.chapters?.length || 0, 'totalWords =', data.totalWords || 0, 'payloadBytes =', payload.length);
     localStorage.setItem(getInfiniteWriteStorageKey(), payload);
@@ -3876,9 +4251,9 @@ function showInfiniteWriteError(title, message) {
         showToast(`${title}: ${message}`, 'error');
         return;
     }
-    
+
     modal.classList.remove('hidden');
-    
+
     // 判断是否是连接错误，给出更详细的提示
     let detailHint = '';
     if (message.toLowerCase().includes('connection') || message.toLowerCase().includes('timeout')) {
@@ -3899,7 +4274,7 @@ function showInfiniteWriteError(title, message) {
             </div>
         `;
     }
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
             <div style="background: var(--bg-panel); border: 1px solid rgba(239, 68, 68, 0.5); border-radius: 16px; width: 500px; max-width: 100%; padding: 24px;">
@@ -3912,15 +4287,15 @@ function showInfiniteWriteError(title, message) {
                         <p style="margin: 4px 0 0 0; font-size: 13px; color: var(--text-secondary);">创作过程中发生错误</p>
                     </div>
                 </div>
-                
+
                 <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
                     <div style="font-size: 14px; color: var(--text-primary); word-break: break-word;">
                         <code style="background: rgba(239, 68, 68, 0.2); padding: 2px 8px; border-radius: 4px; color: #fca5a5;">${escapeHtml(message)}</code>
                     </div>
                 </div>
-                
+
                 ${detailHint}
-                
+
                 <div style="display: flex; gap: 12px; margin-top: 20px;">
                     <button id="iw-error-close" style="flex: 1; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">
                         关闭
@@ -3932,12 +4307,12 @@ function showInfiniteWriteError(title, message) {
             </div>
         </div>
     `;
-    
+
     document.getElementById('iw-error-close')?.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
+
     document.getElementById('iw-error-retry')?.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
@@ -3956,12 +4331,12 @@ function showFinishStoryDialog() {
         showToast('还没有创作任何章节，无法完结', 'error');
         return;
     }
-    
+
     const modal = document.getElementById('modal-container');
     if (!modal) return;
-    
+
     modal.classList.remove('hidden');
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 600px; max-width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;">
@@ -3974,7 +4349,7 @@ function showFinishStoryDialog() {
                         将无限续写的章节写入协作项目，文件下载请使用上方的 TXT / MD / DOCX 按钮
                     </p>
                 </div>
-                
+
                 <div style="flex: 1; overflow-y: auto; padding: 20px;">
                     <!-- 统计信息 -->
                     <div style="background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 12px; padding: 16px; margin-bottom: 20px;">
@@ -3993,7 +4368,7 @@ function showFinishStoryDialog() {
                             </div>
                         </div>
                     </div>
-                    
+
                     <!-- 选项 -->
                     <div style="margin-bottom: 20px;">
                         <label style="display: block; font-size: 14px; color: var(--text-primary); margin-bottom: 8px; font-weight: 500;">
@@ -4016,7 +4391,7 @@ function showFinishStoryDialog() {
                             </label>
                         </div>
                     </div>
-                    
+
                     <!-- 新项目名称输入 -->
                     <div id="new-project-input-section">
                         <label style="display: block; font-size: 14px; color: var(--text-primary); margin-bottom: 8px; font-weight: 500;">
@@ -4026,7 +4401,7 @@ function showFinishStoryDialog() {
                             placeholder="输入项目名称..."
                             style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
                     </div>
-                    
+
                     <!-- 清除选项 -->
                     <div style="margin-top: 20px; padding: 16px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px;">
                         <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
@@ -4040,7 +4415,7 @@ function showFinishStoryDialog() {
                         </label>
                     </div>
                 </div>
-                
+
                 <div style="padding: 16px 20px; border-top: 1px solid var(--border-color); display: flex; gap: 12px;">
                     <button id="finish-cancel-btn" style="flex: 1; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer; font-size: 14px;">
                         取消
@@ -4052,12 +4427,12 @@ function showFinishStoryDialog() {
             </div>
         </div>
     `;
-    
+
     // 绑定事件
     const optionNew = document.querySelector('input[value="new"]');
     const optionCurrent = document.querySelector('input[value="current"]');
     const newProjectSection = document.getElementById('new-project-input-section');
-    
+
     const updateOptionStyles = () => {
         const newOption = document.getElementById('finish-option-new');
         const currentOption = document.getElementById('finish-option-current');
@@ -4075,17 +4450,17 @@ function showFinishStoryDialog() {
             newProjectSection.style.display = 'none';
         }
     };
-    
+
     updateOptionStyles();
     optionNew.addEventListener('change', updateOptionStyles);
     optionCurrent.addEventListener('change', updateOptionStyles);
-    
+
     // 取消按钮
     document.getElementById('finish-cancel-btn')?.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
+
     // 确认完结按钮
     document.getElementById('finish-confirm-btn')?.addEventListener('click', async () => {
         await executeFinishStory();
@@ -4111,28 +4486,28 @@ async function executeFinishStory() {
     const sourceProjectId = typeof getActiveProjectId === 'function'
         ? (getActiveProjectId() || '')
         : (store.currentProjectId || '');
-    
+
     if (confirmBtn) {
         confirmBtn.disabled = true;
         confirmBtn.innerHTML = '<i class="ri-loader-4-line" style="animation: spin 1s linear infinite;"></i> 保存中...';
     }
-    
+
     try {
         const isNewProject = document.querySelector('input[name="finish-option"]:checked')?.value === 'new';
         const clearData = document.getElementById('finish-clear-data')?.checked ?? false;
         const projectName = document.getElementById('finish-project-name')?.value?.trim() || getDefaultProjectName();
-        
+
         let targetProjectId = typeof getActiveProjectId === 'function'
             ? getActiveProjectId()
             : store.currentProjectId;
-        
+
         if (isNewProject) {
             // 创建新项目
             const result = await apiCall('/api/projects', 'POST', {
                 name: projectName,
                 description: `从无限续写模式导入，共${infiniteWriteState.chapters.length}章，${infiniteWriteState.totalWords.toLocaleString()}字`
             });
-            
+
             if (result.success && result.project) {
                 targetProjectId = result.project.id;
                 // 添加到项目列表
@@ -4141,7 +4516,7 @@ async function executeFinishStory() {
                 throw new Error('创建项目失败');
             }
         }
-        
+
         // 切换到目标项目
         if (targetProjectId !== store.currentProjectId) {
             await apiCall(`/api/projects/${targetProjectId}/switch`, 'POST');
@@ -4151,12 +4526,12 @@ async function executeFinishStory() {
                 store.currentProjectId = targetProjectId;
             }
         }
-        
+
         // 获取目标项目的现有章节数
         const outlineRes = await apiCall('/api/project-data/chapters', 'GET');
         let outline = outlineRes.data || [];
         const startIndex = outline.length;
-        
+
         // 将无限续写的章节添加到独立章节正文
         for (let i = 0; i < infiniteWriteState.chapters.length; i++) {
             const ch = infiniteWriteState.chapters[i];
@@ -4169,31 +4544,31 @@ async function executeFinishStory() {
                 created_at: ch.created_at || new Date().toISOString()
             });
         }
-        
+
         // 保存为独立章节正文，不再写入大纲资料。
         await apiCall('/api/project-data/chapters', 'POST', { data: outline });
-        
+
         // 更新store
         if (window.store && window.store.projectData) {
             window.store.projectData.chapters = outline;
         }
-        
+
         // 清空无限续写数据（如果选中）
         if (clearData) {
             applyInfiniteWriteProjectState(createInfiniteWriteProjectState());
             clearInfiniteWriteDataForProject(sourceProjectId);
         }
-        
+
         // 刷新项目选择器
         updateProjectSelector();
-        
+
         // 关闭弹窗
         modal.classList.add('hidden');
         modal.innerHTML = '';
-        
+
         // 显示成功消息
         showToast(`🎉 已迁移到协作项目！${isNewProject ? `新项目「${projectName}」已创建` : '章节已追加到当前项目'}${clearData ? '，无限续写数据已清空' : '，无限续写数据保留'}`, 'success');
-        
+
         // 刷新界面
         if (isNewProject) {
             // 切换到新项目后刷新
@@ -4201,16 +4576,16 @@ async function executeFinishStory() {
                 await loadCurrentProjectData();
             }
         }
-        
+
         // 刷新无限续写界面，切换到目标项目后加载该项目自己的独立续写数据
         loadInfiniteWriteDataForCurrentProject();
         renderInfiniteWriteInterface();
         loadInfiniteWriteNavChapterList();
-        
+
     } catch (e) {
         console.error('[InfiniteWrite] 完结故事失败:', e);
         showToast('完结失败: ' + e.message, 'error');
-        
+
         if (confirmBtn) {
             confirmBtn.disabled = false;
             confirmBtn.innerHTML = '<i class="ri-save-line"></i> 确认完结';

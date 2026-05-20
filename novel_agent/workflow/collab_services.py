@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..agents.base_agent import AgentCapability
+from .context_bundle import load_confirmed_context_bundles_from_project_dir
 
 CallbackHandler = Callable[[Dict[str, Any]], Awaitable[Optional[Any]]]
 
@@ -124,10 +125,12 @@ class ContentReaderService(BaseCollabService):
             "plot_thread": runtime_context.get("plot_thread", {}),
             "aux_memory": runtime_context.get("aux_memory", {}),
             "trends_data": runtime_context.get("trends_data", []),
+            "context_bundles": runtime_context.get("context_bundles", []),
         }
 
         permanent_memory = self._load_permanent_memory(project_dir)
         permanent_loaded_keys = set(permanent_memory.get("loaded_keys") or [])
+        context_bundles = load_confirmed_context_bundles_from_project_dir(project_dir)
 
         file_payloads: Dict[str, Any] = {}
         if project_dir:
@@ -169,6 +172,11 @@ class ContentReaderService(BaseCollabService):
                 if candidate not in (None, "", [], {}):
                     loaded["previous_summary"] = candidate
                     value = candidate
+            elif key == "context_bundles" and value in (None, "", [], {}):
+                if context_bundles:
+                    loaded["context_bundles"] = context_bundles
+                    value = context_bundles
+                    source = "context_bundle"
 
             if key in {"banned_words", "anti_ai_rules", "knowledge_base"}:
                 if key in permanent_loaded_keys:

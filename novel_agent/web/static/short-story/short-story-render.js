@@ -582,7 +582,7 @@ async function renderShortStoryInterface() {
                 <div class="short-story-panel">
                     <div class="short-story-panel-title">流程提醒</div>
                     <div class="short-story-tips">
-                        <div>1. 直接输入任意创作素材，系统会自动识别并生成 3 个创意方案。</div>
+                        <div>1. 直接输入任意创作素材，系统会自动识别并生成 3 个融合方案。</div>
                         <div>2. 每一步会直接调用当前所选模型。</div>
                         <div>3. 先选最满意的一版创意方案，再继续生成导语与大纲。</div>
                         <div>4. 大纲和章节都可以手改，系统会自动保存草稿。</div>

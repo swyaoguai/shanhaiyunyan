@@ -10,7 +10,7 @@
     <!-- 本地化字体和图标 - 避免外部CDN依赖 -->
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1.0">
     <link rel="stylesheet" href="/static/icons/remixicon.css?v=3.5.1">
-    <link rel="stylesheet" href="/static/style.css?v=3.22">
+    <link rel="stylesheet" href="/static/style.css?v=3.23">
 </head>
 
 <body>
@@ -41,6 +41,9 @@
                 <button type="button" class="res-item" data-module="novel-to-script" title="小说转剧本" aria-label="打开小说转剧本">
                     <i class="ri-movie-2-line"></i>
                 </button>
+                <button type="button" class="res-item" data-module="cover-images" title="封面生成" aria-label="打开封面生成">
+                    <i class="ri-image-add-line"></i>
+                </button>
                 <button type="button" class="res-item" data-module="wiki" title="知识中心" aria-label="打开知识中心">
                     <i class="ri-brain-line"></i>
                 </button>
@@ -56,6 +59,9 @@
                 </button>
                 <button type="button" class="res-item" data-module="about" title="关于" aria-label="打开关于">
                     <i class="ri-information-line"></i>
+                </button>
+                <button type="button" class="res-item res-item--danger" id="app-shutdown-button" title="退出应用" aria-label="退出应用" hidden>
+                    <i class="ri-shut-down-line"></i>
                 </button>
             </div>
         </aside>
@@ -175,6 +181,9 @@
     <div id="toast" class="toast hidden" role="status" aria-live="polite">操作成功</div>
 
     <!-- 按正确顺序加载模块化脚本 -->
+    <script>
+        window.SHANHAI_APP_VERSION = {{ app_version|tojson }};
+    </script>
     <!-- 0. Markdown 渲染库 -->
     <script src="/static/lib/marked.min.js?v=15.0.7"></script>
     <!-- 1. 工具函数（无依赖） -->
@@ -220,6 +229,8 @@
     <script src="/static/novel-to-script/novel-to-script-render.js?v=1.0"></script>
     <script src="/static/novel-to-script/novel-to-script-events.js?v=1.0"></script>
     <script src="/static/app-novel-to-script.js?v=1.0"></script>
+    <!-- 10.3 小说封面生成 -->
+    <script src="/static/app-cover-images.js?v=1.0"></script>
     <!-- 10.1 无限续写章节编辑器 -->
     <script src="/static/iw-editor.js?v=1.0"></script>
     <!-- 11. 提示词管理 -->

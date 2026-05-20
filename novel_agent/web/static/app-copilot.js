@@ -294,131 +294,7 @@ function summarizeEventlineRows(rows, limit = 3) {
         });
 }
 
-const MAX_COMMAND_SUGGESTIONS = 3;
-
-const COPILOT_COMMANDS = [
-    {
-        key: 'create',
-        name: '开始创作',
-        label: '开始创作',
-        internalName: 'create',
-        description: '完整创作：世界观、大纲、章节与合集',
-        icon: 'ri-magic-line',
-        insertText: '/create ',
-        kindLabel: '完整创作',
-        keywords: ['create', 'start', 'novel'],
-        aliases: ['create'],
-        syntax: '/create',
-        params: [],
-        examples: [{ label: '/create', insertText: '/create ' }]
-    },
-    {
-        key: 'worldbuild',
-        name: '生成世界观',
-        label: '生成世界观',
-        internalName: 'worldbuild',
-        description: '只生成或补全世界观',
-        icon: 'ri-earth-line',
-        insertText: '/worldbuild ',
-        kindLabel: '世界观',
-        keywords: ['world', 'worldbuild'],
-        aliases: ['worldbuild'],
-        syntax: '/worldbuild',
-        params: [],
-        examples: [{ label: '/worldbuild', insertText: '/worldbuild ' }]
-    },
-    {
-        key: 'outline',
-        name: '生成大纲',
-        label: '生成大纲',
-        internalName: 'outline',
-        description: '只生成或补全大纲',
-        icon: 'ri-file-list-3-line',
-        insertText: '/outline ',
-        kindLabel: '大纲',
-        keywords: ['outline', 'plot'],
-        aliases: ['outline'],
-        syntax: '/outline',
-        params: [],
-        examples: [{ label: '/outline', insertText: '/outline ' }]
-    },
-    {
-        key: 'chapter',
-        name: '续写章节',
-        label: '续写章节',
-        internalName: 'chapter',
-        description: '指定章节补写或续写',
-        icon: 'ri-book-open-line',
-        insertText: '/chapter 1 ',
-        kindLabel: '章节',
-        keywords: ['chapter', 'write'],
-        aliases: ['chapter'],
-        syntax: '/chapter <章节号>',
-        params: [{ name: '章节号', required: true, description: '要生成或续写的章节编号' }],
-        selectionRange: { start: '/chapter '.length, end: '/chapter 1'.length },
-        examples: [{ label: '/chapter 1', insertText: '/chapter 1 ', selectionRange: { start: '/chapter '.length, end: '/chapter 1'.length } }]
-    },
-    {
-        key: 'status',
-        name: '查看进度',
-        label: '查看进度',
-        internalName: 'status',
-        description: '查看当前工作流进度与内容同步情况',
-        icon: 'ri-pulse-line',
-        insertText: '/status ',
-        kindLabel: '进度',
-        keywords: ['status', 'progress'],
-        aliases: ['status'],
-        syntax: '/status',
-        params: [],
-        examples: [{ label: '/status', insertText: '/status ' }]
-    },
-    {
-        key: 'pause',
-        name: '暂停创作',
-        label: '暂停创作',
-        internalName: 'pause',
-        description: '暂停当前创作流程',
-        icon: 'ri-pause-circle-line',
-        insertText: '/pause ',
-        kindLabel: '控制',
-        keywords: ['pause', 'stop'],
-        aliases: ['pause'],
-        syntax: '/pause',
-        params: [],
-        examples: [{ label: '/pause', insertText: '/pause ' }]
-    },
-    {
-        key: 'resume',
-        name: '继续创作',
-        label: '继续创作',
-        internalName: 'resume',
-        description: '继续已暂停的创作流程',
-        icon: 'ri-play-circle-line',
-        insertText: '/resume ',
-        kindLabel: '控制',
-        keywords: ['resume', 'continue'],
-        aliases: ['resume'],
-        syntax: '/resume',
-        params: [],
-        examples: [{ label: '/resume', insertText: '/resume ' }]
-    },
-    {
-        key: 'cancel',
-        name: '取消创作',
-        label: '取消创作',
-        internalName: 'cancel',
-        description: '取消当前创作流程',
-        icon: 'ri-close-circle-line',
-        insertText: '/cancel ',
-        kindLabel: '控制',
-        keywords: ['cancel', 'abort'],
-        aliases: ['cancel'],
-        syntax: '/cancel',
-        params: [],
-        examples: [{ label: '/cancel', insertText: '/cancel ' }]
-    },
-];
+const COPILOT_COMMANDS = [];
 
 // 当前提及状态
 let mentionState = {
@@ -472,44 +348,7 @@ function searchMentions(query) {
 }
 
 function getCommandChapters() {
-    const store = getCoreStore();
-    const chapters = typeof window.getMultiAgentChapters === 'function'
-        ? window.getMultiAgentChapters()
-        : (Array.isArray(store.projectData?.chapters) ? store.projectData.chapters : []);
-    if (!Array.isArray(chapters)) return [];
-    return chapters
-        .map((chapter, index) => {
-            const chapterNo = index + 1;
-            const title = String(chapter?.title || '').trim();
-            const insertText = `/chapter ${chapterNo} `;
-            return {
-                key: `chapter-${chapterNo}`,
-                name: `/chapter ${chapterNo}`,
-                label: title ? `续写第${chapterNo}章` : `第${chapterNo}章`,
-                internalName: 'chapter',
-                description: title ? `续写第${chapterNo}章 ${title}` : `续写第${chapterNo}章`,
-                icon: 'ri-quill-pen-line',
-                insertText,
-                kindLabel: '章节',
-                keywords: [`chapter ${chapterNo}`, title].filter(Boolean),
-                aliases: [`chapter ${chapterNo}`],
-                syntax: '/chapter <章节号>',
-                params: [{ name: '章节号', required: true, description: '要生成或续写的章节编号' }],
-                selectionRange: {
-                    start: '/chapter '.length,
-                    end: '/chapter '.length + String(chapterNo).length
-                },
-                examples: [{
-                    label: `第${chapterNo}章`,
-                    insertText,
-                    selectionRange: {
-                        start: '/chapter '.length,
-                        end: '/chapter '.length + String(chapterNo).length
-                    }
-                }]
-            };
-        })
-        .slice(0, 12);
+    return [];
 }
 
 function normalizeCommandSearchValue(value) {
@@ -544,52 +383,11 @@ function getCommandExactTerms(item) {
 }
 
 function searchCommands(query) {
-    const normalized = normalizeCommandSearchValue(query);
-    const chapterCommands = getCommandChapters();
-    const allCommands = [...COPILOT_COMMANDS, ...chapterCommands];
-    const scored = allCommands.map((item, index) => {
-        const haystack = [
-            ...getCommandSearchTerms(item),
-            normalizeCommandSearchValue(item.description)
-        ];
-        let score = haystack.some((value) => value === normalized) ? 100 : 0;
-        if (!normalized) {
-            score = 10;
-        } else {
-            haystack.forEach((value) => {
-                if (!value) return;
-                if (value === normalized) score = Math.max(score, 100);
-                else if (value.startsWith(normalized)) score = Math.max(score, 80);
-                else if (value.includes(normalized)) score = Math.max(score, 60);
-            });
-        }
-        if (item.key === 'chapter' && normalized && 'chapter'.startsWith(normalized)) {
-            score = Math.max(score, 85);
-        }
-        return { item, score, index };
-    });
-
-    return scored
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) => b.score - a.score || a.index - b.index)
-        .map((entry) => ({ type: 'command', ...entry.item }))
-        .slice(0, MAX_COMMAND_SUGGESTIONS);
+    return [];
 }
 
 function detectCommandTrigger(value, cursorPos) {
-    const safeValue = String(value || '');
-    const safeCursor = Number(cursorPos || 0);
-    const lineStart = safeValue.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1;
-    const beforeCursor = safeValue.substring(lineStart, safeCursor);
-    const leadingSpaces = beforeCursor.match(/^\s*/)?.[0]?.length || 0;
-    const token = beforeCursor.substring(leadingSpaces);
-    if (!token.startsWith('/')) return null;
-    if (token.substring(1).includes(' ') || token.substring(1).includes('\t')) return null;
-    return {
-        startPos: lineStart + leadingSpaces,
-        query: token.substring(1),
-        endPos: safeCursor
-    };
+    return null;
 }
 
 function setAutocompleteState(nextState) {
@@ -638,41 +436,7 @@ function findCommandDefinition(commandToken) {
 }
 
 function getActiveCommandContext(value, cursorPos) {
-    const safeValue = String(value || '');
-    const safeCursor = Number(cursorPos || 0);
-    const lineStart = safeValue.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1;
-    const nextBreak = safeValue.indexOf('\n', safeCursor);
-    const lineEnd = nextBreak === -1 ? safeValue.length : nextBreak;
-    const lineText = safeValue.substring(lineStart, lineEnd).trim();
-    if (!lineText) return null;
-    if (!lineText.startsWith('/')) return null;
-
-    const tokens = lineText.split(/\s+/).filter(Boolean);
-    const commandToken = String(tokens[0] || '');
-    if (!commandToken) return null;
-
-    const exact = findCommandDefinition(commandToken) || [...COPILOT_COMMANDS, ...getCommandChapters()].find((item) => {
-        const argsText = matchCommandAlias(lineText, item.aliases || [item.name], item.key === 'chapter');
-        return argsText !== null;
-    }) || null;
-    if (exact) {
-        const argsText = matchCommandAlias(lineText, exact.aliases || [exact.name], exact.key === 'chapter');
-        return {
-            command: exact,
-            args: argsText !== null
-                ? String(argsText || '').split(/\s+/).filter(Boolean)
-                : tokens.slice(1),
-            exact: true
-        };
-    }
-    const fallback = searchCommands(commandToken)[0];
-    if (!fallback) return null;
-
-    return {
-        command: fallback,
-        args: [],
-        exact: false
-    };
+    return null;
 }
 
 function getCommandExamples(command) {
@@ -689,10 +453,7 @@ function getCommandExamples(command) {
 }
 
 function shouldShowCommandPromptBar(inputValue, cursorPos) {
-    return Boolean(
-        detectCommandTrigger(inputValue, cursorPos) ||
-        getActiveCommandContext(inputValue, cursorPos)
-    );
+    return false;
 }
 
 function updateCommandPromptBarVisibility() {
@@ -705,37 +466,9 @@ function updateCommandPromptBarVisibility() {
 
 function renderCommandHelper() {
     const helper = document.querySelector('.copilot-command-helper');
-    const input = document.getElementById('copilot-input-text');
-    if (!helper || !input) return;
-
-    updateCommandPromptBarVisibility();
-    const context = getActiveCommandContext(input.value, input.selectionStart ?? input.value.length);
-    if (!context) {
-        helper.classList.add('hidden');
-        helper.innerHTML = '';
-        return;
-    }
-
-    const { command, args, exact } = context;
-    const hasChapterArg = command.key === 'chapter' && args.length > 0 && /^\d+$/.test(String(args[0] || ''));
-    const params = Array.isArray(command.params) ? command.params : [];
-    const displayLabel = escapeHtml(command.label || command.name || '');
-    const statusText = params.length > 0
-        ? (hasChapterArg ? '参数已填写，回车即可执行' : `请先填写${escapeHtml(params[0]?.name || '参数')}`)
-        : '回车即可执行';
-
-    helper.innerHTML = `
-        <div class="copilot-command-helper-line">
-            <span class="copilot-command-helper-label">${displayLabel}</span>
-            <span class="copilot-command-helper-state">${exact ? '已识别' : '候选命令'}</span>
-        </div>
-        <div class="copilot-command-helper-desc">${escapeHtml(command.description || '')}</div>
-        <div class="copilot-command-helper-meta">
-            <span class="copilot-command-helper-status ${params.length > 0 && !hasChapterArg ? 'is-missing' : ''}">${statusText}</span>
-            ${params.length > 0 ? `<span class="copilot-command-helper-param-text">参数：${escapeHtml(params.map((param) => param.name).join('、'))}</span>` : ''}
-        </div>
-    `;
-    helper.classList.remove('hidden');
+    if (!helper) return;
+    helper.classList.add('hidden');
+    helper.innerHTML = '';
 }
 
 // 初始化Copilot增强功能
@@ -1019,10 +752,6 @@ function insertCommand(commandText, selectionRange = null) {
 
 function applyAutocompleteSelection(item) {
     if (!item) return;
-    if (item.type === 'command') {
-        insertCommand(String(item.insertText || item.name || '').trimEnd() + ' ', item.selectionRange || null);
-        return;
-    }
     insertMention(item.type, item.name, item.id);
 }
 
@@ -1039,59 +768,7 @@ function getPromptCommandItems() {
 function ensureCommandPromptBar() {
     const inputRoot = document.querySelector('.copilot-input');
     if (!inputRoot) return;
-
-    let promptBar = inputRoot.querySelector('.copilot-command-prompts');
-    if (!promptBar) {
-        promptBar = document.createElement('div');
-        promptBar.className = 'copilot-command-prompts hidden';
-        inputRoot.appendChild(promptBar);
-    }
-
-    const items = getPromptCommandItems();
-    promptBar.innerHTML = `
-        <div class="copilot-command-prompts-label">快捷命令</div>
-        <div class="copilot-command-prompts-list">
-            ${items.map((item) => `
-                <button
-                    type="button"
-                    class="copilot-command-text"
-                    data-command-insert="${escapeHtml(item.insertText)}"
-                    data-selection-start="${item.selectionRange?.start ?? ''}"
-                    data-selection-end="${item.selectionRange?.end ?? ''}"
-                    title="${escapeHtml(item.description)}"
-                >
-                    ${escapeHtml(item.label || item.name)}
-                </button>
-            `).join('<span class="copilot-command-divider">/</span>')}
-        </div>
-        <div class="copilot-command-helper hidden"></div>
-    `;
-
-    promptBar.querySelectorAll('.copilot-command-text').forEach((button) => {
-        button.addEventListener('click', () => {
-            const input = document.getElementById('copilot-input-text');
-            if (!input) return;
-            promptBar.classList.remove('hidden');
-            const slashTrigger = detectCommandTrigger(input.value, input.selectionStart ?? input.value.length);
-            const fallbackPos = input.selectionStart ?? input.value.length;
-            setAutocompleteState({
-                active: true,
-                mode: 'command',
-                startPos: slashTrigger?.startPos ?? fallbackPos,
-                query: '',
-                selectedIndex: 0,
-                endPos: slashTrigger?.endPos ?? fallbackPos,
-                items: []
-            });
-            const start = parseOptionalNumber(button.dataset.selectionStart);
-            const end = parseOptionalNumber(button.dataset.selectionEnd);
-            insertCommand(
-                String(button.dataset.commandInsert || '').trimEnd() + ' ',
-                start !== null && end !== null ? { start, end } : null
-            );
-        });
-    });
-    renderCommandHelper();
+    inputRoot.querySelector('.copilot-command-prompts')?.remove();
 }
 
 // 更新提及数据

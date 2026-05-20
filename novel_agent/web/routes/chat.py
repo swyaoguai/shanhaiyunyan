@@ -21,6 +21,7 @@ from ..dependencies import get_coordinator, get_router_agent
 from ...agents.visible_text import strip_visible_technical_markers
 from ...route_targets import get_default_intent_route_target
 from ...workflow.user_interruptions import apply_interruption
+from ...workflow.runtime_messages import make_runtime_message
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,67 @@ _ROUTER_EXECUTION_INTENTS = {
     "search_web",
     "search_trends",
 }
-_ROUTER_COMMAND_NAMES = {"create", "worldbuild", "outline", "chapter", "character", "projectdata"}
-_WORKFLOW_CONTROL_COMMAND_NAMES = {"pause", "resume", "status", "cancel"}
+_ROUTER_COMMAND_NAMES: set[str] = set()
+_WORKFLOW_CONTROL_COMMAND_NAMES: set[str] = {"status", "pause", "resume", "cancel"}
+_CONTRACT_RESUME_STOP_REASONS: set[str] = {
+    "review_required",
+    "chapter_settings_review_required",
+    "max_tasks_reached",
+    "max_chapter_tasks_reached",
+}
+_CONTRACT_RESUME_CONFIRMATION_MARKERS = (
+    "继续",
+    "继续创作",
+    "继续正文",
+    "继续生成",
+    "开始创作",
+    "开始正文",
+    "开始写",
+    "写正文",
+    "生成正文",
+    "创作正文",
+    "写第一章",
+    "创作第一章",
+    "生成第一章",
+    "写第1章",
+    "创作第1章",
+    "生成第1章",
+    "写吧",
+    "可以写",
+    "确认",
+    "同意",
+    "通过",
+    "批准",
+)
+_CONTRACT_RESUME_SHORT_CONFIRMATIONS = {
+    "创作",
+    "继续",
+    "开始",
+    "写",
+    "写吧",
+    "可以",
+    "可以了",
+    "好",
+    "好的",
+    "行",
+    "行吧",
+    "确认",
+    "同意",
+    "通过",
+}
+_CONTRACT_RESUME_NEGATION_MARKERS = (
+    "不",
+    "别",
+    "不要",
+    "先别",
+    "暂停",
+    "停止",
+    "取消",
+    "修改",
+    "调整",
+    "重写",
+    "等等",
+)
 CHAT_AUTO_SAVE_STATE_KEY = "copilot_chat_auto_save"
 CHAT_CREATIVE_MODE_STATE_KEY = "copilot_creative_mode"
 CHAT_CREATIVE_MODES = {"auto", "discussion", "plan", "execute"}
@@ -89,11 +149,28 @@ PROJECT_DATA_ACTION_KEYWORDS = (
 AUTO_EXECUTION_CONFIDENCE_FLOOR = 0.72
 DISCUSSION_OR_PLANNING_MARKERS = (
     "先讨论", "先聊", "聊聊", "讨论一下", "先看看", "看看", "评估", "分析",
-    "建议", "觉得", "怎么", "如何", "要不要", "是否", "能不能", "可不可以",
+    "建议", "推荐", "灵感", "想法", "思路", "还有什么", "其他设定",
+    "觉得", "怎么", "如何", "要不要", "是否", "能不能", "可不可以",
     "可以吗", "行不行", "合适吗", "有必要吗", "方案", "计划", "步骤", "流程",
     "路线", "下一步", "先别保存", "不要保存", "别落库", "不要落库", "别写入",
     "先别存档", "不要存档", "别存档", "先别入库", "不要入库", "别入库",
     "这句话", "这句", "换一句", "换掉", "其他不改", "其余不改", "刚才", "上一条",
+)
+SOFT_CREATIVE_ENRICHMENT_MARKERS = (
+    "丰富一下", "丰富", "细化一下", "继续细化", "细化", "展开一下",
+    "扩展一下", "扩展", "拓展一下", "拓展", "根据这个设定",
+    "基于这个设定", "在这个设定上", "帮我想想", "帮我想",
+    "补充一点", "补充一下", "完善一下",
+)
+SOFT_CREATIVE_TARGET_MARKERS = (
+    "主角", "角色", "人物", "人设", "角色设定", "人物设定",
+    "世界观", "世界设定", "设定",
+)
+HARD_CREATIVE_EXECUTION_MARKERS = (
+    "直接生成", "直接创建", "直接写", "开始创作", "开始写", "开始正文",
+    "生成", "创建", "新建", "建立", "写入资料库", "保存到资料库",
+    "同步到资料库", "加入资料库", "存到资料库", "落库", "入库",
+    "执行", "续写", "继续写", "写正文", "生成正文",
 )
 CONTINUE_WRITE_ACTION_MARKERS = (
     "续写", "继续写", "接着写", "往下写", "下一章", "继续正文", "继续创作",
@@ -106,48 +183,7 @@ PROJECT_DATA_OBJECT_MARKERS = (
     "事件线", "剧情线", "故事线", "主线", "支线", "细纲", "详细大纲", "章纲",
     "章节设定", "章节规划", "资料库", "世界观", "角色卡", "人设卡", "大纲",
 )
-_EXPLICIT_COMMAND_DEFINITIONS = {
-    "create": {
-        "display": "开始创作",
-        "aliases": ("create",),
-    },
-    "worldbuild": {
-        "display": "生成世界观",
-        "aliases": ("worldbuild",),
-    },
-    "outline": {
-        "display": "生成大纲",
-        "aliases": ("outline",),
-    },
-    "chapter": {
-        "display": "续写章节",
-        "aliases": ("chapter",),
-    },
-    "character": {
-        "display": "生成角色卡",
-        "aliases": ("character",),
-    },
-    "projectdata": {
-        "display": "生成资料库内容",
-        "aliases": ("projectdata", "data"),
-    },
-    "pause": {
-        "display": "暂停创作",
-        "aliases": ("pause",),
-    },
-    "resume": {
-        "display": "继续创作",
-        "aliases": ("resume",),
-    },
-    "status": {
-        "display": "查看进度",
-        "aliases": ("status",),
-    },
-    "cancel": {
-        "display": "取消创作",
-        "aliases": ("cancel",),
-    },
-}
+_EXPLICIT_COMMAND_DEFINITIONS: Dict[str, Dict[str, Any]] = {}
 
 def _now_iso() -> str:
     return datetime.now().isoformat()
@@ -366,6 +402,10 @@ def _workflow_public_snapshot(payload: Optional[Dict[str, Any]]) -> Optional[Dic
         "reviews": payload.get("reviews") if isinstance(payload.get("reviews"), list) else [],
         "handoff_notes": payload.get("handoff_notes") if isinstance(payload.get("handoff_notes"), list) else [],
         "user_interruptions": payload.get("user_interruptions") if isinstance(payload.get("user_interruptions"), list) else [],
+        "stop_reason": str(payload.get("stop_reason") or "").strip(),
+        "stopped_on_task_type": str(payload.get("stopped_on_task_type") or "").strip(),
+        "awaiting_user_review": bool(payload.get("awaiting_user_review", False)),
+        "resume_endpoint": str(payload.get("resume_endpoint") or "").strip(),
     }
 
 
@@ -429,10 +469,12 @@ def _apply_workflow_update(active_run: Optional[Dict[str, Any]], update: Any) ->
         content = _strip_visible_technical_markers(update_payload.get("content") or update_payload.get("message") or "")
     if content:
         active_run["last_progress"] = content
-    for field in ("status", "target_agent", "current_agent", "stage", "output_dir", "last_error", "command", "run_id", "focus_module", "model", "current_model", "active_model", "model_used", "last_model"):
+    for field in ("status", "target_agent", "current_agent", "stage", "output_dir", "last_error", "command", "run_id", "focus_module", "model", "current_model", "active_model", "model_used", "last_model", "stop_reason", "stopped_on_task_type", "resume_endpoint"):
         value = update_payload.get(field)
         if value not in (None, ""):
             active_run[field] = str(value).strip()
+    if "awaiting_user_review" in update_payload:
+        active_run["awaiting_user_review"] = bool(update_payload.get("awaiting_user_review"))
     if "focus_chapter" in update_payload:
         active_run["focus_chapter"] = _normalize_positive_int(update_payload.get("focus_chapter"), 0)
 
@@ -520,6 +562,29 @@ def _apply_router_result_to_workflow(active_run: Optional[Dict[str, Any]], route
             active_run["user_interruptions"] = interruptions
 
     stop_reason = _project_ready_stop_reason_from_delegated(delegated_result)
+    if stop_reason:
+        active_run["stop_reason"] = stop_reason
+    stopped_on_task_type = str(delegated_params.get("stopped_on_task_type") or "").strip()
+    if not stopped_on_task_type:
+        project_ready_task_execution = (
+            delegated_params.get("project_ready_task_execution")
+            if isinstance(delegated_params.get("project_ready_task_execution"), dict)
+            else {}
+        )
+        project_ready_execution = (
+            project_ready_task_execution.get("project_ready_execution")
+            if isinstance(project_ready_task_execution.get("project_ready_execution"), dict)
+            else project_ready_task_execution
+        )
+        stopped_on_task_type = str(project_ready_execution.get("stopped_on_task_type") or "").strip()
+    if stopped_on_task_type:
+        active_run["stopped_on_task_type"] = stopped_on_task_type
+    if delegated_result.get("resume_endpoint"):
+        active_run["resume_endpoint"] = str(delegated_result.get("resume_endpoint") or "").strip()
+    elif stop_reason in {"review_required", "chapter_settings_review_required"}:
+        active_run["resume_endpoint"] = "/api/v1/contract/resume"
+    if delegated_params.get("awaiting_user_review") not in (None, ""):
+        active_run["awaiting_user_review"] = bool(delegated_params.get("awaiting_user_review"))
     if stop_reason == "task_failed":
         active_run["status"] = "failed"
         active_run["last_error"] = str(delegated_params.get("stopped_on_task_type") or stop_reason).strip()
@@ -630,6 +695,53 @@ def _project_ready_stop_reason_from_delegated(delegated_result: Optional[Dict[st
     return ""
 
 
+def _load_project_ready_execution_from_coordinator(coordinator: Any) -> Dict[str, Any]:
+    if coordinator is None:
+        return {}
+    project_manager = getattr(coordinator, "project_manager", None)
+    load_state = getattr(project_manager, "load_project_state", None)
+    if not callable(load_state):
+        return {}
+    try:
+        task_pool = load_state("task_pool", default={})
+    except Exception as exc:
+        logger.debug(f"[Chat] load task pool for resume detection failed: {exc}")
+        return {}
+    if not isinstance(task_pool, dict):
+        return {}
+    metadata = task_pool.get("metadata") if isinstance(task_pool.get("metadata"), dict) else {}
+    execution = metadata.get("project_ready_execution") if isinstance(metadata.get("project_ready_execution"), dict) else {}
+    return dict(execution or {})
+
+
+def _has_contract_resume_checkpoint(coordinator: Any) -> bool:
+    execution = _load_project_ready_execution_from_coordinator(coordinator)
+    stop_reason = str(execution.get("stop_reason") or "").strip()
+    if stop_reason in _CONTRACT_RESUME_STOP_REASONS:
+        return True
+    stopped_on_task_type = str(execution.get("stopped_on_task_type") or "").strip()
+    return stopped_on_task_type in {"chapter_settings", "write_chapter"} and stop_reason in {
+        "review_required",
+        "chapter_settings_review_required",
+    }
+
+
+def _is_contract_resume_confirmation_message(message: str, coordinator: Any) -> bool:
+    if not _has_contract_resume_checkpoint(coordinator):
+        return False
+    text = str(message or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    normalized = re.sub(r"\s+", "", text.lower())
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _CONTRACT_RESUME_NEGATION_MARKERS):
+        return False
+    if normalized in _CONTRACT_RESUME_SHORT_CONFIRMATIONS:
+        return True
+    return any(marker in normalized for marker in _CONTRACT_RESUME_CONFIRMATION_MARKERS)
+
+
 def _router_result_terminal_workflow_update(router_result: Optional[Dict[str, Any]]) -> Dict[str, str]:
     delegated_result = (
         router_result.get("delegated_result")
@@ -712,48 +824,15 @@ def _match_command_alias(message: str, aliases: tuple[str, ...], allow_compact_n
 
 
 def _parse_explicit_command(message: str) -> Optional[Dict[str, Any]]:
-    text = str(message or "").strip()
-    if not text.startswith("/"):
-        return None
-
-    chapter_definition = _EXPLICIT_COMMAND_DEFINITIONS["chapter"]
-    chapter_args = _match_command_alias(
-        message,
-        tuple(chapter_definition.get("aliases") or ()),
-        allow_compact_number=True,
-    )
-    if chapter_args is not None:
-        raw_args = str(chapter_args or "").strip()
-        chapter_match = re.match(r"^(\d+)(?:\s+(.*))?$", raw_args)
-        payload: Dict[str, Any] = {
-            "name": "chapter",
-            "raw_args": raw_args,
-            "display": str(chapter_definition.get("display") or "续写章节"),
-            "chapter_number": int(chapter_match.group(1)) if chapter_match else 0,
-            "message": str(chapter_match.group(2) or "").strip() if chapter_match else raw_args,
-        }
-        return payload
-
-    for command_name, definition in _EXPLICIT_COMMAND_DEFINITIONS.items():
-        if command_name == "chapter":
-            continue
-        raw_args = _match_command_alias(message, tuple(definition.get("aliases") or ()))
-        if raw_args is None:
-            continue
-        raw_args = str(raw_args or "").strip()
-        payload: Dict[str, Any] = {
-            "name": command_name,
-            "raw_args": raw_args,
-            "display": str(definition.get("display") or command_name),
-        }
-        payload["message"] = raw_args
-        if command_name == "projectdata":
-            category = _extract_requested_knowledge_category(raw_args)
-            if category:
-                payload["category"] = category
-        return payload
-
     return None
+
+
+def _parse_workflow_control_command(message: str) -> str:
+    text = str(message or "").strip().lower()
+    if not text.startswith("/"):
+        return ""
+    command = text[1:].split(maxsplit=1)[0].strip()
+    return command if command in _WORKFLOW_CONTROL_COMMAND_NAMES else ""
 
 
 def _normalize_category_match_text(value: Any) -> str:
@@ -892,7 +971,18 @@ def _is_discussion_or_planning_request(message: str) -> bool:
         return False
     if any(marker in text for marker in DISCUSSION_OR_PLANNING_MARKERS):
         return True
+    if _is_soft_creative_enrichment_request(text):
+        return True
     return "?" in text or "？" in text
+
+
+def _is_soft_creative_enrichment_request(text: str) -> bool:
+    """“丰富/细化设定”通常是在让助手出想法，不应在智能模式下直接落入生成链。"""
+    if not any(marker in text for marker in SOFT_CREATIVE_ENRICHMENT_MARKERS):
+        return False
+    if any(marker in text for marker in HARD_CREATIVE_EXECUTION_MARKERS):
+        return False
+    return any(marker in text for marker in SOFT_CREATIVE_TARGET_MARKERS)
 
 
 def _is_conversational_revision_request(message: str) -> bool:
@@ -944,6 +1034,126 @@ def _is_project_data_generation_trigger(message: str) -> bool:
         any(action in text for action in PROJECT_DATA_ACTION_KEYWORDS)
         and any(marker in text for marker in PROJECT_DATA_OBJECT_MARKERS)
     )
+
+
+def _target_categories_from_message(message: str, intent_name: str = "") -> List[str]:
+    text = str(message or "").strip().lower()
+    categories: List[str] = []
+    category_extra_aliases = {
+        "characters": ("人设", "主角设定", "主角人设", "人物人设"),
+        "worldbuilding": ("世界观设定",),
+    }
+    for category in BUILTIN_KNOWLEDGE_CATEGORIES:
+        key = str(category.get("key") or "").strip()
+        aliases = [
+            str(category.get("name") or "").strip(),
+            *[str(item or "").strip() for item in category.get("aliases") or []],
+            *category_extra_aliases.get(key, ()),
+        ]
+        if key and any(alias and alias.lower() in text for alias in aliases):
+            categories.append(key)
+
+    intent_defaults = {
+        "create_character": "characters",
+        "create_eventlines": "eventlines",
+        "create_detail_outline": "detail_settings",
+        "create_chapter_settings": "chapter_settings",
+    }
+    default_category = intent_defaults.get(str(intent_name or "").strip())
+    if default_category and default_category not in categories:
+        categories.append(default_category)
+    return categories
+
+
+def _infer_router_operation(
+    intent_name: str,
+    message: str,
+    explicit_command: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Separate the creative topic from whether the app may execute side effects."""
+    intent = str(intent_name or "").strip()
+    text = str(message or "").strip()
+
+    if explicit_command and explicit_command.get("name") in _ROUTER_COMMAND_NAMES:
+        return "execute"
+    if intent in {"search_web", "search_trends"}:
+        return "query"
+    if intent in {"continue_write", "polish_content"}:
+        return "execute"
+    if any(token in text for token in ("保存到资料库", "写入资料库", "同步到资料库", "加入资料库", "存到资料库", "落库", "入库")):
+        return "save"
+    if _is_revision_request(text):
+        return "revise"
+    if _is_discussion_or_planning_request(text):
+        return "discuss"
+    if any(token in text for token in HARD_CREATIVE_EXECUTION_MARKERS):
+        return "execute"
+    if intent in {
+        "create_novel",
+        "create_character",
+        "create_eventlines",
+        "create_detail_outline",
+        "create_chapter_settings",
+        "create_project_data",
+    }:
+        return "execute"
+    return "discuss"
+
+
+def _build_router_execution_decision(
+    intent_name: str,
+    message: str,
+    explicit_command: Optional[Dict[str, Any]] = None,
+    confidence: float = 1.0,
+    creative_mode: str = "auto",
+) -> Dict[str, Any]:
+    """Deterministic execution gate; works the same with or without local ONNX."""
+    intent = str(intent_name or "").strip()
+    mode = _normalize_chat_creative_mode(creative_mode)
+    try:
+        confidence_value = float(confidence or 0.0)
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+
+    operation = _infer_router_operation(intent, message, explicit_command)
+    target_categories = _target_categories_from_message(message, intent)
+    side_effect_allowed = operation in {"execute", "save", "revise"}
+
+    execution_allowed = False
+    if mode == "discussion":
+        side_effect_allowed = False
+    elif mode == "plan":
+        execution_allowed = intent in CHAT_PLAN_ROUTER_INTENTS
+        side_effect_allowed = False
+        if execution_allowed:
+            operation = "plan"
+    elif mode == "execute":
+        execution_allowed = intent in _ROUTER_EXECUTION_INTENTS
+        side_effect_allowed = execution_allowed and operation != "query"
+        if execution_allowed and operation == "discuss":
+            operation = "execute"
+    elif intent in _ROUTER_EXECUTION_INTENTS and confidence_value >= AUTO_EXECUTION_CONFIDENCE_FLOOR:
+        execution_allowed = operation in {"execute", "save", "revise", "query"}
+        if operation == "query":
+            side_effect_allowed = False
+
+    if explicit_command and explicit_command.get("name") in _ROUTER_COMMAND_NAMES:
+        execution_allowed = mode != "discussion"
+        if mode == "plan":
+            operation = "plan"
+            side_effect_allowed = False
+        else:
+            side_effect_allowed = execution_allowed and operation != "query"
+
+    return {
+        "intent": intent,
+        "operation": operation,
+        "target_categories": target_categories,
+        "side_effect_allowed": bool(side_effect_allowed),
+        "execution_allowed": bool(execution_allowed),
+        "confidence": confidence_value,
+        "creative_mode": mode,
+    }
 
 
 def _is_continue_write_trigger(message: str) -> bool:
@@ -1149,14 +1359,14 @@ def _should_execute_via_router(
     explicit_command: Optional[Dict[str, Any]] = None,
     confidence: float = 1.0,
 ) -> bool:
-    intent = str(intent_name or "").strip()
-    if intent not in _ROUTER_EXECUTION_INTENTS:
-        return False
-    if explicit_command and explicit_command.get("name") in _ROUTER_COMMAND_NAMES:
-        return True
-    if float(confidence or 0.0) < AUTO_EXECUTION_CONFIDENCE_FLOOR:
-        return False
-    return True
+    decision = _build_router_execution_decision(
+        intent_name=intent_name,
+        message=message,
+        explicit_command=explicit_command,
+        confidence=confidence,
+        creative_mode="auto",
+    )
+    return bool(decision.get("execution_allowed"))
 
 
 def _downgrade_discussion_routing_hint(
@@ -1165,8 +1375,43 @@ def _downgrade_discussion_routing_hint(
     targeted_command: Optional[Dict[str, Any]],
     active_model: str,
 ) -> Optional[Dict[str, Any]]:
-    """Preserve model-selected routing; natural language intent is not locally downgraded."""
-    return routing_hint
+    """Route advice/planning phrasing to chat even if the model spots creative keywords."""
+    if not isinstance(routing_hint, dict) or not routing_hint:
+        return routing_hint
+    if targeted_command and targeted_command.get("name") in _ROUTER_COMMAND_NAMES:
+        return routing_hint
+
+    intent = str(routing_hint.get("intent") or "").strip()
+    if intent not in _ROUTER_EXECUTION_INTENTS:
+        return routing_hint
+    try:
+        previous_confidence = float(routing_hint.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        previous_confidence = 0.0
+    decision = _build_router_execution_decision(
+        intent_name=intent,
+        message=processed_message,
+        explicit_command=targeted_command,
+        confidence=previous_confidence,
+        creative_mode=str(routing_hint.get("creative_mode") or "auto"),
+    )
+    if decision.get("execution_allowed") or decision.get("operation") != "discuss":
+        return routing_hint
+
+    downgraded = dict(routing_hint)
+    downgraded["intent"] = "general_chat"
+    downgraded["target_agent"] = "Communicator"
+    downgraded["fallback_intent"] = intent
+    downgraded["confidence"] = max(previous_confidence, 0.9)
+    downgraded["execution_decision"] = decision
+    downgraded["operation"] = decision.get("operation")
+    downgraded["side_effect_allowed"] = False
+    if active_model:
+        downgraded["model"] = active_model
+        downgraded["current_model"] = active_model
+        downgraded["active_model"] = active_model
+        downgraded["model_used"] = active_model
+    return downgraded
 
 
 def _infer_communicator_response_mode(
@@ -1222,13 +1467,19 @@ def _build_router_context(
     if isinstance(explicit_command, dict):
         context["explicit_command"] = dict(explicit_command)
 
+    routing_decision = _build_router_execution_decision(
+        intent_name=intent_name,
+        message=message,
+        explicit_command=explicit_command,
+        confidence=1.0,
+        creative_mode=effective_mode,
+    )
+    context["routing_decision"] = routing_decision
+    context["operation"] = routing_decision.get("operation")
+    context["side_effect_allowed"] = routing_decision.get("side_effect_allowed")
+
     if intent_name == "create_novel":
-        should_auto_execute = bool(
-            effective_mode in {"auto", "execute"}
-            or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
-        )
-        if effective_mode in {"discussion", "plan"}:
-            should_auto_execute = False
+        should_auto_execute = bool(routing_decision.get("execution_allowed") and routing_decision.get("side_effect_allowed"))
         context["auto_execute"] = should_auto_execute
         context["requires_confirmation"] = not should_auto_execute
         context["creation_requirements"] = _normalize_creation_requirements(
@@ -1241,8 +1492,7 @@ def _build_router_context(
         requested_category = _extract_requested_knowledge_category(message)
         requires_manual_category_selection = bool(requested_category and not requested_category.get("builtin"))
         should_auto_execute = bool(
-            effective_mode in {"auto", "execute"}
-            or (isinstance(explicit_command, dict) and str(explicit_command.get("name") or "").strip() in _ROUTER_COMMAND_NAMES)
+            (routing_decision.get("execution_allowed") and routing_decision.get("side_effect_allowed"))
             or (context.get("chat_auto_save_enabled") and not requires_manual_category_selection)
         )
         if effective_mode in {"discussion", "plan"}:
@@ -1256,7 +1506,7 @@ def _build_router_context(
         else:
             context["character_request_mode"] = "save" if (effective_mode == "execute" or is_save_request or context.get("chat_auto_save_enabled")) else "draft"
     elif intent_name in {"create_eventlines", "create_detail_outline", "create_chapter_settings"}:
-        context["auto_execute"] = effective_mode in {"auto", "execute"}
+        context["auto_execute"] = bool(routing_decision.get("execution_allowed") and routing_decision.get("side_effect_allowed"))
         context["requires_confirmation"] = False
     elif intent_name == "create_project_data":
         explicit_category = (
@@ -1265,11 +1515,11 @@ def _build_router_context(
             else None
         )
         requested_category = explicit_category or _extract_target_project_data_category(message)
-        context["auto_execute"] = effective_mode in {"auto", "execute"}
+        context["auto_execute"] = bool(routing_decision.get("execution_allowed") and routing_decision.get("side_effect_allowed"))
         context["requires_confirmation"] = False
         context["requested_knowledge_category"] = requested_category
     elif intent_name == "continue_write":
-        context["auto_execute"] = effective_mode in {"auto", "execute"}
+        context["auto_execute"] = bool(routing_decision.get("execution_allowed"))
 
     return context
 
@@ -1515,6 +1765,14 @@ def _handle_workflow_control(
         }
 
     if action == "resume":
+        if _has_contract_resume_checkpoint(coordinator):
+            return {
+                "reply": "正在继续执行已确认的创作任务池。",
+                "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+                "workflow": _workflow_public_snapshot(active_run),
+                "resume_contract_flow": True,
+                "handled": True,
+            }
         if active_run is None and current_state != "paused":
             return {
                 "reply": "当前没有处于暂停中的活动创作任务，无法直接恢复。",
@@ -1679,6 +1937,18 @@ async def _build_chat_routing_hint(
             logger.debug(f"[Chat] intent analysis failed: {analyze_error}")
     if routing_hint:
         routing_hint["creative_mode"] = _normalize_chat_creative_mode(creative_mode)
+        decision = _build_router_execution_decision(
+            intent_name=str(routing_hint.get("intent") or ""),
+            message=processed_message,
+            explicit_command=targeted_command,
+            confidence=float(routing_hint.get("confidence", 0.0) or 0.0),
+            creative_mode=creative_mode,
+        )
+        routing_hint["operation"] = decision.get("operation")
+        routing_hint["target_categories"] = decision.get("target_categories")
+        routing_hint["side_effect_allowed"] = decision.get("side_effect_allowed")
+        routing_hint["execution_allowed"] = decision.get("execution_allowed")
+        routing_hint["execution_decision"] = decision
     return routing_hint
 
 
@@ -1716,12 +1986,22 @@ def _prepare_chat_request(
                 "handled_control": interrupted,
             }
 
+    if _is_contract_resume_confirmation_message(processed_message, coordinator):
+        return {
+            "ok": True,
+            "security_reply": "",
+            "processed_message": processed_message,
+            "targeted_command": None,
+            "handled_control": {
+                "reply": "正在继续执行已确认的创作任务池。",
+                "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+                "resume_contract_flow": True,
+                "handled": True,
+            },
+        }
+
     targeted_command = _parse_explicit_command(processed_message)
-    workflow_control = (
-        str(targeted_command.get("name") or "")
-        if targeted_command and targeted_command.get("name") in _WORKFLOW_CONTROL_COMMAND_NAMES
-        else ""
-    )
+    workflow_control = _parse_workflow_control_command(processed_message)
     handled_control = _handle_workflow_control(workflow_control, session_key, session_id, coordinator)
 
     return {
@@ -1764,26 +2044,21 @@ def _should_execute_router_request(
 ) -> bool:
     mode = _normalize_chat_creative_mode(creative_mode)
     intent = str((routing_hint or {}).get("intent") or "").strip()
-    if mode == "discussion":
+    if not router_agent or not routing_hint:
         return False
-    if mode == "plan":
-        return bool(router_agent and routing_hint and str(routing_hint.get("intent") or "").strip() in CHAT_PLAN_ROUTER_INTENTS)
-    if mode == "execute":
-        return bool(router_agent and routing_hint and intent in _ROUTER_EXECUTION_INTENTS)
-    return bool(
-        router_agent
-        and routing_hint
-        and (
-            (targeted_command and targeted_command.get("name") in _ROUTER_COMMAND_NAMES)
-            or _should_execute_via_router(
-                routing_hint.get("intent", ""),
-                processed_message,
-                agent,
-                explicit_command=targeted_command,
-                confidence=float(routing_hint.get("confidence", 0.0) or 0.0),
-            )
-        )
+    decision = _build_router_execution_decision(
+        intent_name=intent,
+        message=processed_message,
+        explicit_command=targeted_command,
+        confidence=float(routing_hint.get("confidence", 0.0) or 0.0),
+        creative_mode=mode,
     )
+    routing_hint["operation"] = decision.get("operation")
+    routing_hint["target_categories"] = decision.get("target_categories")
+    routing_hint["side_effect_allowed"] = decision.get("side_effect_allowed")
+    routing_hint["execution_allowed"] = decision.get("execution_allowed")
+    routing_hint["execution_decision"] = decision
+    return bool(decision.get("execution_allowed"))
 
 
 def _register_router_workflow_run(
@@ -1849,6 +2124,25 @@ def _merge_router_delegated_info(agent: Any, router_result: Optional[Dict[str, A
     return delegated_result
 
 
+def _extract_runtime_messages_from_trace(trace: Any, limit: int = 12) -> List[Dict[str, Any]]:
+    if not isinstance(trace, dict):
+        return []
+    messages: List[Dict[str, Any]] = []
+    for event in trace.get("events", []) or []:
+        if isinstance(event, dict) and isinstance(event.get("runtime_message"), dict):
+            messages.append(event["runtime_message"])
+    for runtime_event in trace.get("runtime_events", []) or []:
+        if not isinstance(runtime_event, dict):
+            continue
+        payload = runtime_event.get("payload")
+        if isinstance(payload, dict) and isinstance(payload.get("runtime_message"), dict):
+            message = payload["runtime_message"]
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id or not any(str(item.get("message_id") or "").strip() == message_id for item in messages):
+                messages.append(message)
+    return messages[-max(1, int(limit or 12)):]
+
+
 def _merge_delegated_runtime_payload(target: Dict[str, Any], delegated_result: Optional[Dict[str, Any]]) -> None:
     if not isinstance(target, dict) or not isinstance(delegated_result, dict):
         return
@@ -1857,6 +2151,11 @@ def _merge_delegated_runtime_payload(target: Dict[str, Any], delegated_result: O
         value = params.get(key)
         if isinstance(value, dict) and value:
             target[key] = value
+            if key == "collab_execution_trace":
+                runtime_messages = _extract_runtime_messages_from_trace(value)
+                if runtime_messages:
+                    target["runtime_messages"] = runtime_messages
+                    target["runtime_message"] = runtime_messages[-1]
     project_ready_task_execution = params.get("project_ready_task_execution")
     if isinstance(project_ready_task_execution, dict) and project_ready_task_execution:
         target["project_ready_task_execution"] = project_ready_task_execution
@@ -2080,6 +2379,182 @@ async def _resume_creative_workflow_response(
         "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
         "delegated_result": delegated_result,
         "routed_to": router_result.get("routed_to"),
+        "workflow": workflow_snapshot,
+        "created_files": (workflow_snapshot or {}).get("created_files", []),
+        "updated_files": (workflow_snapshot or {}).get("updated_files", []),
+        "reused_files": (workflow_snapshot or {}).get("reused_files", []),
+        "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
+    }
+    _merge_delegated_runtime_payload(response_payload, delegated_result)
+    return JSONResponse(response_payload)
+
+
+def _build_contract_resume_reply(executed_count: int, stop_reason: str) -> str:
+    if stop_reason == "review_required":
+        return f"已续跑 {executed_count} 个任务，仍停在审阅断点。请审阅后再继续。"
+    if stop_reason == "chapter_settings_review_required":
+        return "章纲设定尚未确认，已暂停正文创作，不会提前创建正文章节文件。"
+    if stop_reason in {"max_tasks_reached", "max_chapter_tasks_reached"}:
+        return f"已续跑 {executed_count} 个任务，达到本次批量上限。可以继续发送“继续创作”接着写。"
+    if stop_reason == "task_failed":
+        return f"已续跑 {executed_count} 个任务，最后一个任务失败，请检查任务池状态。"
+    if not stop_reason:
+        return f"已续跑 {executed_count} 个任务，任务池暂无新的就绪任务。"
+    return f"已续跑 {executed_count} 个任务，停止原因：{stop_reason}。"
+
+
+def _contract_resume_status_from_stop_reason(stop_reason: str) -> str:
+    if stop_reason == "task_failed":
+        return "failed"
+    if stop_reason in _CONTRACT_RESUME_STOP_REASONS:
+        return "needs_confirmation"
+    return "completed"
+
+
+def _contract_resume_stage_from_stop_reason(stop_reason: str) -> str:
+    if stop_reason == "task_failed":
+        return "failed"
+    if stop_reason in {"review_required", "chapter_settings_review_required"}:
+        return "awaiting_confirmation"
+    if stop_reason in {"max_tasks_reached", "max_chapter_tasks_reached"}:
+        return "awaiting_continue"
+    return "completed"
+
+
+async def _resume_contract_workflow_response(
+    *,
+    session_key: str,
+    session_id: str,
+    project_id: str,
+    store: Any,
+    coordinator: Any,
+    active_run: Optional[Dict[str, Any]],
+) -> JSONResponse:
+    if coordinator is None:
+        return JSONResponse({
+            "reply": "当前协调器不可用，无法继续创作任务池。",
+            "is_complete": False,
+            "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+            "workflow": _workflow_public_snapshot(active_run),
+        })
+    project_manager = getattr(coordinator, "project_manager", None)
+    load_state = getattr(project_manager, "load_project_state", None)
+    if not callable(load_state):
+        return JSONResponse({
+            "reply": "当前项目没有可续跑的任务池。",
+            "is_complete": False,
+            "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+            "workflow": _workflow_public_snapshot(active_run),
+        })
+
+    contract_payload = load_state("creation_contract", default={})
+    existing_pool = load_state("task_pool", default={})
+    if not isinstance(contract_payload, dict) or not contract_payload or not isinstance(existing_pool, dict) or not existing_pool.get("tasks"):
+        return JSONResponse({
+            "reply": "当前项目没有可续跑的创作合同或任务池，请先发起并确认创作合同。",
+            "is_complete": False,
+            "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+            "workflow": _workflow_public_snapshot(active_run),
+        })
+
+    if not isinstance(active_run, dict):
+        active_run = _register_active_workflow(session_key, {
+            "session_id": session_id,
+            "project_id": project_id,
+            "command": "contract_resume",
+            "target_agent": "Coordinator",
+            "current_agent": "Coordinator",
+        })
+    _apply_workflow_update(active_run, {
+        "status": "running",
+        "stage": "contract_resume",
+        "current_agent": "Coordinator",
+        "content": "正在沿用已确认合同和现有任务池继续创作。",
+    })
+
+    review_state = load_state("chapter_settings_review", default={})
+    approve_review = getattr(coordinator, "approve_chapter_settings_review", None)
+    if callable(approve_review):
+        try:
+            review_state = approve_review()
+        except Exception as exc:
+            logger.debug(f"[Chat] approve chapter settings review skipped: {exc}")
+    elif isinstance(review_state, dict):
+        review_state.update({
+            "approved": True,
+            "approved_at": _now_iso(),
+            "status": "approved",
+        })
+        save_state = getattr(project_manager, "save_project_state", None)
+        if callable(save_state):
+            save_state("chapter_settings_review", review_state)
+
+    ready_task_result = await coordinator.execute_project_ready_tasks(
+        max_tasks=7,
+        max_chapter_tasks=2,
+    )
+    if not isinstance(ready_task_result, dict):
+        ready_task_result = {}
+    task_pool = ready_task_result.get("task_pool") if isinstance(ready_task_result.get("task_pool"), dict) else existing_pool
+    collab_execution_trace = load_state("collab_execution_trace", default={})
+    project_ready_execution = ready_task_result.get("project_ready_execution")
+    if not isinstance(project_ready_execution, dict):
+        project_ready_execution = (
+            task_pool.get("metadata", {}).get("project_ready_execution", {})
+            if isinstance(task_pool, dict) and isinstance(task_pool.get("metadata"), dict)
+            else {}
+        )
+    if not isinstance(project_ready_execution, dict):
+        project_ready_execution = {}
+    stop_reason = str(project_ready_execution.get("stop_reason") or ready_task_result.get("stop_reason") or "").strip()
+    stopped_on_task_type = str(project_ready_execution.get("stopped_on_task_type") or ready_task_result.get("stopped_on_task_type") or "").strip()
+    executed_count = int(project_ready_execution.get("executed_task_count") or ready_task_result.get("executed_task_count") or 0)
+    reply_text = _build_contract_resume_reply(executed_count, stop_reason)
+    status = _contract_resume_status_from_stop_reason(stop_reason)
+    stage = _contract_resume_stage_from_stop_reason(stop_reason)
+
+    _apply_workflow_update(active_run, {
+        "status": status,
+        "stage": stage,
+        "current_agent": "Coordinator",
+        "stop_reason": stop_reason,
+        "stopped_on_task_type": stopped_on_task_type,
+        "awaiting_user_review": stop_reason in {"review_required", "chapter_settings_review_required"},
+        "resume_endpoint": "/api/v1/contract/resume" if stop_reason in _CONTRACT_RESUME_STOP_REASONS else "",
+        "content": reply_text,
+    })
+    workflow_snapshot = _workflow_public_snapshot(active_run)
+    delegated_result = {
+        "agent_name": "Coordinator",
+        "action": "contract_resume",
+        "response": reply_text,
+        "is_complete": status == "completed",
+        "params": {
+            "creation_contract": contract_payload,
+            "task_pool": task_pool,
+            "collab_execution_trace": collab_execution_trace,
+            "project_ready_task_execution": ready_task_result,
+            "project_ready_execution": project_ready_execution,
+            "stop_reason": stop_reason,
+            "stopped_on_task_type": stopped_on_task_type,
+            "awaiting_user_review": stop_reason in {"review_required", "chapter_settings_review_required"},
+        },
+    }
+
+    lock = await _get_chat_session_lock(session_key)
+    async with lock:
+        agent = await _ensure_chat_agent(session_key, session_id, project_id, store, None)
+        _append_agent_history(agent, "user", "继续创作")
+        _append_agent_history(agent, "assistant", reply_text)
+        _persist_chat_session(store, session_id, project_id, agent)
+
+    response_payload = {
+        "reply": reply_text,
+        "is_complete": status == "completed",
+        "routed": True,
+        "routing": {"intent": "project_manage", "target_agent": "Coordinator", "confidence": 1.0},
+        "delegated_result": delegated_result,
+        "routed_to": "Coordinator",
         "workflow": workflow_snapshot,
         "created_files": (workflow_snapshot or {}).get("created_files", []),
         "updated_files": (workflow_snapshot or {}).get("updated_files", []),
@@ -2452,6 +2927,15 @@ async def chat(request: ChatRequest):
     except Exception as exc:
         logger.warning(f"[Chat] story memory action skipped: {exc}")
     if handled_control:
+        if handled_control.get("resume_contract_flow"):
+            return await _resume_contract_workflow_response(
+                session_key=session_key,
+                session_id=session_id,
+                project_id=project_id,
+                store=store,
+                coordinator=coordinator,
+                active_run=_get_workflow_record(session_key, session_id),
+            )
         if handled_control.get("resume_workflow"):
             return await _resume_creative_workflow_response(
                 session_key=session_key,
@@ -2672,6 +3156,22 @@ async def chat_stream(request: ChatRequest):
     handled_control = prepared["handled_control"]
     if handled_control:
         async def control_gen():
+            if handled_control.get("resume_contract_flow"):
+                response = await _resume_contract_workflow_response(
+                    session_key=session_key,
+                    session_id=session_id,
+                    project_id=project_id,
+                    store=store,
+                    coordinator=coordinator,
+                    active_run=_get_workflow_record(session_key, session_id),
+                )
+                payload = json.loads(response.body.decode("utf-8"))
+                if payload.get("reply"):
+                    yield f"data: {json.dumps({'type': 'chunk', 'content': payload['reply']}, ensure_ascii=False)}\n\n"
+                if payload.get("workflow"):
+                    yield f"data: {json.dumps({'type': 'workflow', 'workflow': payload['workflow']}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done', **payload}, ensure_ascii=False)}\n\n"
+                return
             if handled_control.get("resume_workflow"):
                 response = await _resume_creative_workflow_response(
                     session_key=session_key,
@@ -2745,7 +3245,28 @@ async def chat_stream(request: ChatRequest):
                 _apply_workflow_update(active_run, update)
                 workflow_snapshot = _workflow_public_snapshot(active_run)
                 if workflow_snapshot:
-                    await queue.put({"type": "workflow", "workflow": workflow_snapshot})
+                    runtime_message = update.get("runtime_message") if isinstance(update, dict) else None
+                    if not isinstance(runtime_message, dict):
+                        runtime_message = make_runtime_message(
+                            role="event",
+                            message_type="workflow",
+                            content={"workflow": workflow_snapshot},
+                            trace_id=str(workflow_snapshot.get("run_id") or "").strip(),
+                            agent_name=str(
+                                workflow_snapshot.get("current_agent")
+                                or workflow_snapshot.get("target_agent")
+                                or ""
+                            ).strip(),
+                            metadata={
+                                "stage": str(workflow_snapshot.get("stage") or "").strip(),
+                                "status": str(workflow_snapshot.get("status") or "").strip(),
+                            },
+                        ).to_dict()
+                    await queue.put({
+                        "type": "workflow",
+                        "workflow": workflow_snapshot,
+                        "runtime_message": runtime_message,
+                    })
 
             async def runner():
                 try:
@@ -2782,7 +3303,10 @@ async def chat_stream(request: ChatRequest):
                     if event_type == "workflow":
                         workflow_payload = event.get("workflow")
                         if workflow_payload:
-                            yield f"data: {json.dumps({'type': 'workflow', 'workflow': workflow_payload}, ensure_ascii=False)}\n\n"
+                            workflow_event = {"type": "workflow", "workflow": workflow_payload}
+                            if isinstance(event.get("runtime_message"), dict):
+                                workflow_event["runtime_message"] = event["runtime_message"]
+                            yield f"data: {json.dumps(workflow_event, ensure_ascii=False)}\n\n"
                         continue
 
                     if event_type == "router_done":
@@ -2828,6 +3352,22 @@ async def chat_stream(request: ChatRequest):
                             "output_dir": (workflow_snapshot or {}).get("output_dir", ""),
                         }
                         _merge_delegated_runtime_payload(done_payload, delegated_result)
+                        if not isinstance(done_payload.get("runtime_message"), dict) and workflow_snapshot:
+                            done_payload["runtime_message"] = make_runtime_message(
+                                role="event",
+                                message_type="workflow",
+                                content={"workflow": workflow_snapshot},
+                                trace_id=str((workflow_snapshot or {}).get("run_id") or "").strip(),
+                                agent_name=str(
+                                    (workflow_snapshot or {}).get("current_agent")
+                                    or (workflow_snapshot or {}).get("target_agent")
+                                    or ""
+                                ).strip(),
+                                metadata={
+                                    "stage": str((workflow_snapshot or {}).get("stage") or "").strip(),
+                                    "status": str((workflow_snapshot or {}).get("status") or "").strip(),
+                                },
+                            ).to_dict()
                         decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
                         _merge_creative_decision_result(done_payload, decision_result)
                         auto_save_result = None
@@ -2859,8 +3399,18 @@ async def chat_stream(request: ChatRequest):
                             "content": f"执行失败：{str(event.get('message') or '')}",
                         })
                         workflow_snapshot = _workflow_public_snapshot(active_run)
-                        yield f"data: {json.dumps({'type': 'workflow', 'workflow': workflow_snapshot}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'type': 'error', 'message': event.get('message', ''), 'workflow': workflow_snapshot}, ensure_ascii=False)}\n\n"
+                        runtime_message = make_runtime_message(
+                            role="system",
+                            message_type="error",
+                            content={
+                                "message": event.get("message", ""),
+                                "workflow": workflow_snapshot,
+                            },
+                            trace_id=str((workflow_snapshot or {}).get("run_id") or "").strip(),
+                            agent_name=str((workflow_snapshot or {}).get("current_agent") or "").strip(),
+                        ).to_dict()
+                        yield f"data: {json.dumps({'type': 'workflow', 'workflow': workflow_snapshot, 'runtime_message': runtime_message}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'type': 'error', 'message': event.get('message', ''), 'workflow': workflow_snapshot, 'runtime_message': runtime_message}, ensure_ascii=False)}\n\n"
                         break
             except Exception as e:
                 logger.error(f"[Chat Stream Routed] error: {e}")
@@ -2871,8 +3421,18 @@ async def chat_stream(request: ChatRequest):
                     "content": f"执行失败：{str(e)}",
                 })
                 workflow_snapshot = _workflow_public_snapshot(active_run)
-                yield f"data: {json.dumps({'type': 'workflow', 'workflow': workflow_snapshot}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e), 'workflow': workflow_snapshot}, ensure_ascii=False)}\n\n"
+                runtime_message = make_runtime_message(
+                    role="system",
+                    message_type="error",
+                    content={
+                        "message": str(e),
+                        "workflow": workflow_snapshot,
+                    },
+                    trace_id=str((workflow_snapshot or {}).get("run_id") or "").strip(),
+                    agent_name=str((workflow_snapshot or {}).get("current_agent") or "").strip(),
+                ).to_dict()
+                yield f"data: {json.dumps({'type': 'workflow', 'workflow': workflow_snapshot, 'runtime_message': runtime_message}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e), 'workflow': workflow_snapshot, 'runtime_message': runtime_message}, ensure_ascii=False)}\n\n"
             finally:
                 if not runner_task.done():
                     runner_task.cancel()

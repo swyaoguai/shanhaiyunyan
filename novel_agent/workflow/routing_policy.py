@@ -82,6 +82,17 @@ class RoutingPolicy:
                 return rule
         return None
 
+    def required_context_keys_for(self, task_type: str, stage: str = "") -> List[str]:
+        """Return required context keys for the matching explicit route, if any."""
+        rule = self._match_rule(task_type, stage)
+        if rule is None:
+            return []
+        return [
+            str(item or "").strip()
+            for item in (rule.required_context_keys or [])
+            if str(item or "").strip()
+        ]
+
     def resolve(
         self,
         *,
@@ -146,6 +157,30 @@ class RoutingPolicy:
         preferred = str(rule.preferred_agent_name or "").strip()
         fixed_agent_name = str(fallback_agent_name or "").strip()
 
+        # 优先使用能力注册表给出的候选，规则表只用于在候选中挑选首选项。
+        # 如果没有候选，再尝试 fixed fallback，避免普通动态任务绕过注册表。
+        if candidate_names:
+            selected_agent_name = preferred if preferred in candidate_names else ""
+            if not selected_agent_name and not (
+                rule.allow_fixed_agent
+                and fixed_agent_name
+                and fixed_agent_name == preferred
+            ):
+                selected_agent_name = candidate_names[0]
+            if selected_agent_name:
+                return RouteDecision(
+                    agent_name=selected_agent_name,
+                    route_reason=(
+                        f"matched explicit route {task_type}"
+                        + (f"@{stage}" if stage else "")
+                        + f" via capability candidate {selected_agent_name}"
+                    ),
+                    candidate_source="capability_registry",
+                    candidate_names=candidate_names,
+                    required_context_keys=list(rule.required_context_keys or []),
+                    fallback_agent_names=[str(fallback_agent_name or "").strip()] if str(fallback_agent_name or "").strip() else [],
+                )
+
         if rule.allow_fixed_agent and fixed_agent_name and fixed_agent_name == preferred:
             names = list(candidate_names or [])
             if fixed_agent_name not in names:
@@ -163,22 +198,22 @@ class RoutingPolicy:
                 fallback_agent_names=[fixed_agent_name],
             )
 
-        # 优先使用能力注册表给出的候选，规则表只用于在候选中挑选首选项。
-        # 如果没有候选，再尝试 fixed fallback，避免普通动态任务绕过注册表。
-        if candidate_names:
-            selected_agent_name = preferred if preferred in candidate_names else candidate_names[0]
-            return RouteDecision(
-                agent_name=selected_agent_name,
-                route_reason=(
-                    f"matched explicit route {task_type}"
-                    + (f"@{stage}" if stage else "")
-                    + f" via capability candidate {selected_agent_name}"
-                ),
-                candidate_source="capability_registry",
-                candidate_names=candidate_names,
-                required_context_keys=list(rule.required_context_keys or []),
-                fallback_agent_names=[str(fallback_agent_name or "").strip()] if str(fallback_agent_name or "").strip() else [],
-            )
+        if rule.allow_fixed_agent and preferred and capability_registry is not None:
+            get_agent = getattr(capability_registry, "get_agent", None)
+            preferred_agent = get_agent(preferred) if callable(get_agent) else None
+            if preferred_agent is not None:
+                return RouteDecision(
+                    agent_name=preferred,
+                    route_reason=(
+                        f"matched explicit route {task_type}"
+                        + (f"@{stage}" if stage else "")
+                        + f" via fixed preferred agent {preferred}"
+                    ),
+                    candidate_source="fixed_route_rule",
+                    candidate_names=[preferred],
+                    required_context_keys=list(rule.required_context_keys or []),
+                    fallback_agent_names=[fixed_agent_name] if fixed_agent_name else [],
+                )
 
         # 最后尝试 fallback_agent_name
         if rule.allow_fixed_agent and fixed_agent_name:

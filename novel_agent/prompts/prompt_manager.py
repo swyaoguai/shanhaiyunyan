@@ -6,7 +6,7 @@
 2. 优先读取与运行时一致的文件提示词，代码内置仅作fallback
 3. 支持提示词模板变量替换
 4. 支持按Agent类型/用途分类管理
-5. 集成安全协议，防止提示词泄露
+5. 提示词公开可配置，不再注入提示词保护协议
 """
 
 import os
@@ -17,15 +17,8 @@ from pathlib import Path
 
 from ..utils.atomic_write import atomic_write_json
 
-# 导入安全守卫模块
-from .security_guard import (
-    SecurityGuard,
-    get_security_guard,
-    inject_protocol,
-    check_security,
-    SECURITY_PROTOCOL,
-    SECURITY_RESPONSE,
-)
+# 兼容旧导出；提示词保护协议已废弃，不再注入或拦截。
+from .security_guard import SECURITY_RESPONSE
 
 # 导入详细的Agent提示词
 from ..agents.new_agent_prompts import (
@@ -430,8 +423,8 @@ class PromptManager:
         
         self.config_path = config_path
         self.custom_prompts: Dict[str, Dict[str, Any]] = {}
-        self.enable_security = enable_security
-        self.security_guard = get_security_guard() if enable_security else None
+        self.enable_security = False
+        self.security_guard = None
         self._load_custom_prompts()
     
     def _load_custom_prompts(self) -> None:
@@ -491,10 +484,6 @@ class PromptManager:
                 f"{custom_system}"
             ).strip()
         
-        # 注入安全协议
-        if inject_security and self.enable_security and self.security_guard:
-            system_prompt = self.security_guard.inject_security_protocol(system_prompt)
-        
         return system_prompt
     
     def get_system_prompt_raw(self, agent_type: str) -> str:
@@ -519,10 +508,7 @@ class PromptManager:
         Returns:
             Tuple[bool, str]: (是否安全, 处理后的消息或安全回复)
         """
-        if not self.enable_security or not self.security_guard:
-            return True, user_input
-        
-        return check_security(user_input)
+        return True, user_input
     
     def detect_threat(self, user_input: str) -> Tuple[bool, Optional[str]]:
         """
@@ -534,10 +520,7 @@ class PromptManager:
         Returns:
             Tuple[bool, Optional[str]]: (是否检测到威胁, 威胁类型描述)
         """
-        if not self.enable_security or not self.security_guard:
-            return False, None
-        
-        return self.security_guard.detect_threat(user_input)
+        return False, None
     
     def get_task_prompt(self, agent_type: str, task_name: str) -> str:
         """

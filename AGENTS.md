@@ -47,12 +47,16 @@ python build_release.py
 
 Notes:
 - The build scripts expect PyInstaller, and final installer EXE output requires Inno Setup (`ISCC.exe`).
-- The release script builds exactly two Windows installer EXE files in `dist/`: a lightweight version without the local ONNX model and a local-model version with `novel_agent/models/embedding/default` bundled.
+- The release script builds exactly one Windows installer EXE file in `dist/`: the local-model version with `novel_agent/models/embedding/default` bundled. Do not publish the no-ONNX/lite installer.
 - Release builds do not generate zip archives. `build_portable.py` is kept only for local portable-directory checks and also no longer creates zip files.
 - The build scripts package `run.py`, bundle `novel_agent/web/static`, `novel_agent/web/templates`, `novel_agent/prompts`, Skills, and a clean release data copy.
 
 ### No lint command
 - There is no dedicated root lint script in `package.json` or repo-level documented lint command. Do not invent one in changes or docs.
+
+### Update log
+- Record future version updates, bug fixes, UX changes, and test/build changes in `CHANGELOG.md`.
+- Keep entries concise. The current product version line starts at `v1.0.0`; during future development, add pending items under `[未发布]` only when a release section has not been chosen yet.
 
 ## High-level architecture
 

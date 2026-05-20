@@ -99,6 +99,90 @@ _TIMELINE_PATTERNS = [
     re.compile(r"\d{1,2}点(?:\d{1,2}分)?"),
 ]
 
+_LOCATION_SUFFIXES = (
+    "城",
+    "镇",
+    "村",
+    "国",
+    "界",
+    "域",
+    "州",
+    "郡",
+    "府",
+    "宫",
+    "殿",
+    "山",
+    "峰",
+    "谷",
+    "海",
+    "湖",
+    "河",
+    "岛",
+    "塔",
+    "楼",
+    "阁",
+    "林",
+    "原",
+    "关",
+    "境",
+    "秘境",
+)
+
+_FACTION_SUFFIXES = (
+    "宗",
+    "门",
+    "派",
+    "盟",
+    "教",
+    "会",
+    "族",
+    "军",
+    "楼",
+    "阁",
+    "府",
+)
+
+_ITEM_SUFFIXES = (
+    "剑",
+    "刀",
+    "枪",
+    "灯",
+    "珠",
+    "令",
+    "图",
+    "书",
+    "卷",
+    "鼎",
+    "印",
+    "符",
+    "甲",
+    "衣",
+    "戒",
+    "瓶",
+    "丹",
+    "镜",
+    "铃",
+    "玉",
+    "石",
+    "钥",
+    "牌",
+)
+
+_WORLD_RULE_KEYWORDS = (
+    "修炼",
+    "境界",
+    "灵力",
+    "法术",
+    "魔法",
+    "异能",
+    "血脉",
+    "禁忌",
+    "系统",
+    "科技",
+    "规则",
+    "代价",
+)
+
 
 class NovelImportService:
     """Shared import parser and mode-isolated memory writer."""
@@ -357,6 +441,851 @@ class NovelImportService:
             normalized.append(hydrated)
         return normalized
 
+    def build_project_materials(
+        self,
+        project_id: str,
+        source_file: str,
+        chapters: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Reverse-extract project materials from imported novel chapters."""
+        normalized = self._normalize_chapters(chapters)
+        now = datetime.now().isoformat()
+        source_title = Path(source_file or "导入小说").stem or "导入小说"
+        character_stats = self._collect_character_stats(normalized)
+        character_names = set(character_stats.keys())
+        items = self._build_reverse_item_rows(normalized, character_names, now, source_file)
+
+        return {
+            "project_id": project_id,
+            "source_file": source_file,
+            "updated_at": now,
+            "outline": self._build_reverse_outline(source_title, normalized, now),
+            "characters": self._build_reverse_character_cards(character_stats, normalized, now, source_file),
+            "worldbuilding": self._build_reverse_worldbuilding(
+                source_title,
+                normalized,
+                character_names,
+                items,
+                now,
+            ),
+            "items": items,
+            "chapter_summary": self._build_reverse_chapter_summaries(normalized, now, source_file),
+            "eventlines": self._build_reverse_eventlines(normalized, character_stats, now, source_file),
+        }
+
+    def supplement_project_materials(
+        self,
+        project_manager: Any,
+        source_file: str,
+        chapters: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Fill missing project materials without overwriting user-authored data."""
+        project_id = str(getattr(project_manager, "current_project_id", "") or "").strip()
+        if not project_id:
+            return {
+                "success": False,
+                "error": "no current project",
+                "data_types": {},
+                "total_added": 0,
+                "total_updated": 0,
+            }
+
+        materials = self.build_project_materials(
+            project_id=project_id,
+            source_file=source_file,
+            chapters=chapters,
+        )
+        summary: Dict[str, Any] = {
+            "success": True,
+            "source_file": source_file,
+            "data_types": {},
+            "total_added": 0,
+            "total_updated": 0,
+        }
+
+        for data_type in ("outline", "characters", "worldbuilding", "items", "chapter_summary", "eventlines"):
+            generated = materials.get(data_type)
+            existing = project_manager.load_project_data(data_type)
+            merged, stats = self._merge_material_payload(data_type, existing, generated)
+            if stats["added"] or stats["updated"]:
+                project_manager.save_project_data(data_type, merged)
+                stats["changed"] = True
+            summary["data_types"][data_type] = stats
+            summary["total_added"] += stats["added"]
+            summary["total_updated"] += stats["updated"]
+
+        return summary
+
+    def _merge_material_payload(self, data_type: str, existing: Any, generated: Any) -> tuple[Any, Dict[str, Any]]:
+        if data_type == "outline":
+            return self._merge_outline_payload(existing, generated)
+        if data_type == "characters":
+            return self._merge_character_payload(existing, generated)
+        if data_type == "worldbuilding":
+            return self._merge_worldbuilding_payload(existing, generated)
+        if data_type in {"items", "eventlines"}:
+            return self._merge_named_row_payload(existing, generated, name_keys=("name", "title"))
+        if data_type == "chapter_summary":
+            return self._merge_named_row_payload(existing, generated, name_keys=("chapter_number", "name", "title"))
+        return generated, {"added": 0, "updated": 0, "total": 0, "changed": False}
+
+    def _build_reverse_outline(self, source_title: str, chapters: List[Dict[str, Any]], now: str) -> Dict[str, Any]:
+        total_words = sum(chapter.get("word_count", 0) for chapter in chapters)
+        chapter_rows = []
+        for chapter in chapters:
+            key_events = chapter.get("key_events") if isinstance(chapter.get("key_events"), list) else []
+            characters = chapter.get("characters") if isinstance(chapter.get("characters"), list) else []
+            hooks = chapter.get("open_hooks") if isinstance(chapter.get("open_hooks"), list) else []
+            chapter_rows.append(
+                {
+                    "chapter_number": chapter["chapter_number"],
+                    "title": chapter["title"],
+                    "summary": chapter["summary"],
+                    "key_event": "；".join(str(event) for event in key_events[:3]),
+                    "characters": [str(name) for name in characters[:8]],
+                    "ending_hook": str(hooks[0]) if hooks else "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_from": "novel_import_reverse_extract",
+                }
+            )
+
+        progression_lines = self._select_outline_progression_lines(chapter_rows)
+        synopsis = " ".join(
+            str(chapter.get("summary") or "").strip()
+            for chapter in chapters[:8]
+            if str(chapter.get("summary") or "").strip()
+        )
+        if len(synopsis) > 1200:
+            synopsis = synopsis[:1199].rstrip() + "…"
+
+        global_outline = "\n".join(
+            line
+            for line in [
+                f"《{source_title}》导入后反向整理：共{len(chapters)}章，约{total_words}字。",
+                "主线推进：",
+                *progression_lines,
+            ]
+            if line
+        ).strip()
+
+        return {
+            "title": source_title,
+            "novel_title": source_title,
+            "story_synopsis": synopsis,
+            "global_outline": global_outline[:8000],
+            "volume_plan": self._build_reverse_volume_plan(chapter_rows),
+            "chapters": chapter_rows,
+            "created_at": now,
+            "updated_at": now,
+            "created_from": "novel_import_reverse_extract",
+        }
+
+    @staticmethod
+    def _select_outline_progression_lines(chapter_rows: List[Dict[str, Any]]) -> List[str]:
+        if len(chapter_rows) <= 24:
+            selected = chapter_rows
+        else:
+            selected = chapter_rows[:18] + chapter_rows[-6:]
+
+        lines = []
+        omitted = len(chapter_rows) - len(selected)
+        for index, row in enumerate(selected):
+            if omitted and index == 18:
+                lines.append(f"...中间省略 {omitted} 章，可在章节列表中查看完整正文。")
+            summary = str(row.get("summary") or row.get("key_event") or "").strip()
+            if len(summary) > 120:
+                summary = summary[:119].rstrip() + "…"
+            lines.append(f"- 第{row.get('chapter_number')}章《{row.get('title')}》：{summary}")
+        return lines
+
+    @staticmethod
+    def _build_reverse_volume_plan(chapter_rows: List[Dict[str, Any]]) -> str:
+        if not chapter_rows:
+            return ""
+        chunk_size = 20
+        lines = ["【导入小说分段规划】"]
+        for chunk_index in range(0, len(chapter_rows), chunk_size):
+            chunk = chapter_rows[chunk_index: chunk_index + chunk_size]
+            start = chunk[0].get("chapter_number")
+            end = chunk[-1].get("chapter_number")
+            first_summary = str(chunk[0].get("summary") or "").strip()
+            last_summary = str(chunk[-1].get("summary") or "").strip()
+            summary = first_summary if first_summary == last_summary else "；".join(part for part in [first_summary, last_summary] if part)
+            if len(summary) > 180:
+                summary = summary[:179].rstrip() + "…"
+            lines.append(f"第{chunk_index // chunk_size + 1}段：第{start}-{end}章")
+            if summary:
+                lines.append(f"- 概述：{summary}")
+        return "\n".join(lines).strip()
+
+    def _collect_character_stats(self, chapters: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        stats: Dict[str, Dict[str, Any]] = {}
+        chapter_names: Dict[int, List[str]] = {}
+
+        for chapter in chapters:
+            content = str(chapter.get("content") or "")
+            names = self._refine_character_names(chapter.get("characters") or [], content)
+            chapter_names[chapter["chapter_number"]] = names
+            for name in names:
+                record = stats.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "appearances": 0,
+                        "chapters": [],
+                        "events": [],
+                        "hooks": [],
+                        "relationships": Counter(),
+                    },
+                )
+                record["appearances"] += 1
+                record["chapters"].append(chapter["chapter_number"])
+                for event in chapter.get("key_events") or []:
+                    event_text = str(event).strip()
+                    if event_text and name in event_text:
+                        record["events"].append({"chapter_number": chapter["chapter_number"], "text": event_text})
+                for hook in chapter.get("open_hooks") or []:
+                    hook_text = str(hook).strip()
+                    if hook_text and name in hook_text:
+                        record["hooks"].append(hook_text)
+
+        for names in chapter_names.values():
+            for name in names:
+                record = stats.get(name)
+                if not record:
+                    continue
+                for other in names:
+                    if other != name:
+                        record["relationships"][other] += 1
+
+        return dict(
+            sorted(
+                stats.items(),
+                key=lambda item: (-item[1]["appearances"], item[1]["chapters"][0], item[0]),
+            )
+        )
+
+    def _build_reverse_character_cards(
+        self,
+        character_stats: Dict[str, Dict[str, Any]],
+        chapters: List[Dict[str, Any]],
+        now: str,
+        source_file: str,
+    ) -> List[Dict[str, Any]]:
+        cards: List[Dict[str, Any]] = []
+        for index, (name, record) in enumerate(character_stats.items()):
+            first_chapter = record["chapters"][0] if record["chapters"] else 0
+            first_summary = self._chapter_summary_by_number(chapters, first_chapter)
+            events = record.get("events") or []
+            development_history = [
+                {
+                    "chapter_number": event["chapter_number"],
+                    "event_type": "import_reverse_extract",
+                    "title": event["text"][:30],
+                    "description": event["text"],
+                }
+                for event in events[:8]
+            ]
+            relationship_counter: Counter[str] = record.get("relationships", Counter())
+            relationships = {
+                other: "同章出现/剧情相关"
+                for other, _count in relationship_counter.most_common(8)
+            }
+            role = "主角" if index == 0 else "配角"
+            cards.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "description": (
+                        f"从导入小说《{Path(source_file or '导入小说').stem}》反向提取。"
+                        f"第{first_chapter}章首次出现，共在{record['appearances']}章中出现。"
+                    ),
+                    "identity": "导入小说角色",
+                    "personality": [],
+                    "abilities": [],
+                    "inventory": [],
+                    "development_history": development_history,
+                    "background": first_summary,
+                    "goals": record.get("hooks", [])[:3],
+                    "relationships": relationships,
+                    "notes": "由导入小说自动反推生成，请按需要人工校准。",
+                    "tags": ["导入反推"],
+                    "first_appearance": first_chapter,
+                    "status": "active",
+                    "created_at": now,
+                    "updated_at": now,
+                    "source_file": source_file,
+                }
+            )
+        return cards
+
+    def _build_reverse_worldbuilding(
+        self,
+        source_title: str,
+        chapters: List[Dict[str, Any]],
+        character_names: set[str],
+        item_rows: List[Dict[str, Any]],
+        now: str,
+    ) -> Dict[str, Any]:
+        text = "\n".join(str(chapter.get("content") or "") for chapter in chapters)
+        locations = self._extract_named_entities_by_suffix(text, _LOCATION_SUFFIXES, exclude=character_names, top_k=24)
+        factions = self._extract_named_entities_by_suffix(text, _FACTION_SUFFIXES, exclude=character_names, top_k=16)
+        rules = self._extract_rule_sentences(chapters)
+        timeline_markers = []
+        for chapter in chapters:
+            for marker in chapter.get("timeline_markers") or []:
+                marker = str(marker).strip()
+                if marker and marker not in timeline_markers:
+                    timeline_markers.append(marker)
+
+        world_locations = {
+            name: {
+                "description": self._find_sentence_for_entity(text, name) or "导入小说中出现的地点。",
+                "tags": ["导入反推"],
+            }
+            for name in locations
+        }
+        world_items = {
+            item["name"]: {
+                "description": item.get("description", ""),
+                "details": item.get("details", ""),
+                "tags": ["导入反推"],
+            }
+            for item in item_rows
+        }
+        events = [
+            {
+                "title": f"第{chapter['chapter_number']}章 {chapter['title']}",
+                "description": chapter.get("summary", ""),
+                "date": "、".join(chapter.get("timeline_markers") or []),
+                "participants": chapter.get("characters") or [],
+            }
+            for chapter in chapters[:80]
+            if chapter.get("summary")
+        ]
+
+        return {
+            "world": {
+                "name": f"{source_title}世界观",
+                "world_name": f"{source_title}世界观",
+                "world_type": "导入小说反向提取",
+                "theme": self._build_theme_from_chapters(chapters),
+                "geography": "；".join(locations[:12]),
+                "timeline": "；".join(timeline_markers[:20]),
+                "rules": rules,
+                "factions": [
+                    {
+                        "name": faction,
+                        "description": self._find_sentence_for_entity(text, faction) or "导入小说中出现的势力。",
+                        "tags": ["导入反推"],
+                    }
+                    for faction in factions
+                ],
+                "requirements": "自动反推资料仅作为初稿，建议人工核对角色、地点、势力与规则。",
+                "created_at": now,
+                "updated_at": now,
+            },
+            "locations": world_locations,
+            "items": world_items,
+            "events": events,
+        }
+
+    def _build_reverse_item_rows(
+        self,
+        chapters: List[Dict[str, Any]],
+        character_names: set[str],
+        now: str,
+        source_file: str,
+    ) -> List[Dict[str, Any]]:
+        text = "\n".join(str(chapter.get("content") or "") for chapter in chapters)
+        item_names = self._extract_named_entities_by_suffix(text, _ITEM_SUFFIXES, exclude=character_names, top_k=24)
+        rows = []
+        for name in item_names:
+            sentence = self._find_sentence_for_entity(text, name)
+            rows.append(
+                {
+                    "name": name,
+                    "item_type": "未分类",
+                    "description": sentence or "导入小说中出现的物品/线索。",
+                    "details": sentence,
+                    "status": "已出现",
+                    "effects": [],
+                    "history": [],
+                    "tags": ["导入反推"],
+                    "source_file": source_file,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _build_reverse_chapter_summaries(
+        chapters: List[Dict[str, Any]],
+        now: str,
+        source_file: str,
+    ) -> List[Dict[str, Any]]:
+        rows = []
+        for chapter in chapters:
+            rows.append(
+                {
+                    "chapter_number": chapter["chapter_number"],
+                    "name": f"第{chapter['chapter_number']}章 {chapter['title']}",
+                    "summary_text": chapter.get("summary", ""),
+                    "key_events": chapter.get("key_events") or [],
+                    "appearing_characters": chapter.get("characters") or [],
+                    "ending_hook": (chapter.get("open_hooks") or [""])[0],
+                    "source_file": source_file,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _build_reverse_eventlines(
+        chapters: List[Dict[str, Any]],
+        character_stats: Dict[str, Dict[str, Any]],
+        now: str,
+        source_file: str,
+    ) -> List[Dict[str, Any]]:
+        participants = list(character_stats.keys())[:8]
+        first_summary = str(chapters[0].get("summary") or "").strip() if chapters else ""
+        last_summary = str(chapters[-1].get("summary") or "").strip() if chapters else ""
+        conflict = "；".join(part for part in [first_summary, last_summary] if part)
+        rows = []
+        if conflict:
+            rows.append(
+                {
+                    "name": "导入小说主线",
+                    "participants": participants,
+                    "conflict": conflict[:600],
+                    "status": "推进中",
+                    "notes": "由导入小说反向提取，可继续拆分为更细事件线。",
+                    "source_file": source_file,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        hooks = []
+        for chapter in chapters:
+            for hook in chapter.get("open_hooks") or []:
+                hook = str(hook).strip()
+                if hook and hook not in hooks:
+                    hooks.append(hook)
+        for index, hook in enumerate(hooks[:5], start=1):
+            rows.append(
+                {
+                    "name": f"悬念线索 {index}",
+                    "participants": [name for name in participants if name in hook],
+                    "conflict": hook,
+                    "status": "推进中",
+                    "notes": "导入文本中识别到的未解悬念。",
+                    "source_file": source_file,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        return rows
+
+    def _merge_outline_payload(self, existing: Any, generated: Any) -> tuple[Any, Dict[str, Any]]:
+        if self._is_empty_material_value(generated):
+            return existing, {"added": 0, "updated": 0, "total": 0, "changed": False}
+        if self._is_empty_material_value(existing):
+            chapter_count = len(generated.get("chapters") or []) if isinstance(generated, dict) else 0
+            return generated, {"added": max(1, chapter_count), "updated": 0, "total": chapter_count, "changed": True}
+
+        if isinstance(existing, dict) and isinstance(generated, dict):
+            merged = dict(existing)
+            added = 0
+            updated = 0
+            for key in ("title", "novel_title", "story_synopsis", "global_outline", "volume_plan"):
+                if self._is_empty_material_value(merged.get(key)) and not self._is_empty_material_value(generated.get(key)):
+                    merged[key] = generated[key]
+                    updated += 1
+            existing_chapters = merged.get("chapters") if isinstance(merged.get("chapters"), list) else []
+            merged_chapters, row_stats = self._merge_rows_by_key(existing_chapters, generated.get("chapters") or [], ("chapter_number", "title"))
+            if row_stats["added"] or row_stats["updated"]:
+                merged["chapters"] = merged_chapters
+                added += row_stats["added"]
+                updated += row_stats["updated"]
+            return merged, {"added": added, "updated": updated, "total": len(merged.get("chapters") or []), "changed": bool(added or updated)}
+
+        if isinstance(existing, list) and isinstance(generated, dict):
+            overview_row = {
+                "title": "主线大纲",
+                "name": "主线大纲",
+                "summary": generated.get("global_outline") or generated.get("story_synopsis") or "",
+                "global_outline": generated.get("global_outline", ""),
+                "volume_plan": generated.get("volume_plan", ""),
+                "story_synopsis": generated.get("story_synopsis", ""),
+                "novel_title": generated.get("novel_title", generated.get("title", "")),
+                "created_from": "novel_import_reverse_extract",
+            }
+            generated_rows = [overview_row] + (generated.get("chapters") or [])
+            return self._merge_named_row_payload(existing, generated_rows, name_keys=("chapter_number", "title", "name"))
+
+        return existing, {"added": 0, "updated": 0, "total": 0, "changed": False}
+
+    def _merge_character_payload(self, existing: Any, generated: Any) -> tuple[Any, Dict[str, Any]]:
+        generated_rows = [row for row in generated if isinstance(row, dict)] if isinstance(generated, list) else []
+        if not generated_rows:
+            total = len(existing) if isinstance(existing, (list, dict)) else 0
+            return existing, {"added": 0, "updated": 0, "total": total, "changed": False}
+
+        existing_map = self._normalize_character_map(existing)
+        added = 0
+        updated = 0
+        for row in generated_rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            if name not in existing_map:
+                existing_map[name] = dict(row)
+                added += 1
+                continue
+            if self._fill_missing_fields(existing_map[name], row):
+                updated += 1
+
+        if isinstance(existing, dict) and "characters" in existing:
+            merged_payload = dict(existing)
+            merged_payload["characters"] = existing_map
+        elif isinstance(existing, list):
+            merged_payload = list(existing_map.values())
+        else:
+            merged_payload = existing_map
+        return merged_payload, {"added": added, "updated": updated, "total": len(existing_map), "changed": bool(added or updated)}
+
+    def _merge_worldbuilding_payload(self, existing: Any, generated: Any) -> tuple[Any, Dict[str, Any]]:
+        if not isinstance(generated, dict) or self._is_empty_material_value(generated):
+            return existing, {"added": 0, "updated": 0, "total": 0, "changed": False}
+        if self._is_empty_material_value(existing):
+            total = 1 + len(generated.get("locations") or {}) + len(generated.get("items") or {}) + len(generated.get("events") or [])
+            return generated, {"added": total, "updated": 0, "total": total, "changed": True}
+
+        if isinstance(existing, list):
+            rows = self._worldbuilding_payload_to_rows(generated)
+            return self._merge_named_row_payload(existing, rows, name_keys=("name", "title"))
+        if not isinstance(existing, dict):
+            return existing, {"added": 0, "updated": 0, "total": 0, "changed": False}
+
+        merged = dict(existing)
+        added = 0
+        updated = 0
+        world = dict(merged.get("world")) if isinstance(merged.get("world"), dict) else {}
+        generated_world = generated.get("world") if isinstance(generated.get("world"), dict) else {}
+        if self._fill_missing_fields(world, generated_world):
+            updated += 1
+        merged["world"] = world
+
+        for section in ("locations", "items"):
+            target = dict(merged.get(section)) if isinstance(merged.get(section), dict) else {}
+            source = generated.get(section) if isinstance(generated.get(section), dict) else {}
+            for name, payload in source.items():
+                if name not in target:
+                    target[name] = payload
+                    added += 1
+                elif isinstance(target.get(name), dict) and isinstance(payload, dict) and self._fill_missing_fields(target[name], payload):
+                    updated += 1
+            merged[section] = target
+
+        existing_events = merged.get("events") if isinstance(merged.get("events"), list) else []
+        merged_events, event_stats = self._merge_rows_by_key(existing_events, generated.get("events") or [], ("title", "name"))
+        if event_stats["added"] or event_stats["updated"]:
+            merged["events"] = merged_events
+            added += event_stats["added"]
+            updated += event_stats["updated"]
+
+        total = 1 + len(merged.get("locations") or {}) + len(merged.get("items") or {}) + len(merged.get("events") or [])
+        return merged, {"added": added, "updated": updated, "total": total, "changed": bool(added or updated)}
+
+    def _merge_named_row_payload(
+        self,
+        existing: Any,
+        generated: Any,
+        *,
+        name_keys: tuple[str, ...],
+    ) -> tuple[Any, Dict[str, Any]]:
+        existing_rows = [dict(row) for row in existing if isinstance(row, dict)] if isinstance(existing, list) else []
+        generated_rows = [dict(row) for row in generated if isinstance(row, dict)] if isinstance(generated, list) else []
+        merged, stats = self._merge_rows_by_key(existing_rows, generated_rows, name_keys)
+        stats["changed"] = bool(stats["added"] or stats["updated"])
+        return merged, stats
+
+    def _merge_rows_by_key(
+        self,
+        existing_rows: List[Dict[str, Any]],
+        generated_rows: List[Dict[str, Any]],
+        key_fields: tuple[str, ...],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        merged = [dict(row) for row in existing_rows]
+        index_by_key: Dict[str, int] = {}
+        for index, row in enumerate(merged):
+            key = self._row_merge_key(row, key_fields)
+            if key:
+                index_by_key.setdefault(key, index)
+
+        added = 0
+        updated = 0
+        for row in generated_rows:
+            key = self._row_merge_key(row, key_fields)
+            match_index = index_by_key.get(key) if key else None
+            if match_index is None:
+                if key:
+                    index_by_key[key] = len(merged)
+                merged.append(dict(row))
+                added += 1
+                continue
+            if self._fill_missing_fields(merged[match_index], row):
+                updated += 1
+        return merged, {"added": added, "updated": updated, "total": len(merged)}
+
+    @staticmethod
+    def _row_merge_key(row: Dict[str, Any], key_fields: tuple[str, ...]) -> str:
+        for key in key_fields:
+            value = row.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return f"{key}:{text}"
+        return ""
+
+    def _fill_missing_fields(self, target: Dict[str, Any], source: Dict[str, Any]) -> bool:
+        changed = False
+        for key, value in source.items():
+            if key in {"created_at", "updated_at"}:
+                continue
+            if self._is_empty_material_value(value):
+                continue
+            current = target.get(key)
+            if self._is_empty_material_value(current):
+                target[key] = value
+                changed = True
+                continue
+            if isinstance(current, list) and isinstance(value, list):
+                seen = {json.dumps(item, ensure_ascii=False, sort_keys=True) for item in current}
+                for item in value:
+                    fingerprint = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    if fingerprint not in seen:
+                        current.append(item)
+                        seen.add(fingerprint)
+                        changed = True
+                continue
+            if isinstance(current, dict) and isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if sub_key not in current and not self._is_empty_material_value(sub_value):
+                        current[sub_key] = sub_value
+                        changed = True
+        return changed
+
+    @staticmethod
+    def _is_empty_material_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, (list, dict, tuple, set)):
+            return len(value) == 0
+        return False
+
+    def _normalize_character_map(self, payload: Any) -> Dict[str, Dict[str, Any]]:
+        if isinstance(payload, dict) and "characters" in payload:
+            payload = payload.get("characters")
+        if isinstance(payload, dict):
+            rows = []
+            for name, row in payload.items():
+                if isinstance(row, dict):
+                    copied = dict(row)
+                    copied.setdefault("name", str(name))
+                    rows.append(copied)
+            return {
+                str(row.get("name") or "").strip(): row
+                for row in rows
+                if str(row.get("name") or "").strip()
+            }
+        if isinstance(payload, list):
+            return {
+                str(row.get("name") or "").strip(): dict(row)
+                for row in payload
+                if isinstance(row, dict) and str(row.get("name") or "").strip()
+            }
+        return {}
+
+    @staticmethod
+    def _worldbuilding_payload_to_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        world = payload.get("world") if isinstance(payload.get("world"), dict) else {}
+        if world:
+            rows.append(
+                {
+                    "name": world.get("name") or world.get("world_name") or "导入小说世界观",
+                    "kind": "world",
+                    "description": world.get("world_type") or "导入小说反向提取",
+                    "details": world.get("theme") or world.get("requirements") or "",
+                }
+            )
+            for key, label in (
+                ("geography", "地理环境"),
+                ("timeline", "时间线"),
+            ):
+                if world.get(key):
+                    rows.append({"name": label, "kind": key, "description": world.get(key), "details": world.get(key)})
+            for rule in world.get("rules") or []:
+                rows.append({"name": "世界规则", "kind": "rule", "description": rule})
+            for faction in world.get("factions") or []:
+                if isinstance(faction, dict):
+                    rows.append({
+                        "name": faction.get("name") or "势力阵营",
+                        "kind": "faction",
+                        "description": faction.get("description", ""),
+                        "details": faction.get("details", ""),
+                    })
+        for section, kind in (("locations", "location"), ("items", "item")):
+            source = payload.get(section) if isinstance(payload.get(section), dict) else {}
+            for name, row in source.items():
+                rows.append({
+                    "name": str(name),
+                    "kind": kind,
+                    "description": row.get("description", "") if isinstance(row, dict) else str(row),
+                    "details": row.get("details", "") if isinstance(row, dict) else "",
+                })
+        for event in payload.get("events") or []:
+            if isinstance(event, dict):
+                rows.append({
+                    "name": event.get("title") or event.get("name") or "历史事件",
+                    "kind": "event",
+                    "description": event.get("description", ""),
+                    "details": event.get("details", ""),
+                })
+        return rows
+
+    @staticmethod
+    def _refine_character_names(raw_names: Iterable[Any], content: str) -> List[str]:
+        refined = []
+        for raw in raw_names:
+            name = str(raw or "").strip()
+            if not NovelImportService._looks_like_character_name(name):
+                continue
+            if name not in content:
+                continue
+            if name not in refined:
+                refined.append(name)
+        return refined[:12]
+
+    @staticmethod
+    def _looks_like_character_name(name: str) -> bool:
+        if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", name or ""):
+            return False
+        if name in _CHARACTER_STOPWORDS:
+            return False
+        if name.endswith(_LOCATION_SUFFIXES) or name.endswith(_FACTION_SUFFIXES) or name.endswith(_ITEM_SUFFIXES):
+            return False
+        return len(set(name)) > 1
+
+    @staticmethod
+    def _extract_named_entities_by_suffix(
+        text: str,
+        suffixes: tuple[str, ...],
+        *,
+        exclude: set[str],
+        top_k: int,
+    ) -> List[str]:
+        counter: Counter[str] = Counter()
+        suffix_pattern = "|".join(sorted((re.escape(item) for item in suffixes), key=len, reverse=True))
+        pattern = re.compile(rf"[\u4e00-\u9fff]{{1,6}}(?:{suffix_pattern})")
+        for match in pattern.findall(text or ""):
+            name = NovelImportService._trim_named_entity_match(match, suffixes)
+            if len(name) < 2 or name in exclude or name in _CHARACTER_STOPWORDS:
+                continue
+            if len(set(name)) == 1:
+                continue
+            counter[name] += 1
+        return [name for name, _count in counter.most_common(top_k)]
+
+    @staticmethod
+    def _trim_named_entity_match(raw: str, suffixes: tuple[str, ...]) -> str:
+        text = str(raw or "").strip()
+        suffix = next((item for item in sorted(suffixes, key=len, reverse=True) if text.endswith(item)), "")
+        if not suffix:
+            return text
+        stem = text[: -len(suffix)] if suffix else text
+        for delimiter in (
+            "进入",
+            "来到",
+            "前往",
+            "返回",
+            "离开",
+            "遇见",
+            "发现",
+            "提醒",
+            "修炼",
+            "藏着",
+            "有关",
+            "在",
+            "到",
+            "入",
+            "进",
+            "与",
+            "和",
+            "向",
+            "对",
+            "说",
+        ):
+            if delimiter in stem:
+                stem = stem.rsplit(delimiter, 1)[-1]
+        stem = stem.strip()
+        if len(stem) > 4:
+            stem = stem[-4:]
+        name = f"{stem}{suffix}".strip()
+        if len(name) < 2:
+            return ""
+        if any(name.startswith(prefix) for prefix in ("修炼", "发现", "提醒", "进入", "来到", "有关")):
+            return ""
+        return name
+
+    @staticmethod
+    def _extract_rule_sentences(chapters: List[Dict[str, Any]], top_k: int = 12) -> List[str]:
+        rules = []
+        for chapter in chapters:
+            for sentence in re.split(r"[。！？!?\n]+", str(chapter.get("content") or "")):
+                text = sentence.strip()
+                if len(text) < 8:
+                    continue
+                if any(keyword in text for keyword in _WORLD_RULE_KEYWORDS):
+                    clipped = text[:120]
+                    if clipped not in rules:
+                        rules.append(clipped)
+                if len(rules) >= top_k:
+                    return rules
+        return rules
+
+    @staticmethod
+    def _find_sentence_for_entity(text: str, entity: str) -> str:
+        if not text or not entity:
+            return ""
+        for sentence in re.split(r"[。！？!?\n]+", text):
+            stripped = sentence.strip()
+            if entity in stripped:
+                return stripped[:180]
+        return ""
+
+    @staticmethod
+    def _build_theme_from_chapters(chapters: List[Dict[str, Any]]) -> str:
+        summaries = [str(chapter.get("summary") or "").strip() for chapter in chapters[:6]]
+        theme = " ".join(summary for summary in summaries if summary)
+        if len(theme) > 600:
+            theme = theme[:599].rstrip() + "…"
+        return theme
+
+    @staticmethod
+    def _chapter_summary_by_number(chapters: List[Dict[str, Any]], chapter_number: int) -> str:
+        for chapter in chapters:
+            if int(chapter.get("chapter_number") or 0) == int(chapter_number or 0):
+                return str(chapter.get("summary") or "").strip()
+        return ""
+
     def _extract_text(self, extension: str, raw_bytes: bytes) -> str:
         if extension == ".docx":
             return self._extract_docx_text(raw_bytes)
@@ -570,14 +1499,33 @@ class NovelImportService:
     def _extract_characters(content: str, top_k: int = 8) -> List[str]:
         if not content:
             return []
-        candidates = re.findall(r"[\u4e00-\u9fff]{2,4}", content)
         counter: Counter[str] = Counter()
-        for candidate in candidates:
+
+        context_patterns = (
+            r"([\u4e00-\u9fff]{2,4})(?=(?:说|问|道|决定|提醒|发现|进入|离开|遇见|调查|追查|修炼|看见|看到|走向|回头|点头|摇头|笑|喊))",
+            r"(?:和|与|跟|对|向|遇见|提醒)([\u4e00-\u9fff]{2,4})",
+            r"([\u4e00-\u9fff]{2,4})(?:和|与|跟)",
+        )
+        for pattern in context_patterns:
+            for candidate in re.findall(pattern, content):
+                if NovelImportService._looks_like_character_name(candidate):
+                    counter[candidate] += 5
+
+        for run in re.findall(r"[\u4e00-\u9fff]{2,}", content):
+            for size in (2, 3):
+                if len(run) < size:
+                    continue
+                for start in range(0, len(run) - size + 1):
+                    candidate = run[start:start + size]
+                    if not NovelImportService._looks_like_character_name(candidate):
+                        continue
+                    counter[candidate] += 1
+
+        for candidate in list(counter):
             if candidate in _CHARACTER_STOPWORDS:
                 continue
             if len(set(candidate)) == 1:
-                continue
-            counter[candidate] += 1
+                del counter[candidate]
         return [name for name, _ in counter.most_common(top_k)]
 
     @staticmethod

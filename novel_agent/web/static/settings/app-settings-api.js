@@ -37,11 +37,18 @@ async function saveActiveApiConfig(configId, model) {
     return response;
 }
 
+function isBuiltinPresetApiConfig(config) {
+    return Boolean(config && config.id === 'preset-tsc5' && !config.api_key_set && (!Array.isArray(config.models) || config.models.length === 0));
+}
+
 async function testApiConnection(configId, model) {
     const selectedConfig = currentApiConfigs.find((item) => item.id === configId);
 
     if (!selectedConfig) {
         throw new Error('请先选择一个配置');
+    }
+    if (isBuiltinPresetApiConfig(selectedConfig)) {
+        throw new Error('探索仓API不能直接测试。请先新建或选择一套已填写 Key 和模型的 API 配置');
     }
 
     return apiCall('/api/test-connection', 'POST', {
@@ -57,6 +64,9 @@ async function testAgentApiConnection(agentId, configId, model) {
 
     if (!selectedConfig) {
         throw new Error('请先为这个Agent选择一个API配置');
+    }
+    if (isBuiltinPresetApiConfig(selectedConfig)) {
+        throw new Error('探索仓API不能直接测试。请先为这个Agent选择一套已填写 Key 和模型的 API 配置');
     }
 
     return apiCall('/api/test-connection', 'POST', {

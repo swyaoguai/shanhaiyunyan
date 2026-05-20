@@ -233,21 +233,36 @@ def resolve_continuous_write_model_config(model: str = "", api_config_id: str = 
 
     if selected_config:
         api_base = selected_config.api_base
-        api_key = selected_config.api_key
+        api_key = selected_config.get_primary_key()
+        api_keys = selected_config.api_keys
+        api_type = selected_config.api_type
         temperature = selected_config.temperature
         max_tokens = selected_config.max_tokens
         model_name = requested_model or (selected_config.models[0] if selected_config.models else "")
         resolved_api_config_id = selected_config.id
-        logger.info(f"[ContinuousWrite] 使用指定的API配置: {selected_config.name} ({selected_config.id})")
+        logger.info(
+            "[ContinuousWrite] 使用指定的API配置: %s (%s), api_type=%s, model=%s",
+            selected_config.name,
+            selected_config.id,
+            api_type,
+            model_name,
+        )
     else:
         global_config = config_manager.get_global_config()
         api_base = global_config.api_base
-        api_key = global_config.api_key
+        api_key = global_config.get_primary_key()
+        api_keys = global_config.api_keys
+        api_type = global_config.api_type
         temperature = global_config.temperature
         max_tokens = global_config.max_tokens
         model_name = requested_model or global_config.model
         resolved_api_config_id = config_manager.get_multi_config().active_config_id
-        logger.info("[ContinuousWrite] 使用激活的全局API配置")
+        logger.info(
+            "[ContinuousWrite] 使用激活的全局API配置: %s, api_type=%s, model=%s",
+            resolved_api_config_id,
+            api_type,
+            model_name,
+        )
 
     max_tokens = _cap_continuous_write_max_tokens(max_tokens)
 
@@ -259,12 +274,34 @@ def resolve_continuous_write_model_config(model: str = "", api_config_id: str = 
         api_config_id=resolved_api_config_id,
         api_base=api_base,
         api_key=api_key,
+        api_keys=api_keys,
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
-        use_global=False
+        use_global=False,
+        api_type=api_type or "openai_chat",
     )
     return model_config, model_name
+
+
+def _apply_continuous_write_model_config(writer, model_config: Any, model_name: str) -> None:
+    """Apply a selected API/model config to an existing ContinuousWriter instance."""
+    if not model_config or not model_name:
+        return
+    writer.model_config = model_config
+    writer.client = writer._create_client()
+    if hasattr(writer, "_llm_client"):
+        writer._llm_client = None
+    if hasattr(writer, "_rotation_client_cache"):
+        writer._rotation_client_cache.clear()
+    writer.set_model(model_name)
+    logger.info(
+        "[ContinuousWrite] Writer config applied: config_id=%s, api_type=%s, api_base=%s, model=%s",
+        getattr(model_config, "api_config_id", ""),
+        getattr(model_config, "api_type", "openai_chat"),
+        getattr(model_config, "api_base", ""),
+        model_name,
+    )
 
 
 async def _refresh_infinite_memory(
@@ -354,6 +391,25 @@ async def import_novel_to_infinite_write(
         chapters=imported_chapters,
         source_file=parsed["filename"],
     )
+    try:
+        material_supplement = service.supplement_project_materials(
+            project_manager=pm,
+            source_file=parsed["filename"],
+            chapters=imported_chapters,
+        )
+        if material_supplement.get("success"):
+            try:
+                from ...library_service import get_library_service
+
+                svc = get_library_service()
+                for data_type, stats in material_supplement.get("data_types", {}).items():
+                    if stats.get("changed"):
+                        svc.upsert_from_legacy(data_type, pm.load_project_data(data_type))
+            except Exception as sync_exc:
+                logger.debug(f"[ContinuousWrite] Library sync after import material supplement skipped: {sync_exc}")
+    except Exception as exc:
+        logger.warning(f"[ContinuousWrite] Failed to supplement project materials from imported novel: {exc}")
+        material_supplement = {"success": False, "error": str(exc), "data_types": {}}
 
     return JSONResponse(
         {
@@ -371,6 +427,7 @@ async def import_novel_to_infinite_write(
                 "character_index": len(memory.get("character_index", [])),
                 "pending_hooks": len(memory.get("pending_hooks", [])),
             },
+            "material_supplement": material_supplement,
         }
     )
 
@@ -522,9 +579,7 @@ async def continue_continuous_write(request: ContinuousWriteContinueRequest):
                 api_config_id=request.api_config_id,
             )
             if model_to_use:
-                writer.model_config = model_config
-                writer.client = writer._create_client()
-                writer.set_model(model_to_use)
+                _apply_continuous_write_model_config(writer, model_config, model_to_use)
 
         execute_params = {
             "action": "continue",
@@ -889,9 +944,7 @@ async def regenerate_continuous_write(request: ContinuousWriteRegenerateRequest)
             api_config_id=request.api_config_id,
         )
         if model_to_use:
-            writer.model_config = model_config
-            writer.client = writer._create_client()
-            writer.set_model(model_to_use)
+            _apply_continuous_write_model_config(writer, model_config, model_to_use)
     
     execute_params = {
         "action": "regenerate",

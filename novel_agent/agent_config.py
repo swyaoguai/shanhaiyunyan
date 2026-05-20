@@ -17,6 +17,11 @@ from .utils.atomic_write import atomic_write_json, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_API_PRESET_ID = "preset-tsc5"
+LEGACY_API_PRESET_NAME = "预设接口"
+DEFAULT_API_PRESET_NAME = "探索仓API"
+DEFAULT_API_PRESET_BASE = "https://test.tsc5.top/v1"
+
 
 def _default_agent_config_dir() -> Path:
     """Return writable config dir, using portable external data when frozen."""
@@ -387,11 +392,13 @@ class AgentConfigManager:
         self.global_config_file = self.config_dir / "global_api_config.json"
         if should_migrate_legacy:
             self._migrate_legacy_config_files()
+        global_config_existed = self.global_config_file.exists()
         self.configs: Dict[str, AgentModelConfig] = {}
         self.global_config: GlobalAPIConfig = GlobalAPIConfig()
         self.multi_config: MultiAPIConfig = MultiAPIConfig()
         self._load_configs()
         self._load_global_config()
+        self._install_default_api_preset_if_needed(global_config_existed=global_config_existed)
 
     def _migrate_legacy_config_files(self) -> None:
         """Copy existing config files from the old package data dir when needed."""
@@ -463,8 +470,11 @@ class AgentConfigManager:
                         active_config_id=data.get("active_config_id", ""),
                         active_model=data.get("active_model", "")
                     )
+                    preset_changed = self._normalize_builtin_api_preset()
                     # 同时更新兼容的global_config
                     self._sync_global_from_multi()
+                    if preset_changed:
+                        self._save_global_config()
                 else:
                     # 旧格式：单配置（向后兼容）
                     data["max_tokens"] = self._normalize_config_max_tokens(
@@ -476,6 +486,15 @@ class AgentConfigManager:
                     self._migrate_to_multi_config()
             except Exception as e:
                 logger.warning(f"Failed to load global API config: {e}")
+
+    def _normalize_builtin_api_preset(self) -> bool:
+        """Keep the built-in relay config label current without overwriting custom values."""
+        changed = False
+        for config in self.multi_config.configs:
+            if config.id == DEFAULT_API_PRESET_ID and config.name in ("", LEGACY_API_PRESET_NAME):
+                config.name = DEFAULT_API_PRESET_NAME
+                changed = True
+        return changed
     
     def _migrate_to_multi_config(self) -> None:
         """将旧的单配置迁移到多配置格式"""
@@ -511,6 +530,30 @@ class AgentConfigManager:
                 max_tokens=active.max_tokens,
                 api_type=active.api_type
             )
+
+    def _install_default_api_preset_if_needed(self, *, global_config_existed: bool) -> None:
+        """Create the built-in API preset only for fresh installs."""
+        if global_config_existed or self.multi_config.configs:
+            return
+
+        preset = APIConfigItem(
+            id=DEFAULT_API_PRESET_ID,
+            name=DEFAULT_API_PRESET_NAME,
+            api_base=DEFAULT_API_PRESET_BASE,
+            api_key="",
+            api_keys=[],
+            models=[],
+            temperature=LLM_DEFAULTS.TEMPERATURE,
+            max_tokens=LLM_DEFAULTS.MAX_TOKENS,
+            api_type="openai_chat",
+        )
+        self.multi_config = MultiAPIConfig(
+            configs=[preset],
+            active_config_id=preset.id,
+            active_model="",
+        )
+        self._sync_global_from_multi()
+        self._save_global_config()
     
     def _save_configs(self) -> None:
         """保存配置到文件"""
@@ -831,7 +874,8 @@ class AgentConfigManager:
             if (
                 merged_api_base != config.api_base or
                 merged_api_key != config.get_primary_key() or
-                selected_model != config.model
+                selected_model != config.model or
+                merged_api_type != config.api_type
             ):
                 return AgentModelConfig(
                     agent_name=config.agent_name,
@@ -953,6 +997,7 @@ class AgentConfigManager:
                 "model": config.model,  # 新增：原始的 model 字段，用于前端回显
                 "api_config_id": config.api_config_id,
                 "api_base": config.api_base,  # 修复：使用原始的 api_base，不带前缀
+                "api_type": config.api_type,
                 "use_global": config.use_global,
                 "global_configured": global_configured,
                 "temperature": effective_temperature,
@@ -971,6 +1016,7 @@ class AgentConfigManager:
                 config.api_base = source.api_base
                 config.api_key = source.api_key
                 config.model = source.model
+                config.api_type = source.api_type
         self._save_configs()
 
 

@@ -223,6 +223,12 @@ function bindGlobalAPISettingsEvents(timeoutSettings = {}) {
             showToast('请先选择一个配置', 'error');
             return;
         }
+        const selectedConfig = currentApiConfigs.find((item) => item.id === configId);
+        if (isBuiltinPresetApiConfig(selectedConfig)) {
+            showToast('探索仓API不能直接测试，请先新建或选择一套已填写 Key 和模型的配置', 'error');
+            configSelect?.focus();
+            return;
+        }
 
         button.disabled = true;
         button.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 测试中...';
@@ -557,6 +563,9 @@ function showConfigEditModal(configId = null) {
     const isEdit = !!config;
 
     const currentApiType = config?.api_type || 'openai_chat';
+    const displayName = config && typeof normalizeApiConfigDisplayName === 'function'
+        ? normalizeApiConfigDisplayName(config)
+        : (config?.name || '');
     const savedKeyCount = Array.isArray(config?.api_keys)
         ? config.api_keys.filter((entry) => entry?.key_set).length
         : (config?.api_key_set ? 1 : 0);
@@ -571,7 +580,7 @@ function showConfigEditModal(configId = null) {
             <button id="close-config-modal" style="background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 20px;"><i class="ri-close-line"></i></button>
         </div>
         <div style="display: grid; gap: 16px;">
-            <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">配置名称 <span style="color: #ef4444;">*</span></label><input type="text" id="config-name" value="${safeAttr(config?.name || '')}" placeholder="例如: OpenAI官方、DeepSeek、本地Ollama..." style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
+            <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">配置名称 <span style="color: #ef4444;">*</span></label><input type="text" id="config-name" value="${safeAttr(displayName)}" placeholder="例如: OpenAI官方、DeepSeek、本地Ollama..." style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
             <div>
                 <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API 类型 <span style="color: #ef4444;">*</span></label>
                 <select id="config-api-type" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
@@ -956,6 +965,12 @@ function bindAgentSettingsEvents() {
 
             if (!configId) {
                 showToast('请先为这个Agent选择一个API配置', 'error');
+                card?.querySelector('.agent-api-config')?.focus();
+                return;
+            }
+            const selectedConfig = agentPageApiConfigs.find((item) => item.id === configId);
+            if (isBuiltinPresetApiConfig(selectedConfig)) {
+                showToast('探索仓API不能直接测试，请先为这个Agent选择一套已填写 Key 和模型的配置', 'error');
                 card?.querySelector('.agent-api-config')?.focus();
                 return;
             }

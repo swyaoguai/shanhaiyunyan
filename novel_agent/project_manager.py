@@ -281,6 +281,11 @@ class ProjectManager:
         chapters_dir.mkdir(parents=True, exist_ok=True)
         return chapters_dir
 
+    def _get_chapters_clear_marker_path(self) -> Path:
+        if not self.current_project_id:
+            raise ValueError("No current project")
+        return self._get_project_dir(self.current_project_id) / ".chapters_cleared"
+
     def get_library_path(self) -> Path:
         """返回当前项目的 library.json 路径"""
         proj_dir = self.projects_dir / self.current_project_id
@@ -318,6 +323,12 @@ class ProjectManager:
             ensure_ascii=False,
             indent=2,
         )
+        if str(data_type or "").strip() == "chapters":
+            clear_marker = self._get_chapters_clear_marker_path()
+            if not data:
+                clear_marker.write_text("1", encoding="utf-8")
+            else:
+                clear_marker.unlink(missing_ok=True)
         # 闁哄洤鐡ㄩ弻濠冦亜閸︻厽绐楀ǎ鍥跺枟閺佸ジ寮崼鏇燂紵
         if self.current_project_id:
             self.update_project(self.current_project_id)
@@ -330,13 +341,17 @@ class ProjectManager:
         proj_dir = self._get_project_dir(self.current_project_id)
         chapters_json = proj_dir / "chapters.json"
         json_rows: List[Dict] = []
+        chapters_explicitly_cleared = False
         if chapters_json.exists() and chapters_json.is_file():
             try:
                 payload = json.loads(chapters_json.read_text(encoding="utf-8"))
                 if isinstance(payload, list):
                     json_rows = [row for row in payload if isinstance(row, dict)]
+                    chapters_explicitly_cleared = not json_rows and self._get_chapters_clear_marker_path().exists()
             except Exception as exc:
                 logger.warning(f"Failed to load chapters.json: {exc}")
+        if chapters_explicitly_cleared:
+            return []
 
         chapters_dir = proj_dir / "chapters"
         file_rows: List[Dict] = []

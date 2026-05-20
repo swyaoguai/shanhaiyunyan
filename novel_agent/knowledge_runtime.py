@@ -8,10 +8,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .constants import get_data_dir
+from .constants import get_app_root, get_bundled_resource_path, get_data_dir
 from .knowledge_base.config import KnowledgeBaseConfig
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_LOCAL_ONNX_MODEL_DIR = "novel_agent/models/embedding/default"
+DEFAULT_LOCAL_ONNX_MODEL_FILE = "model.onnx"
 
 
 def knowledge_base_config_path(data_dir: Optional[Path] = None) -> Path:
@@ -34,10 +37,145 @@ def load_knowledge_base_settings(data_dir: Optional[Path] = None) -> Dict[str, A
         return {}
 
 
+def _installer_manifest_includes_onnx() -> bool:
+    manifest_path = get_app_root() / "installer_manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug(f"[KnowledgeRuntime] Failed to inspect installer manifest: {exc}")
+        return False
+    return bool(manifest.get("include_onnx"))
+
+
+def _default_local_onnx_model_is_installed() -> bool:
+    return _find_default_local_onnx_model_dir() is not None
+
+
+def _local_onnx_files_available(model_dir: Path, model_file: str = DEFAULT_LOCAL_ONNX_MODEL_FILE) -> bool:
+    return (model_dir / model_file).exists() and (model_dir / "tokenizer.json").exists()
+
+
+def _candidate_default_local_onnx_model_dirs() -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path) -> None:
+        normalized = Path(path)
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    add(get_app_root() / DEFAULT_LOCAL_ONNX_MODEL_DIR)
+    try:
+        add(get_bundled_resource_path("novel_agent", "models", "embedding", "default"))
+    except Exception:
+        pass
+    add(Path(__file__).resolve().parent / "models" / "embedding" / "default")
+    return candidates
+
+
+def _find_default_local_onnx_model_dir() -> Optional[Path]:
+    for model_dir in _candidate_default_local_onnx_model_dirs():
+        if _local_onnx_files_available(model_dir):
+            return model_dir
+    return None
+
+
+def _default_local_onnx_model_dir_setting() -> str:
+    model_dir = _find_default_local_onnx_model_dir()
+    if model_dir is None:
+        return DEFAULT_LOCAL_ONNX_MODEL_DIR
+
+    app_root_default = get_app_root() / DEFAULT_LOCAL_ONNX_MODEL_DIR
+    try:
+        if model_dir.resolve() == app_root_default.resolve():
+            return DEFAULT_LOCAL_ONNX_MODEL_DIR
+    except Exception:
+        pass
+    return str(model_dir)
+
+
+def resolve_local_onnx_model_dir(model_dir: str) -> Path:
+    raw = str(model_dir or "").strip() or DEFAULT_LOCAL_ONNX_MODEL_DIR
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+
+    candidates = [get_app_root() / path]
+    try:
+        candidates.append(get_bundled_resource_path(*path.parts))
+    except Exception:
+        pass
+    package_relative = Path(__file__).resolve().parent.parent / path
+    candidates.append(package_relative)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _has_saved_embedding_choice(payload: Dict[str, Any]) -> bool:
+    if not payload:
+        return False
+
+    provider = str(payload.get("embedding_provider") or "").strip().lower()
+    if provider in {"local", "local_onnx"}:
+        return bool(str(payload.get("onnx_model_dir") or "").strip())
+    if provider == "nvidia":
+        return bool(str(payload.get("nvidia_api_key") or "").strip())
+    if provider in {"api", "siliconflow"}:
+        return bool(str(payload.get("siliconflow_api_key") or "").strip())
+
+    for key in ("siliconflow_api_key", "onnx_model_dir", "nvidia_api_key"):
+        if str(payload.get(key) or "").strip():
+            return True
+    return False
+
+
+def should_default_to_bundled_local_onnx(settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether an untouched install should prefer the bundled local model."""
+    payload = settings or {}
+    if _has_saved_embedding_choice(payload):
+        return False
+
+    provider = str(
+        os.getenv("KB_EMBEDDING_PROVIDER")
+        or os.getenv("EMBEDDING_PROVIDER")
+        or "api"
+    ).strip().lower()
+    if provider not in {"", "api", "siliconflow", "local", "local_onnx"}:
+        return False
+
+    if str(os.getenv("SILICONFLOW_API_KEY", "")).strip():
+        return False
+    if provider in {"api", "siliconflow"} and str(os.getenv("KB_ONNX_MODEL_DIR", "")).strip():
+        return False
+
+    if _default_local_onnx_model_is_installed():
+        return True
+    return _installer_manifest_includes_onnx() and _default_local_onnx_model_is_installed()
+
+
+def apply_bundled_local_onnx_defaults(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fill local ONNX defaults for a fresh bundled-model install."""
+    payload = dict(settings or {})
+    if not should_default_to_bundled_local_onnx(payload):
+        return payload
+
+    payload["embedding_provider"] = "local_onnx"
+    payload["onnx_model_dir"] = _default_local_onnx_model_dir_setting()
+    payload.setdefault("onnx_model_file", DEFAULT_LOCAL_ONNX_MODEL_FILE)
+    payload.setdefault("onnx_tokenizer_dir", "")
+    payload.setdefault("onnx_max_length", 512)
+    payload.setdefault("onnx_pooling", "cls")
+    return payload
+
+
 def has_embedding_config(settings: Optional[Dict[str, Any]] = None) -> bool:
     """Whether the settings/env contain enough information to build embeddings."""
 
-    payload = settings or {}
+    payload = apply_bundled_local_onnx_defaults(settings)
     provider = str(
         payload.get("embedding_provider")
         or os.getenv("KB_EMBEDDING_PROVIDER")
@@ -46,7 +184,10 @@ def has_embedding_config(settings: Optional[Dict[str, Any]] = None) -> bool:
     ).lower()
     if provider in {"local", "local_onnx"}:
         model_dir = str(payload.get("onnx_model_dir") or os.getenv("KB_ONNX_MODEL_DIR") or "").strip()
-        return bool(model_dir)
+        model_file = str(payload.get("onnx_model_file") or os.getenv("KB_ONNX_MODEL_FILE") or DEFAULT_LOCAL_ONNX_MODEL_FILE).strip()
+        if not model_dir:
+            return False
+        return _local_onnx_files_available(resolve_local_onnx_model_dir(model_dir), model_file)
     if provider == "nvidia":
         return bool(str(payload.get("nvidia_api_key") or os.getenv("NVIDIA_API_KEY") or "").strip())
     return bool(str(payload.get("siliconflow_api_key") or os.getenv("SILICONFLOW_API_KEY") or "").strip())
@@ -60,7 +201,7 @@ def build_knowledge_base_config(
 ) -> KnowledgeBaseConfig:
     """Build a KnowledgeBaseConfig from saved settings plus environment fallback."""
 
-    payload = dict(settings or load_knowledge_base_settings(data_dir))
+    payload = apply_bundled_local_onnx_defaults(settings or load_knowledge_base_settings(data_dir))
     config = KnowledgeBaseConfig.from_env(project_id=project_id)
 
     if data_dir:
@@ -83,7 +224,7 @@ def build_knowledge_base_config(
             pass
 
     if payload.get("onnx_model_dir"):
-        config.local_onnx.model_dir = str(payload.get("onnx_model_dir"))
+        config.local_onnx.model_dir = str(resolve_local_onnx_model_dir(str(payload.get("onnx_model_dir"))))
     if payload.get("onnx_model_file"):
         config.local_onnx.model_file = str(payload.get("onnx_model_file"))
     if payload.get("onnx_tokenizer_dir"):

@@ -65,6 +65,10 @@ from .collab_services import (
     build_default_collab_participants,
     build_default_collab_service_registry,
 )
+from .context_bundle import (
+    confirm_context_bundle,
+    create_context_bundle,
+)
 from .execution_context import CollabExecutionContext, TaskExecutionEnvelope
 from .memory_sync import MemorySyncManager
 from .routing_policy import RoutingPolicy
@@ -392,6 +396,18 @@ class NovelCoordinator:
             "context_snapshot_id": run_result.get("context_snapshot_id", ""),
             "fallback_provenance": run_result.get("fallback_provenance", {}),
         }
+        for key in (
+            "output_validation",
+            "handoff",
+            "context_delta",
+            "required_context_keys",
+            "missing_context_keys",
+            "source_of_truth_summary",
+        ):
+            if key in run_result:
+                metadata_patch[key] = run_result.get(key)
+        if isinstance(run_result.get("context_delta"), dict) and run_result["context_delta"].get("delta_id"):
+            metadata_patch["context_delta_id"] = run_result["context_delta"].get("delta_id")
         if isinstance(result_payload, dict):
             for key in ("coverage_fallback_used", "validation_issues", "response_message", "batch_count"):
                 if key in result_payload:
@@ -961,6 +977,10 @@ class NovelCoordinator:
             )
 
         self._hydrate_project_task_depends_on(created_tasks)
+        reused_task_count = self._mark_existing_project_outputs_reused(
+            task_pool,
+            created_tasks,
+        )
 
         task_pool.metadata.update({
             "contract_id": contract.contract_id,
@@ -970,6 +990,9 @@ class NovelCoordinator:
             "fallback_to_orchestrated": bool(self.fallback_to_orchestrated),
             "initialized_at": contract.updated_at,
         })
+        if reused_task_count:
+            task_pool.metadata["reused_task_count"] = reused_task_count
+            task_pool.metadata["reused_existing_outputs"] = True
 
         persisted_contract = contract.to_dict()
         return self.runtime_state_store.persist_contract_runtime(
@@ -1032,6 +1055,181 @@ class NovelCoordinator:
 
             task.depends_on = depends_on
             task.touch()
+
+    @staticmethod
+    def _has_project_data_value(value: Any) -> bool:
+        if value in (None, "", [], {}):
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(NovelCoordinator._has_project_data_value(item) for item in value)
+        if isinstance(value, dict):
+            return any(NovelCoordinator._has_project_data_value(item) for item in value.values())
+        return True
+
+    def _load_reusable_project_payload(self, data_type: str) -> Any:
+        try:
+            payload = self.project_manager.load_project_data(data_type)
+        except Exception as exc:
+            logger.debug(f"[Coordinator] load reusable project data failed for {data_type}: {exc}")
+            return None
+        return payload if self._has_project_data_value(payload) else None
+
+    def _project_data_result_ref(self, data_type: str) -> str:
+        try:
+            return self.project_manager.get_project_data_path(data_type).name
+        except Exception:
+            return f"{data_type}.json"
+
+    def _sync_reused_project_context(self, task_type: str, payload: Any) -> None:
+        try:
+            if task_type == "build_world":
+                world_payload = payload.get("world", payload) if isinstance(payload, dict) else payload
+                if hasattr(self.world_manager, "apply_payload"):
+                    self.world_manager.apply_payload(payload)
+                self.context_manager.save("world", world_payload, "world")
+            elif task_type == "build_characters":
+                if hasattr(self.character_manager, "characters"):
+                    self.character_manager.characters.clear()
+                load_characters = getattr(self.character_manager, "_load_characters", None)
+                if callable(load_characters):
+                    load_characters()
+                self.context_manager.save(
+                    "characters",
+                    self.character_manager.export_for_llm(),
+                    "character",
+                )
+            elif task_type == "build_outline":
+                self.context_manager.save("outline", payload, "plot")
+        except Exception as exc:
+            logger.debug(f"[Coordinator] sync reused context failed for {task_type}: {exc}")
+
+    def _sync_reused_chapter_settings_review(self, task: TaskDefinition) -> None:
+        try:
+            existing_state = self.project_manager.load_project_state(
+                "chapter_settings_review",
+                default={},
+            )
+        except Exception:
+            existing_state = {}
+        if isinstance(existing_state, dict) and bool(existing_state.get("approved")):
+            return
+
+        pause_for_review = bool(task.review_required) and bool(
+            (task.metadata or {}).get("stop_on_review_required", False)
+        )
+        review_state = {
+            "approved": not pause_for_review,
+            "status": "pending_review" if pause_for_review else "approved",
+            "updated_at": datetime.now().isoformat(),
+            "result_ref": "chapter_settings.json",
+            "row_count": 0,
+            "task_id": str(task.task_id or "").strip(),
+            "reused_existing": True,
+        }
+        try:
+            payload = self.project_manager.load_project_data("chapter_settings")
+            if isinstance(payload, list):
+                review_state["row_count"] = len([row for row in payload if isinstance(row, dict)])
+        except Exception:
+            pass
+        try:
+            self.project_manager.save_project_state("chapter_settings_review", review_state)
+        except Exception as exc:
+            logger.debug(f"[Coordinator] save reused chapter settings review failed: {exc}")
+
+    def _existing_chapter_result_ref(self, task: TaskDefinition) -> str:
+        inputs = task.inputs if isinstance(task.inputs, dict) else {}
+        chapter_number = self._normalize_chapter_number(inputs.get("chapter_number"), 0)
+        if chapter_number <= 0:
+            return ""
+        try:
+            rows = self.project_manager.load_project_data("chapters")
+        except Exception as exc:
+            logger.debug(f"[Coordinator] load reusable chapters failed: {exc}")
+            return ""
+        if not isinstance(rows, list):
+            return ""
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            row_number = self._normalize_chapter_number(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            if row_number != chapter_number:
+                continue
+            content = strip_internal_author_markers(row.get("content"))
+            if not str(content or "").strip():
+                continue
+            source_file = str(row.get("source_file") or row.get("path") or "").strip()
+            return source_file or self._project_data_result_ref("chapters")
+        return ""
+
+    def _reusable_result_for_contract_task(self, task: TaskDefinition) -> Optional[Dict[str, str]]:
+        task_type = str(task.task_type or "").strip()
+        data_type_by_task = {
+            "build_world": "worldbuilding",
+            "build_characters": "characters",
+            "build_outline": "outline",
+            "chapter_settings": "chapter_settings",
+        }
+        data_type = data_type_by_task.get(task_type)
+        if data_type:
+            payload = self._load_reusable_project_payload(data_type)
+            if payload is None:
+                return None
+            self._sync_reused_project_context(task_type, payload)
+            if task_type == "chapter_settings":
+                self._sync_reused_chapter_settings_review(task)
+            return {
+                "result_ref": self._project_data_result_ref(data_type),
+                "reuse_source": data_type,
+            }
+
+        if task_type == "write_chapter":
+            result_ref = self._existing_chapter_result_ref(task)
+            if result_ref:
+                return {
+                    "result_ref": result_ref,
+                    "reuse_source": "chapters",
+                }
+        return None
+
+    def _mark_existing_project_outputs_reused(
+        self,
+        task_pool: TaskPool,
+        tasks: List[TaskDefinition],
+    ) -> int:
+        agent_by_task_type = {
+            "build_world": "Worldbuilder",
+            "build_characters": "CharacterBuilder",
+            "build_outline": "Outliner",
+            "chapter_settings": "ChapterSettingBuilder",
+            "write_chapter": "ChapterWriter",
+        }
+        reused_count = 0
+        for task in tasks or []:
+            if not isinstance(task, TaskDefinition):
+                continue
+            reuse = self._reusable_result_for_contract_task(task)
+            if not reuse:
+                continue
+            task_type = str(task.task_type or "").strip()
+            task_pool.update_task_status(
+                task.task_id,
+                TaskStatus.COMPLETED,
+                assigned_agent=agent_by_task_type.get(task_type, str(task.assigned_agent or "")),
+                result_ref=str(reuse.get("result_ref") or ""),
+                metadata_patch={
+                    "reuse_existing": True,
+                    "reuse_source": str(reuse.get("reuse_source") or ""),
+                    "reused_at": datetime.now().isoformat(),
+                },
+            )
+            reused_count += 1
+        return reused_count
 
     def _load_project_outline_rows(self) -> List[Dict[str, Any]]:
         """加载项目级大纲行。"""
@@ -1268,14 +1466,17 @@ class NovelCoordinator:
         row["content"] = chapter_content
         row["updated_at"] = timestamp
 
-        # chapters.json represents completed chapter text. Planning-only rows
-        # stay in chapter_settings.json, otherwise progress/status code can
-        # mistake empty chapter shells for generated chapters.
-        completed_chapter_rows = [
+        # Keep slots through the current chapter so chapter identity does not
+        # collapse into list position, while avoiding future planning shells.
+        persisted_chapter_rows = [
             row for row in chapter_rows
-            if isinstance(row, dict) and str(row.get("content") or "").strip()
+            if isinstance(row, dict)
+            and (
+                self._normalize_chapter_number(row.get("chapter_number"), 0) <= chapter_number
+                or str(row.get("content") or "").strip()
+            )
         ]
-        self.project_manager.save_project_data("chapters", completed_chapter_rows)
+        self.project_manager.save_project_data("chapters", persisted_chapter_rows)
 
         legacy_outline_rows = self._load_project_outline_rows()
         if legacy_outline_rows and not all(
@@ -2715,6 +2916,37 @@ class NovelCoordinator:
     def get_candidate_agents_for_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         """查询指定任务的候选 Agent 列表。"""
         return self.collab_agent_registry.find_candidates(task)
+
+    def create_context_bundle(
+        self,
+        *,
+        source_mode: str,
+        source_file: str,
+        payload: Any,
+        summary: str = "",
+        suggested_target: str = "ContentReader.context_bundles",
+        source_label: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """创建显式迁移包草稿，不直接覆盖项目资料。"""
+        return create_context_bundle(
+            self.project_manager,
+            source_mode=source_mode,
+            source_file=source_file,
+            payload=payload,
+            summary=summary,
+            suggested_target=suggested_target,
+            source_label=source_label,
+            metadata=metadata,
+        )
+
+    def confirm_context_bundle(self, bundle_id: str, *, confirmed_by: str = "user") -> Dict[str, Any]:
+        """确认迁移包，使 ContentReader 后续可按需读取。"""
+        return confirm_context_bundle(
+            self.project_manager,
+            bundle_id,
+            confirmed_by=confirmed_by,
+        )
 
     def get_route_targets(self) -> Dict[str, Any]:
         """Return the unified route target snapshot used by router, dispatcher, and UI."""

@@ -7,7 +7,6 @@
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
-import json
 
 from ..utils.atomic_write import atomic_write_text
 
@@ -51,6 +50,7 @@ class ConfigValidator:
     def _validate_paths(self):
         """验证必需的路径"""
         from ..config import config
+        from ..constants import get_data_dir
 
         # 检查输出目录
         if not config.paths.output_dir.exists():
@@ -61,7 +61,7 @@ class ConfigValidator:
                 self.errors.append(f"无法创建输出目录 {config.paths.output_dir}: {e}")
 
         # 检查数据目录
-        data_dir = self.app_dir / "data"
+        data_dir = get_data_dir()
         if not data_dir.exists():
             try:
                 data_dir.mkdir(parents=True, exist_ok=True)
@@ -71,30 +71,28 @@ class ConfigValidator:
 
     def _validate_knowledge_base(self):
         """验证知识库配置"""
-        config_path = self.app_dir / "data" / "knowledge_base_config.json"
+        from ..constants import get_data_dir
+        from ..knowledge_runtime import (
+            apply_bundled_local_onnx_defaults,
+            has_embedding_config,
+            knowledge_base_config_path,
+            load_knowledge_base_settings,
+        )
 
-        if not config_path.exists():
+        data_dir = get_data_dir()
+        config_path = knowledge_base_config_path(data_dir)
+        kb_config = load_knowledge_base_settings(data_dir)
+        effective_config = apply_bundled_local_onnx_defaults(kb_config)
+
+        if not has_embedding_config(kb_config):
             self.warnings.append(
-                "知识库配置文件不存在。知识库功能将不可用。"
-                f"请创建 {config_path} 并配置 SiliconFlow API Key。"
+                "知识库向量 provider 未配置。知识库功能将不可用。"
+                f"请在 {config_path} 中配置 SiliconFlow API Key，或使用本地 ONNX 模型目录。"
             )
-            return
+        elif not config_path.exists() and effective_config.get("embedding_provider") in {"local", "local_onnx"}:
+            logger.info("[KnowledgeBase] 已发现内置本地 ONNX 向量模型，知识库将使用本地模型默认配置")
 
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                kb_config = json.load(f)
-
-            provider = str(kb_config.get("embedding_provider") or "api").lower()
-            api_key = kb_config.get("siliconflow_api_key", "")
-            has_embedding_config = bool(api_key and api_key != "your_siliconflow_api_key_here")
-            if provider in {"local", "local_onnx"}:
-                has_embedding_config = bool(kb_config.get("onnx_model_dir"))
-            if not has_embedding_config:
-                self.warnings.append(
-                    "知识库向量 provider 未配置。知识库功能将不可用。"
-                    f"请在 {config_path} 中配置 SiliconFlow API Key 或本地 ONNX 模型目录。"
-                )
-
             # 检查 ChromaDB
             try:
                 import chromadb
@@ -105,8 +103,6 @@ class ConfigValidator:
                     "请运行: pip install chromadb"
                 )
 
-        except json.JSONDecodeError as e:
-            self.errors.append(f"知识库配置文件格式错误: {e}")
         except Exception as e:
             self.warnings.append(f"读取知识库配置失败: {e}")
 
@@ -237,13 +233,15 @@ def validate_startup_config() -> bool:
 def print_startup_info():
     """打印启动信息"""
     from ..config import config
+    from ..version import get_app_version
     import sys
 
+    version = get_app_version()
     try:
         print("\n" + "="*60)
         print("🚀 山海·云烟")
         print("="*60)
-        print(f"版本: v1.0")
+        print(f"版本: v{version}")
         print(f"Python: {sys.version.split()[0]}")
         print(f"端口: {config.server.port}")
         print(f"输出目录: {config.paths.output_dir}")
@@ -251,7 +249,7 @@ def print_startup_info():
     except UnicodeEncodeError:
         # Windows 控制台编码问题的回退方案
         print("\n" + "="*60)
-        print("山海·云烟 v1.0")
+        print(f"山海·云烟 v{version}")
         print("="*60)
         print(f"Python: {sys.version.split()[0]}")
         print(f"Port: {config.server.port}")

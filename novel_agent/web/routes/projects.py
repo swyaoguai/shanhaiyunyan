@@ -1227,6 +1227,26 @@ async def import_novel_to_collab_mode(
         logger.warning(f"[Projects] Failed to sync imported chapters to knowledge base: {exc}")
         chapter_knowledge_sync = {"success": False, "status": "failed", "errors": [str(exc)]}
 
+    try:
+        material_supplement = import_service.supplement_project_materials(
+            project_manager=pm,
+            source_file=parsed["filename"],
+            chapters=chapters,
+        )
+        if material_supplement.get("success"):
+            try:
+                from ...library_service import get_library_service
+
+                svc = get_library_service()
+                for data_type, stats in material_supplement.get("data_types", {}).items():
+                    if stats.get("changed"):
+                        svc.upsert_from_legacy(data_type, pm.load_project_data(data_type))
+            except Exception as sync_exc:
+                logger.debug(f"[Projects] Library sync after import material supplement skipped: {sync_exc}")
+    except Exception as exc:
+        logger.warning(f"[Projects] Failed to supplement project materials from imported novel: {exc}")
+        material_supplement = {"success": False, "error": str(exc), "data_types": {}}
+
     return JSONResponse(
         {
             "success": True,
@@ -1243,6 +1263,7 @@ async def import_novel_to_collab_mode(
                 "edit_tasks": len(memory.get("edit_tasks", [])),
             },
             "chapter_knowledge_sync": chapter_knowledge_sync,
+            "material_supplement": material_supplement,
         }
     )
 

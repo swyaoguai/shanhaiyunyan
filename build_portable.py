@@ -3,7 +3,7 @@
 便携版打包脚本
 使用 PyInstaller 打包项目，创建便携目录。
 
-注意：正式发布请使用 build_release.py。发布约定只保留两个安装版 exe，
+注意：正式发布请使用 build_release.py。发布约定只保留内含检索模型版安装 exe，
 不再生成 zip 压缩包。
 """
 
@@ -14,20 +14,49 @@ import hashlib
 import subprocess
 import json
 import time
+import re
 from pathlib import Path
 from datetime import datetime
 
 # 项目配置
 APP_NAME = "山海·云烟"
 DISPLAY_NAME = "山海·云烟"
-APP_VERSION = "1.0"
 ROOT_DIR = Path(__file__).parent
+VERSION_FILE = ROOT_DIR / "VERSION"
+SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 BUILD_DIR = ROOT_DIR / "build"
 DIST_DIR = ROOT_DIR / "dist"
+
+
+def configure_output_encoding() -> None:
+    """Keep redirected build logs readable on Windows."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def read_app_version() -> str:
+    """Read the release version from env or VERSION."""
+    version = os.environ.get("SHANHAI_APP_VERSION", "").strip()
+    if not version:
+        version = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "1.0.0"
+    if not SEMVER_PATTERN.fullmatch(version):
+        raise ValueError(f"Invalid app version '{version}'. Expected semantic version like 1.0.1.")
+    return version
+
+
+configure_output_encoding()
+
+APP_VERSION = read_app_version()
 PORTABLE_DIR = DIST_DIR / f"{DISPLAY_NAME}_v{APP_VERSION}_Portable"
 RELEASE_DATA_DIR = BUILD_DIR / "release_data" / "novel_agent_data"
 SOURCE_ONNX_MODEL_DIR = ROOT_DIR / "novel_agent" / "models" / "embedding" / "default"
 SOURCE_SKILLS_DIR = ROOT_DIR / "skills"
+PRESET_API_CONFIG_ID = "preset-tsc5"
+PRESET_API_CONFIG_NAME = "探索仓API"
+PRESET_API_BASE = "https://test.tsc5.top/v1"
 
 
 def calculate_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
@@ -78,6 +107,50 @@ def _default_skills_config() -> dict:
             "trends_search": True,
             "agent_reach": True
         }
+    }
+
+
+def _default_global_api_config() -> dict:
+    return {
+        "configs": [
+            {
+                "id": PRESET_API_CONFIG_ID,
+                "name": PRESET_API_CONFIG_NAME,
+                "api_base": PRESET_API_BASE,
+                "api_key": "",
+                "api_keys": [],
+                "models": [],
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "created_at": "",
+                "api_type": "openai_chat",
+            }
+        ],
+        "active_config_id": PRESET_API_CONFIG_ID,
+        "active_model": "",
+    }
+
+
+def _default_knowledge_base_config(local_onnx_enabled: bool = False) -> dict:
+    return {
+        "embedding_provider": "local_onnx" if local_onnx_enabled else "api",
+        "siliconflow_api_key": "",
+        "siliconflow_base_url": "https://api.siliconflow.cn/v1",
+        "siliconflow_model": "BAAI/bge-m3",
+        "siliconflow_embedding_dim": 1024,
+        "onnx_model_dir": "novel_agent/models/embedding/default" if local_onnx_enabled else "",
+        "onnx_model_file": "model.onnx",
+        "onnx_tokenizer_dir": "",
+        "onnx_max_length": 512,
+        "onnx_threads": None,
+        "onnx_pooling": "cls",
+        "chunk_size": 500,
+        "chunk_overlap": 50,
+        "vector_weight": 0.7,
+        "fulltext_weight": 0.3,
+        "default_top_k": 5,
+        "summary_search_enabled": False,
+        "chapter_search_mode": "hybrid",
     }
 
 
@@ -135,6 +208,14 @@ def prepare_release_data():
     )
     (RELEASE_DATA_DIR / "skills_config.json").write_text(
         json.dumps(_default_skills_config(), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    (RELEASE_DATA_DIR / "global_api_config.json").write_text(
+        json.dumps(_default_global_api_config(), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    (RELEASE_DATA_DIR / "knowledge_base_config.json").write_text(
+        json.dumps(_default_knowledge_base_config(local_onnx_enabled=False), ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
 
@@ -221,6 +302,13 @@ def run_pyinstaller():
             encoding="utf-8"
         )
         print(f"[创建] skills_config.json")
+    global_api_config_file = data_dir / "global_api_config.json"
+    if not global_api_config_file.exists():
+        global_api_config_file.write_text(
+            json.dumps(_default_global_api_config(), ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        print(f"[创建] global_api_config.json")
     
     # 创建dist目录
     DIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -241,6 +329,7 @@ def run_pyinstaller():
         "--add-data", f"{templates_dir};novel_agent/web/templates",
         "--add-data", f"{prompts_dir};novel_agent/prompts",
         "--add-data", f"{data_dir};novel_agent/data",
+        "--add-data", f"{VERSION_FILE};.",
         # 隐藏导入
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops",
@@ -347,6 +436,9 @@ def create_portable_structure():
     (data_dir / "skills_config.json").write_text(
         json.dumps(_default_skills_config(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    (data_dir / "global_api_config.json").write_text(
+        json.dumps(_default_global_api_config(), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     
     print("[OK] 创建默认配置")
 
@@ -369,8 +461,16 @@ def create_portable_structure():
         if model_dst.exists():
             shutil.rmtree(model_dst)
         shutil.copytree(SOURCE_ONNX_MODEL_DIR, model_dst)
+        (data_dir / "knowledge_base_config.json").write_text(
+            json.dumps(_default_knowledge_base_config(local_onnx_enabled=True), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         print(f"[OK] 复制本地向量模型: {SOURCE_ONNX_MODEL_DIR.relative_to(ROOT_DIR)}")
     else:
+        (data_dir / "knowledge_base_config.json").write_text(
+            json.dumps(_default_knowledge_base_config(local_onnx_enabled=False), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         print("[提示] 未找到本地向量模型，便携包将不内置 local_onnx 模型")
 
     return True
@@ -640,7 +740,7 @@ def print_summary():
         print(f"  SHA256: {calculate_file_hash(exe_path, 'sha256')}")
     
     print(f"\n便携版目录: {PORTABLE_DIR}")
-    print("提示: 正式发布请运行 python build_release.py，只输出两个安装版 exe。")
+    print("提示: 正式发布请运行 python build_release.py，只输出内含检索模型版安装 exe。")
     print("\n" + "=" * 60)
 
 

@@ -61,22 +61,73 @@ if sys.platform == 'win32':
 configure_runtime_paths()
 
 import logging
-# 配置根日志 - 使用 append 模式避免文件锁冲突
+from logging.handlers import RotatingFileHandler
+
+RUNTIME_LOG_MAX_BYTES = 2 * 1024 * 1024
+RUNTIME_LOG_BACKUP_COUNT = 5
+RUNTIME_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+
+def _get_runtime_log_max_bytes() -> int:
+    raw = os.getenv("SHANHAI_LOG_MAX_MB", "").strip()
+    if not raw:
+        return RUNTIME_LOG_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return RUNTIME_LOG_MAX_BYTES
+    return max(value, 1) * 1024 * 1024
+
+
+def _get_runtime_log_backup_count() -> int:
+    raw = os.getenv("SHANHAI_LOG_BACKUP_COUNT", "").strip()
+    if not raw:
+        return RUNTIME_LOG_BACKUP_COUNT
+    try:
+        value = int(raw)
+    except ValueError:
+        return RUNTIME_LOG_BACKUP_COUNT
+    return min(max(value, 1), 20)
+
+
+def _build_runtime_log_handlers():
+    file_handler = RotatingFileHandler(
+        _get_runtime_log_file(),
+        maxBytes=_get_runtime_log_max_bytes(),
+        backupCount=_get_runtime_log_backup_count(),
+        encoding='utf-8',
+    )
+    stream_handler = logging.StreamHandler(sys.stdout)
+    return [file_handler, stream_handler]
+
+
+# 配置根日志 - 打包版长期运行时按大小轮转，避免 agent.log 无限增长。
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(_get_runtime_log_file(), encoding='utf-8', mode='a'),  # 改为追加模式
-        logging.StreamHandler(sys.stdout)
-    ]
+    format=RUNTIME_LOG_FORMAT,
+    handlers=_build_runtime_log_handlers()
 )
 logger = logging.getLogger(__name__)
+
+from novel_agent.version import get_app_version
 # 不要直接替换 uvicorn 的 handler。
 # uvicorn 的 AccessFormatter 依赖特定参数结构，强制复用根 handler 会导致
 # "ValueError: not enough values to unpack" 并刷屏日志。
 logging.getLogger("uvicorn").propagate = True
 logging.getLogger("uvicorn.error").propagate = True
-logging.getLogger("uvicorn.access").propagate = True
+logging.getLogger("uvicorn.access").disabled = True
+logging.getLogger("uvicorn.access").propagate = False
+
+for noisy_logger_name in (
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "watchfiles",
+    "ddgs",
+    "chromadb",
+):
+    logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
 # 确保能找到模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -181,10 +232,12 @@ def main():
         if port != base_port:
             print(f"\n[注意] 端口 {base_port} 被占用，自动切换到 {port}")
         
+        app_version = get_app_version()
+
         print(f"""
     ╔══════════════════════════════════════════════════════════════╗
     ║                                                              ║
-    ║   ✨ 山海·云烟 v1.0 - 山海入云烟                             ║
+    ║   ✨ 山海·云烟 v{app_version} - 山海入云烟                             ║
     ║                                                              ║
     ║   智能小说创作系统                                           ║
     ║   采用 Coordinator-Worker 多Agent协作架构                    ║
