@@ -8,7 +8,7 @@
 
 本仓库提供的是本地应用源码与 Windows 打包脚本。默认不提供云端账号、多用户权限、在线托管服务，也不面向公网部署。
 
-📦 **下载发布版**：[GitHub Releases](https://github.com/swyaoguai/shanghaiyunyan/releases/latest)
+📦 **下载发布版**：[GitHub Releases](https://github.com/swyaoguai/shanhaiyunyan/releases/latest)
 
 ---
 
@@ -106,7 +106,7 @@
 
 普通用户可以直接使用发布版安装包，无需安装 Python 或手动配置开发环境：
 
-- 📥 [下载山海·云烟 Windows 安装包](https://github.com/swyaoguai/shanghaiyunyan/releases/latest)
+- 📥 [下载山海·云烟 Windows 安装包](https://github.com/swyaoguai/shanhaiyunyan/releases/latest)
 
 从当前发布策略开始，正式发布只保留 **内含检索模型版**。该安装包会内置 `novel_agent/models/embedding/default` 下的本地 ONNX 向量模型，避免因为缺少本地检索模型导致知识库不可用。
 
@@ -282,7 +282,7 @@ data/
 
 ### 安装包用户
 
-前往 [Releases](https://github.com/swyaoguai/shanghaiyunyan/releases/latest) 下载最新安装包，覆盖安装即可。项目数据默认保存在本地数据目录中，正常覆盖安装不会主动删除你的创作数据。
+前往 [Releases](https://github.com/swyaoguai/shanhaiyunyan/releases/latest) 下载最新安装包，覆盖安装即可。项目数据默认保存在本地数据目录中，正常覆盖安装不会主动删除你的创作数据。
 
 ### 源码用户
 
@@ -316,4 +316,4 @@ python run.py
 
 - QQ 交流群：[点击加入](https://qm.qq.com/q/E25rrnPONy)
 - 群号：`760758525`
-- GitHub Issues：[问题反馈与功能建议](https://github.com/swyaoguai/shanghaiyunyan/issues)
+- GitHub Issues：[问题反馈与功能建议](https://github.com/swyaoguai/shanhaiyunyan/issues)
