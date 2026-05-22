@@ -114,7 +114,9 @@ class ConfigValidator:
 
     def _validate_skills(self):
         """验证 Skill 配置"""
-        skills_dir = self.project_root / "skills"
+        from ..constants import get_skills_dir
+
+        skills_dir = get_skills_dir()
 
         if not skills_dir.exists():
             self.warnings.append(

@@ -29,6 +29,11 @@ def refresh_runtime_after_config_reload() -> NovelCoordinator:
     set_coordinator(new_coordinator)
 
     router_agent = get_router_agent()
+    if router_agent and hasattr(router_agent, "refresh_model_config"):
+        try:
+            router_agent.refresh_model_config()
+        except Exception as exc:
+            logger.debug(f"[RuntimeRefresh] 刷新路由智能体模型配置失败: {exc}")
     if router_agent and hasattr(router_agent, "set_coordinator"):
         router_agent.set_coordinator(new_coordinator)
 

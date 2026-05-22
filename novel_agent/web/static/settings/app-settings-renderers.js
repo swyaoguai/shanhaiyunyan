@@ -277,6 +277,9 @@ function renderGlobalApiSettingsView({
                     <button id="test-active-config" class="settings-button">
                         <i class="ri-wifi-line"></i> 测试连接
                     </button>
+                    <button id="test-active-image-config" class="settings-button settings-button--ghost">
+                        <i class="ri-image-line"></i> 测试图片接口
+                    </button>
                     <span id="active-config-status" class="settings-status-text" style="margin-left: auto;">
                         ${activeConfig ? `当前: ${safeText(normalizeApiConfigDisplayName(activeConfig))} / ${safeText(activeModel || '未选择模型')}` : '未选择配置'}
                     </span>
@@ -477,10 +480,23 @@ function _apiTypeBadgeClass(apiType) {
     return 'settings-chip--info';
 }
 
+function _imageApiFormatLabel(format) {
+    const labels = {
+        'auto': '图片 Auto',
+        'openai_images': 'OpenAI Images',
+        'qwen_images': 'Qwen Images',
+        'gemini_native': 'Gemini 图片',
+        'responses': 'Responses 图片',
+        'chat_completions': 'Chat 图片'
+    };
+    return labels[format] || '图片 Auto';
+}
+
 function renderConfigCard(cfg) {
     const isActive = cfg.id === currentActiveConfigId;
     const modelCount = cfg.models ? cfg.models.length : 0;
     const apiType = cfg.api_type || 'openai_chat';
+    const imageApiFormat = cfg.image_api_format || 'auto';
     const keyCount = Array.isArray(cfg.api_keys)
         ? cfg.api_keys.filter((entry) => entry?.key_set).length
         : (cfg.api_key_set ? 1 : 0);
@@ -497,6 +513,7 @@ function renderConfigCard(cfg) {
                         ${renderRelayQuickLink(cfg, 'settings-quick-link--card')}
                         ${isActive ? '<span class="settings-badge settings-badge--success">当前使用</span>' : ''}
                         <span class="settings-chip ${_apiTypeBadgeClass(apiType)}"><i class="ri-plug-line"></i> ${_apiTypeLabel(apiType)}</span>
+                        <span class="settings-chip settings-chip--info"><i class="ri-image-line"></i> ${_imageApiFormatLabel(imageApiFormat)}</span>
                         ${keyStatusChip}
                     </div>
                     <div class="settings-card-copy">

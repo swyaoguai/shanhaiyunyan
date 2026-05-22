@@ -59,6 +59,25 @@ async function testApiConnection(configId, model) {
     });
 }
 
+async function testImageApiConnection(configId, model) {
+    const selectedConfig = currentApiConfigs.find((item) => item.id === configId);
+
+    if (!selectedConfig) {
+        throw new Error('请先选择一个配置');
+    }
+    if (isBuiltinPresetApiConfig(selectedConfig)) {
+        throw new Error('探索仓API不能直接测试。请先新建或选择一套已填写 Key 和图片模型的 API 配置');
+    }
+
+    return apiCall('/api/test-image-connection', 'POST', {
+        api_base: selectedConfig.api_base,
+        config_id: configId,
+        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        api_type: selectedConfig.api_type || 'openai_chat',
+        image_api_format: selectedConfig.image_api_format || 'auto'
+    });
+}
+
 async function testAgentApiConnection(agentId, configId, model) {
     const selectedConfig = agentPageApiConfigs.find((item) => item.id === configId);
 
@@ -185,6 +204,7 @@ async function saveSkillsConfig(skills) {
 window.fetchGlobalApiSettingsData = fetchGlobalApiSettingsData;
 window.saveActiveApiConfig = saveActiveApiConfig;
 window.testApiConnection = testApiConnection;
+window.testImageApiConnection = testImageApiConnection;
 window.testAgentApiConnection = testAgentApiConnection;
 window.saveTimeoutSettings = saveTimeoutSettings;
 window.deleteApiConfig = deleteApiConfig;

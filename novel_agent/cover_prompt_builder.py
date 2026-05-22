@@ -13,6 +13,13 @@ FIXED_NEGATIVE_PROMPT = (
     "避免低清晰度、过度模糊、脸部崩坏、手部畸形。"
 )
 
+NEUTRAL_ELEMENT_DEFAULTS = {
+    "characters": "主角或核心主体根据书名、项目资料或创作想法呈现，身份、动作和关系不添加未提供设定",
+    "scene_background": "背景场景根据书名、项目资料或创作想法呈现，保持与内容一致，不引入额外题材",
+    "symbols_props": "只使用书名、项目资料或创作想法中明确出现的道具、符号和核心意象",
+    "atmosphere_color": "根据作品内容选择情绪、主色和光影，主体突出，氛围清晰",
+}
+
 
 @dataclass(frozen=True)
 class CoverTemplate:
@@ -66,7 +73,7 @@ def _cover_template(
         ),
         element_prompt=(
             "{characters}，{scene_background}，{symbols_props}，{atmosphere_color}，"
-            "商业小说封面构图，主体清晰，背景服务于题材氛围，二维精修插画质感，高清细节。"
+            "商业小说封面构图，主体清晰，背景服务于作品氛围，二维精修插画质感，高清细节。"
         ),
         variables=["characters", "scene_background", "symbols_props", "atmosphere_color"],
         defaults=defaults,
@@ -76,36 +83,36 @@ def _cover_template(
 COVER_TEMPLATES: List[CoverTemplate] = [
     _cover_template(
         template_id="wuxia_gold_blade",
-        name="古风武侠金锋字",
-        genre="武侠 / 仙侠 / 玄幻",
-        description="剑刃飞白和金属高光适合大气磅礴的男频封面。",
-        preview="金色剑锋书法字、墨色山河、仙侠气势",
+        name="金锋书法字",
+        genre="书法 / 金属 / 锋芒",
+        description="剑刃飞白、金属高光和强对比描边组成的大气标题字。",
+        preview="金色剑锋书法字、墨色山河、开阔气势",
         preview_image="/static/cover-examples/typography-01.jpg",
         typography_style=(
-            "古风武侠艺术字，书法笔触飘逸凌厉，笔画带剑刃般的锋芒与飞白效果，"
+            "锋芒书法标题字，书法笔触飘逸凌厉，笔画带剑刃般的锋芒与飞白效果，"
             "金色渐变金属质感，边缘带亮白色高光与深灰色描边，外附柔和的白色辉光/光晕，"
-            "字体带有仙侠玄幻的磅礴气势，适合小说封面，超清细节，8K，高对比度"
+            "字形开阔有力量感，标题层次清晰，超清细节，8K，高对比度"
         ),
         defaults={
-            "characters": "身负长剑的侠客主角，衣袂被山风掀起，背影坚毅",
-            "scene_background": "云雾山河、古道与远处巍峨群峰",
-            "symbols_props": "剑刃、山河纹样、飞白光痕",
-            "atmosphere_color": "金色高光与墨色高反差，苍茫磅礴",
+            "characters": "主角或核心角色立于画面主体位置，轮廓坚毅，姿态有张力",
+            "scene_background": "与故事设定匹配的辽阔场景，远景层次清晰",
+            "symbols_props": "锋芒光痕、山河纹样、金色笔触装饰",
+            "atmosphere_color": "金色高光与深色高反差，开阔有力量感",
         },
     ),
     _cover_template(
         template_id="luxury_gilded",
         name="轻奢鎏金浮雕字",
-        genre="现言 / 商战 / 豪门",
-        description="烫金浮雕和干净背景适合高级商业感、豪门和契约题材。",
+        genre="鎏金 / 浮雕 / 轻奢",
+        description="烫金浮雕、铂金描边和柔和光影组成的高级标题字。",
         preview="鎏金浮雕字、铂金描边、柔和高级光影",
         preview_image="/static/cover-examples/typography-02.jpg",
         typography_style=(
-            "高级轻奢鎏金艺术字体，金属烫金质感，细腻铂金描边，立体浮雕字体，"
-            "简约高级干净背景，光影柔和，高级商业艺术字体，高清质感，精致细腻"
+            "高级轻奢鎏金标题字，金属烫金质感，细腻铂金描边，立体浮雕字体，"
+            "字面层次简约清晰，光影柔和，高清质感，精致细腻"
         ),
         defaults={
-            "characters": "气质冷静的都市男女主，轮廓利落，带高级商业杂志感",
+            "characters": "核心角色轮廓利落，姿态克制高级，带精致杂志感",
             "scene_background": "极简深色空间、丝绒或大理石质感背景",
             "symbols_props": "合同、玫瑰、金色徽记或高定珠宝",
             "atmosphere_color": "柔和金色光影，干净克制，轻奢高级",
@@ -113,219 +120,218 @@ COVER_TEMPLATES: List[CoverTemplate] = [
     ),
     _cover_template(
         template_id="gothic_blood",
-        name="恐怖哥特血滴字",
-        genre="恐怖 / 惊悚 / 暗黑",
-        description="尖锐红黑血滴字效适合强冲击力惊悚封面。",
+        name="哥特血滴字",
+        genre="哥特 / 血滴 / 暗色",
+        description="尖锐棱角、暗红血滴和白色外发光组成的冲击型标题字。",
         preview="暗红血滴、哥特尖角、白色外发光",
         preview_image="/static/cover-examples/typography-03.jpg",
         typography_style=(
-            "恐怖哥特风格字体，尖锐棱角字体，红色血滴效果，液态血迹滴落纹理，"
-            "暗黑惊悚艺术字，暗红色渐变，白色外发光描边，金属锐利质感，"
-            "毛骨悚然的血腥文字，暗黑小说封面标题，高对比度，强烈冲击力，超高清，细节拉满"
+            "哥特尖角标题字，尖锐棱角字体，红色血滴效果，液态滴落纹理，"
+            "暗红色渐变，白色外发光描边，金属锐利质感，"
+            "字形压迫感强，高对比度，强烈冲击力，超高清，细节拉满"
         ),
         defaults={
-            "characters": "被阴影笼罩的调查者或惊恐主角，半张脸隐入黑暗",
-            "scene_background": "废弃宅院、雨夜街巷或红雾森林",
+            "characters": "核心角色半身或剪影被暗色轮廓包裹，表情克制",
+            "scene_background": "暗色空间、雨雾街角或高反差背景",
             "symbols_props": "血色信封、旧钥匙、裂纹镜面",
-            "atmosphere_color": "暗红与黑色强对比，惊悚压迫",
+            "atmosphere_color": "暗红与黑色强对比，压迫感强",
         },
     ),
     _cover_template(
         template_id="chinese_horror_brush",
-        name="中式惊悚血墨字",
-        genre="中式恐怖 / 悬疑 / 民俗",
-        description="竖版血墨毛笔字适合民俗怪谈和中式恐怖网文。",
-        preview="竖排血墨字、枯笔飞白、旧宅阴影",
+        name="血墨毛笔字",
+        genre="血墨 / 毛笔 / 竖排",
+        description="血墨质感、枯笔飞白和竖排版式组成的毛笔标题字。",
+        preview="竖排血墨字、枯笔飞白、斑驳暗影",
         preview_image="/static/cover-examples/typography-04.jpg",
         typography_style=(
-            "暗黑惊悚毛笔书法字体，凌厉锋利笔触，暗红血色水墨质感，猩红血迹喷溅效果，"
-            "破损斑驳做旧纹理，暗黑哥特悬疑氛围，红白强对比光影，白色锐利外发光描边，"
-            "竖版排版，中式恐怖网文标题，高对比度氛围感，高清细节，阴森诡异氛围感，"
+            "血墨毛笔书法标题字，凌厉锋利笔触，暗红血色水墨质感，猩红喷溅效果，"
+            "破损斑驳做旧纹理，红白强对比光影，白色锐利外发光描边，"
+            "竖版排版，高对比度氛围感，高清细节，字形张力强，"
             "血色晕染边缘，枯笔飞白笔触"
         ),
         defaults={
-            "characters": "夜行的主角背影，手持旧灯笼，身后隐约有影",
-            "scene_background": "破旧祠堂、深巷门楼或荒村老宅",
-            "symbols_props": "红纸符、铜铃、旧灯笼、斑驳木门",
-            "atmosphere_color": "暗红血墨与冷白光对撞，阴森诡异",
+            "characters": "核心角色背影或侧影置于竖向构图中，轮廓清晰",
+            "scene_background": "斑驳墙面、旧木纹或暗色空间，保留竖向留白",
+            "symbols_props": "血墨晕染、铜色小物、斑驳木纹、红色纸片",
+            "atmosphere_color": "暗红血墨与冷白光对撞，高反差压迫感",
         },
     ),
     _cover_template(
         template_id="sweet_campus_bluegreen",
-        name="甜宠蓝绿花体字",
-        genre="青春 / 校园 / 甜宠",
-        description="清新蓝绿色手写花体适合校园恋爱和治愈甜文。",
-        preview="蓝绿渐变花体、星光光斑、柔焦校园",
+        name="蓝绿柔光花体字",
+        genre="蓝绿 / 花体 / 柔光",
+        description="蓝绿色渐变、圆润手写花体和星光光斑组成的柔和标题字。",
+        preview="蓝绿渐变花体、星光光斑、柔焦亮色",
         preview_image="/static/cover-examples/typography-05.jpg",
         typography_style=(
-            "甜宠言情小说封面艺术字体，梦幻渐变蓝绿色调，圆润流畅的手写花体字，"
+            "柔光花体标题字，梦幻渐变蓝绿色调，圆润流畅的手写花体字，"
             "带有飘逸装饰性曲线，高光与外发光效果，清新柔焦质感，点缀星光与光斑元素，"
-            "治愈系青春氛围感，字体边缘有柔和光晕，干净通透的色彩，细腻的光泽描边，"
-            "清新校园恋爱风格，高清细节"
+            "字体边缘有柔和光晕，干净通透的色彩，细腻的光泽描边，"
+            "整体轻盈明亮，高清细节"
         ),
         defaults={
-            "characters": "青春感男女主并肩走在阳光里，表情自然温柔",
-            "scene_background": "校园林荫道、教室窗边或夏日操场",
+            "characters": "角色或主体面向柔光，表情自然温柔，轮廓干净",
+            "scene_background": "明亮户外、窗边或柔光空间，背景虚化通透",
             "symbols_props": "星光、光斑、课本、心动便签",
-            "atmosphere_color": "蓝绿色梦幻渐变，柔焦清新，治愈明亮",
+            "atmosphere_color": "蓝绿色梦幻渐变，柔焦清新，明亮通透",
         },
     ),
     _cover_template(
         template_id="fresh_xianxia_jade",
-        name="清新古风青玉字",
-        genre="古风 / 仙侠 / 治愈",
-        description="青绿色玉石通透感适合清新仙侠和草木灵气题材。",
-        preview="青绿玉石花体、菱形星光、仙侠治愈",
+        name="青玉花体字",
+        genre="青玉 / 花体 / 通透",
+        description="青绿色玉石通透感、卷曲线条和星光装饰组成的花体标题字。",
+        preview="青绿玉石花体、菱形星光、通透柔光",
         preview_image="/static/cover-examples/typography-06.jpg",
         typography_style=(
-            "清新古风花体艺术字，青绿色渐变光泽字体，带有飘逸装饰性卷曲线条，"
+            "青玉花体标题字，青绿色渐变光泽字体，带有飘逸装饰性卷曲线条，"
             "金属玉石般通透质感，柔和外发光描边，点缀星光与菱形装饰元素，"
-            "原神草系风格，梦幻治愈氛围感，细腻高光描边，手写毛笔风曲线，"
-            "仙侠网文封面字体，高通透度，青绿色调渐变，边缘柔化光晕，超高清细节"
+            "细腻高光描边，手写毛笔风曲线，高通透度，青绿色调渐变，边缘柔化光晕，超高清细节"
         ),
         defaults={
-            "characters": "灵气充盈的少年或少女主角，衣袂轻盈，手中有草木灵光",
-            "scene_background": "竹林、云海仙境、发光藤蔓与清泉",
+            "characters": "核心角色或主体被青绿色光效勾勒，姿态轻盈",
+            "scene_background": "竹影、云雾、发光藤蔓与清泉等清透场景",
             "symbols_props": "青玉、草叶灵纹、星光菱形装饰",
-            "atmosphere_color": "青绿色通透光泽，梦幻治愈，空气清澈",
+            "atmosphere_color": "青绿色通透光泽，梦幻柔和，空气清澈",
         },
     ),
     _cover_template(
         template_id="cute_chibi_bold",
         name="Q版软萌粗描边字",
-        genre="团宠 / 萌宝 / 轻喜",
-        description="白底黑边胖乎乎字形适合可爱、轻松和合家欢题材。",
+        genre="Q版 / 粗描边 / 涂鸦",
+        description="白底黑边、胖乎乎字形和手绘涂鸦装饰组成的可爱标题字。",
         preview="Q版圆润字、黑白粗描边、星星涂鸦",
         preview_image="/static/cover-examples/typography-07.jpg",
         typography_style=(
             "Q版可爱圆润艺术字体，卡通漫画风加粗字体，白色填充+黑色粗描边，"
             "圆润饱满的胖乎乎笔画，搭配星星、圆点、小三角等可爱装饰元素，"
-            "带有俏皮活泼的手绘涂鸦感，白底黑边醒目清晰，网文小说封面标题，"
+            "带有俏皮活泼的手绘涂鸦感，白底黑边醒目清晰，标题字稳定可读，"
             "高对比度，可爱软萌风格，细节干净利落"
         ),
         defaults={
-            "characters": "Q版小主角或萌系家庭角色，表情活泼讨喜",
-            "scene_background": "暖色玩具屋、糖果街道或轻喜剧生活场景",
+            "characters": "Q版核心角色或主体，表情活泼讨喜，轮廓圆润",
+            "scene_background": "暖色小空间、糖果色街景或轻松生活场景",
             "symbols_props": "星星、圆点、小三角、贴纸涂鸦",
             "atmosphere_color": "明亮高对比，软萌活泼，干净利落",
         },
     ),
     _cover_template(
         template_id="wuxia_blue_lightning",
-        name="青蓝武侠电光字",
-        genre="武侠 / 游戏风 / 仙侠",
-        description="青蓝金属和火焰电光适合战斗感更强的武侠封面。",
-        preview="青蓝金属书法、电光火焰、武器装饰",
+        name="青蓝电光书法字",
+        genre="青蓝 / 金属 / 电光",
+        description="青蓝金属、书法飞白和火焰电光组成的强冲击标题字。",
+        preview="青蓝金属书法、电光火焰、速度光效",
         preview_image="/static/cover-examples/typography-08.jpg",
         typography_style=(
-            "古风武侠游戏标题字体，凌厉锋利的毛笔书法字，青蓝色金属光泽渐变，"
+            "青蓝金属书法标题字，凌厉锋利的毛笔书法字，青蓝色金属光泽渐变，"
             "带有发光外描边，水墨笔触质感，字体边缘带有火焰/电光特效，"
-            "带有金属反光和光晕，暗黑古风背景，高对比度，大气磅礴的仙侠/武侠风格，"
-            "带有武器装饰元素，超高清细节，强烈视觉冲击力"
+            "带有金属反光和光晕，高对比度，字形大气有速度感，"
+            "超高清细节，强烈视觉冲击力"
         ),
         defaults={
-            "characters": "拔剑出鞘的武者主角，动作凌厉，斗篷翻飞",
-            "scene_background": "雷雨山巅、古战场或暗黑仙门",
-            "symbols_props": "长剑、枪戟、青蓝电光、火焰边缘",
+            "characters": "动作感强的主角或主体，轮廓被青蓝电光切出",
+            "scene_background": "高反差暗色空间、风暴光效或速度线背景",
+            "symbols_props": "金属纹样、青蓝电光、火焰边缘、飞散光片",
             "atmosphere_color": "冷青蓝金属光与暗色背景强对比",
         },
     ),
     _cover_template(
         template_id="romance_blue_pink",
-        name="现言甜宠蓝粉花体字",
-        genre="现言 / 甜宠 / 霸总",
-        description="蓝紫玫红花体适合少女心、现代甜宠和都市恋爱。",
+        name="蓝粉浪漫花体字",
+        genre="蓝粉 / 花体 / 浪漫",
+        description="蓝紫玫红渐变、优雅花体和爱心星光组成的华丽标题字。",
         preview="蓝紫玫红渐变、爱心星光、华丽曲线",
         preview_image="/static/cover-examples/typography-09.jpg",
         typography_style=(
-            "甜宠言情小说封面艺术字，浪漫优雅花体手写字体，蓝紫到玫红渐变色彩，"
+            "浪漫优雅花体手写标题字，蓝紫到玫红渐变色彩，"
             "细腻高光描边，带有飘逸卷曲装饰线条，柔和外发光效果，点缀星光、爱心小装饰，"
-            "少女心爆棚的氛围感，字体边缘柔化光晕，通透干净的色彩质感，"
-            "适配现言甜宠/霸总网文，高清细节，精致华丽的曲线设计"
+            "字体边缘柔化光晕，通透干净的色彩质感，"
+            "高清细节，精致华丽的曲线设计"
         ),
         defaults={
-            "characters": "现代都市男女主靠近对视，气氛暧昧但克制",
-            "scene_background": "夜色城市、玻璃窗、玫瑰与柔光",
+            "characters": "核心角色或主体靠近柔光，姿态优雅，关系感明确",
+            "scene_background": "夜色光影、玻璃窗、玫瑰与柔光背景",
             "symbols_props": "爱心星光、玫瑰、戒指或高楼灯影",
             "atmosphere_color": "蓝紫到玫红渐变，通透干净，浪漫华丽",
         },
     ),
     _cover_template(
         template_id="ancient_romance_platinum",
-        name="古言白金花瓣字",
-        genre="古言 / 虐恋 / 仙侠言情",
-        description="白金金属书法和红花瓣适合清冷深情的古言封面。",
+        name="白金花瓣书法字",
+        genre="白金 / 书法 / 花瓣",
+        description="白金金属书法、深色描边和红色花瓣组成的清冷标题字。",
         preview="白金毛笔字、红色花瓣、清冷深情",
         preview_image="/static/cover-examples/typography-10.jpg",
         typography_style=(
-            "古风言情小说封面艺术字体，凌厉飘逸的毛笔书法字，白金色渐变金属光泽，"
+            "白金书法标题字，凌厉飘逸的毛笔书法字，白金色渐变金属光泽，"
             "带有深色外描边和红色高光点缀，边缘带柔化光晕，搭配飘落的红色花瓣装饰，"
             "水墨风笔触，苍劲有力的笔画，带有飞白效果，清冷又深情的氛围感，高对比度，"
-            "适配古言虐恋/仙侠言情网文封面，超高清细节，精致的金属反光质感"
+            "超高清细节，精致的金属反光质感"
         ),
         defaults={
-            "characters": "古装男女主远近错位，一人回望，一人背影渐远",
-            "scene_background": "月下宫墙、雪夜长街或仙门台阶",
+            "characters": "核心角色或主体与红色花瓣形成前后景层次",
+            "scene_background": "月光、雪色、深色墙面或台阶式背景",
             "symbols_props": "红色花瓣、玉簪、信笺、薄雾",
             "atmosphere_color": "白金清冷光泽配深色描边，深情克制",
         },
     ),
     _cover_template(
         template_id="cyber_mecha_neon",
-        name="赛博机甲霓虹字",
-        genre="科幻 / 机甲 / 男频爽文",
-        description="硬朗科技粗体和青蓝霓虹适合科幻机甲与未来战争。",
-        preview="青蓝金属粗体、机甲切割线、霓虹描边",
+        name="霓虹科技金属字",
+        genre="科技 / 金属 / 霓虹",
+        description="硬朗粗体、机械切割线和青蓝霓虹组成的科技标题字。",
+        preview="青蓝金属粗体、机械切割线、霓虹描边",
         preview_image="/static/cover-examples/typography-11.jpg",
         typography_style=(
-            "赛博朋克科幻机甲风字体，硬朗厚重的科技感粗体字，青蓝色金属渐变光泽，"
-            "带有尖锐棱角与机甲切割线条，发光霓虹描边，金属镀铬质感，"
-            "带有未来科技几何装饰（三角/机械纹路），高对比度，冷色调，"
-            "适配科幻男频爽文/机甲网文封面，超高清细节，强烈视觉冲击力"
+            "霓虹科技金属标题字，硬朗厚重的科技感粗体字，青蓝色金属渐变光泽，"
+            "带有尖锐棱角与机械切割线条，发光霓虹描边，金属镀铬质感，"
+            "带有几何装饰（三角/机械纹路），高对比度，冷色调，"
+            "超高清细节，强烈视觉冲击力"
         ),
         defaults={
-            "characters": "驾驶员或机甲战士主角，面部被冷光切出轮廓",
-            "scene_background": "未来机库、星际战场或霓虹城市天际线",
-            "symbols_props": "机甲装甲片、三角几何纹路、全息界面",
+            "characters": "核心角色或主体被冷色轮廓光勾勒，姿态坚定",
+            "scene_background": "金属空间、霓虹街景或几何光幕背景",
+            "symbols_props": "金属装甲片、三角几何纹路、全息界面",
             "atmosphere_color": "青蓝冷光、高对比金属质感、未来科技感",
         },
     ),
     _cover_template(
         template_id="male_red_gold_seal",
-        name="红金男频印章字",
-        genre="三国 / 穿越 / 古风爽文",
-        description="正红金属书法和印章框适合厚重豪迈的历史穿越题材。",
+        name="红金印章书法字",
+        genre="红金 / 书法 / 印章",
+        description="正红金属书法、鎏金高光和圆形印章框组成的厚重标题字。",
         preview="红金撞色、圆形印章、豪迈毛笔字",
         preview_image="/static/cover-examples/typography-12.jpg",
         typography_style=(
-            "古风男频爽文小说封面艺术字，大气磅礴的毛笔书法字体，正红渐变金属光泽，"
+            "红金印章书法标题字，大气磅礴的毛笔书法字体，正红渐变金属光泽，"
             "带有鎏金高光与外发光描边，笔画苍劲飘逸、笔锋锐利有力，搭配圆形印章式文字框，"
             "点缀暖金色星光光斑，带有水墨飞白效果，红金撞色强烈对比，"
-            "适配三国/穿越古风网文，高清细节，厚重豪迈的氛围感"
+            "高清细节，厚重豪迈的氛围感"
         ),
         defaults={
-            "characters": "披甲主角立于战旗前，目光坚定，气势压场",
-            "scene_background": "古战场、城楼烽火或王朝大殿",
-            "symbols_props": "圆形印章、战旗、赤色鼎纹、金色光斑",
+            "characters": "核心角色或主体立于画面中央，姿态沉稳有压场感",
+            "scene_background": "红金高反差背景、旗形光影或厚重纹样空间",
+            "symbols_props": "圆形印章、赤色纹样、金色光斑、厚重边框",
             "atmosphere_color": "红金强对比，厚重豪迈，热血昂扬",
         },
     ),
     _cover_template(
         template_id="female_purple_vertical",
-        name="古言女频紫底白字",
-        genre="古言 / 女频 / 宫廷",
-        description="紫底白色竖排书法适合柔美大气的古言女频封面。",
+        name="紫底竖排白字",
+        genre="白字 / 竖排 / 紫底",
+        description="纯白竖排书法、深紫底色和红色小印章组成的柔美标题字。",
         preview="纯白竖排书法、深紫背景、红色小印章",
         preview_image="/static/cover-examples/typography-13.jpg",
         typography_style=(
-            "古言女频小说封面艺术字，温婉飘逸的古风毛笔书法字体，纯白色笔触，"
+            "竖排白色毛笔标题字，温婉飘逸的毛笔书法字体，纯白色笔触，"
             "带有柔和飞白效果，线条纤细灵动，竖排排版，搭配红色边框竖排小字印章，"
-            "适配深紫色古风背景，字体边缘干净利落，带有淡淡的朦胧质感，"
-            "柔美又大气的古风言情风格，高清细节，笔触流畅自然"
+            "深紫色底色上保持高可读性，字体边缘干净利落，带有淡淡的朦胧质感，"
+            "柔美又大气，高清细节，笔触流畅自然"
         ),
         defaults={
-            "characters": "古装女主立于帘幕后，神情温婉却有韧性",
-            "scene_background": "深紫色宫苑、纱帘、花枝与夜雾",
+            "characters": "核心角色或主体置于竖向留白中，神情温婉却有韧性",
+            "scene_background": "深紫底色、纱雾、花枝与柔和暗面背景",
             "symbols_props": "红色竖排小印章、花枝、玉佩、纱帘",
             "atmosphere_color": "深紫朦胧背景配纯白笔触，柔美大气",
         },
@@ -381,81 +387,20 @@ def _contains_any(text: str, keywords: Iterable[str]) -> bool:
 
 
 def _infer_visual_elements_from_seed(seed_text: str, title: str, template: CoverTemplate) -> Dict[str, str]:
-    """Infer cover elements from user-provided names and ideas before template defaults."""
+    """Build neutral cover constraints from user-provided names and ideas."""
     text = _compact_text(seed_text, 900)
     title_text = _compact_text(title, 80)
     if not text and not title_text:
         return {}
 
     subject = _first_non_empty(text, title_text)
-    inferred: Dict[str, str] = {}
-
-    if _contains_any(subject, ("孙悟空", "悟空", "齐天大圣", "金箍棒", "赛亚人")):
-        inferred.update(
-            {
-                "characters": _first_non_empty(
-                    text,
-                    "孙悟空式主角立于画面中央，桀骜、热血，衣甲与发丝被能量风掀起",
-                ),
-                "scene_background": "云海天宫、破碎石阶与远处翻涌的金色能量风暴，带神话冒险感",
-                "symbols_props": "金箍棒、祥云纹、碎石、金色斗气光环",
-                "atmosphere_color": "金橙能量光与深蓝夜色对比，热血、神性、史诗感",
-            }
-        )
-    elif _contains_any(subject, ("赛博", "机甲", "星舰", "未来", "宇宙", "星际", "AI", "机器人")):
-        inferred.update(
-            {
-                "characters": f"{subject}，冷光勾勒轮廓，姿态坚定，带未来战斗感",
-                "scene_background": "霓虹城市、星舰残骸或未来机库，远处有冷色能量光",
-                "symbols_props": "全息界面、机械纹路、三角科技符号、金属碎片",
-                "atmosphere_color": "青蓝冷光、金属质感、高对比未来科技氛围",
-            }
-        )
-    elif _contains_any(subject, ("恐怖", "惊悚", "诡异", "悬疑", "血", "鬼", "怪谈", "红月")):
-        inferred.update(
-            {
-                "characters": f"{subject}，主角半身隐入阴影，表情克制紧张",
-                "scene_background": "雨夜旧街、废弃宅院或红雾笼罩的城市角落",
-                "symbols_props": "旧钥匙、裂纹镜面、红色信封、血色光痕",
-                "atmosphere_color": "暗红与冷黑强对比，压迫、悬疑、惊悚",
-            }
-        )
-    elif _contains_any(subject, ("校园", "甜宠", "恋爱", "青春", "治愈", "少女", "霸总", "豪门")):
-        inferred.update(
-            {
-                "characters": f"{subject}，主角关系明确，表情自然，有心动瞬间",
-                "scene_background": "校园林荫道、都市玻璃窗或暖光街角",
-                "symbols_props": "星光、便签、玫瑰、爱心光斑",
-                "atmosphere_color": "柔焦暖光，清新通透，浪漫治愈",
-            }
-        )
-    elif _contains_any(subject, ("宫廷", "古言", "王朝", "穿越", "三国", "将军", "女帝", "公主")):
-        inferred.update(
-            {
-                "characters": f"{subject}，古装主角站姿稳定，服饰层次清晰",
-                "scene_background": "宫墙、长街、城楼或王朝大殿，远景有旗影与薄雾",
-                "symbols_props": "玉佩、花瓣、印章、战旗或信笺",
-                "atmosphere_color": "红金或白金高光，厚重古风，情绪克制",
-            }
-        )
-    elif _contains_any(subject, ("修仙", "仙侠", "玄幻", "灵气", "剑", "宗门", "神魔", "妖")):
-        inferred.update(
-            {
-                "characters": f"{subject}，主角持剑或凝聚灵光，衣袂翻飞",
-                "scene_background": "云海仙山、宗门石阶、古战场或秘境入口",
-                "symbols_props": "长剑、符纹、灵光、山河纹样",
-                "atmosphere_color": "高幻想光效，金色或青蓝灵光，磅礴有层次",
-            }
-        )
-    else:
-        inferred.update(
-            {
-                "characters": f"{subject}，主角形象明确，姿态有故事张力",
-                "scene_background": f"围绕“{title_text or template.genre}”建立封面场景，背景与角色命运相关",
-                "symbols_props": "与书名和主角相关的核心符号、光痕和装饰纹样",
-                "atmosphere_color": f"贴合{template.genre}题材的商业封面色彩，主体突出，氛围清晰",
-            }
-        )
+    quoted = f"“{subject}”"
+    inferred: Dict[str, str] = {
+        "characters": f"围绕{quoted}呈现主角或核心主体，身份、动作和关系以已提供内容为准",
+        "scene_background": f"围绕{quoted}建立封面背景，场景只来自已提供内容，不加入额外题材设定",
+        "symbols_props": f"提取{quoted}中明确出现的道具、符号和核心意象；没有明确道具时保持简洁",
+        "atmosphere_color": f"根据{quoted}判断情绪、主色和光影，保持商业封面清晰可读",
+    }
     return {key: _compact_text(value, 260) for key, value in inferred.items() if _compact_text(value)}
 
 
@@ -636,7 +581,7 @@ class CoverPromptBuilder:
                 inferred_fields.append(key)
 
         fallback_fields: List[str] = []
-        for key, value in template.defaults.items():
+        for key, value in {**template.defaults, **NEUTRAL_ELEMENT_DEFAULTS}.items():
             before_default = merged.get(key)
             merged[key] = _first_non_empty(before_default, value)
             if key in variable_keys and not _compact_text(before_default) and _compact_text(merged.get(key)):
@@ -667,7 +612,7 @@ class CoverPromptBuilder:
             prompt_generation_mode = "idea_inferred" if idea_only_source else "local_inferred"
         if source_content_empty and not inferred_fields:
             completion_notice = (
-                "当前选择的元素来源没有可用封面内容，已按所选字体模板补全角色、场景、道具和色彩；"
+                "当前选择的元素来源没有可用封面内容，已使用中性封面约束补全角色、场景、道具和色彩；"
                 "如果项目为空，建议填写四个元素或“创作想法”。"
             )
             prompt_generation_mode = "template_defaults"
@@ -728,7 +673,7 @@ class CoverPromptBuilder:
             merged[key] = _first_non_empty(
                 elements.get(key),
                 existing_elements.get(key),
-                template.defaults.get(key),
+                NEUTRAL_ELEMENT_DEFAULTS.get(key),
             )
 
         typography_prompt = _first_non_empty(draft.get("typography_prompt")) or template.typography_prompt.format(**merged)

@@ -20,6 +20,25 @@ _IMAGE_MODEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _NON_TEXT_MODEL_PATTERN = re.compile(r"(embedding|embed|rerank|tts|whisper|audio|speech|moderation)", re.IGNORECASE)
+_TEMPLATE_LEAKAGE_TERMS = (
+    "长剑",
+    "持剑",
+    "剑刃",
+    "仙山",
+    "宗门",
+    "古战场",
+    "秘境",
+    "玄幻",
+    "战甲",
+    "符纹",
+    "符文",
+    "灵光",
+    "山河纹",
+    "衣袂",
+    "修仙",
+    "仙侠",
+    "神魔",
+)
 
 
 class CoverPromptEnhancer:
@@ -41,8 +60,6 @@ class CoverPromptEnhancer:
         payload = {
             "title": draft.get("title", ""),
             "author": draft.get("author", ""),
-            "template_id": draft.get("template_id", ""),
-            "template_name": draft.get("template_name", ""),
             "source_mode": draft.get("source_mode", ""),
             "elements": draft.get("elements", {}),
             "creative_idea": draft.get("creative_idea", ""),
@@ -50,7 +67,7 @@ class CoverPromptEnhancer:
             "fallback_fields": draft.get("fallback_fields", []),
             "project_context_empty": bool(draft.get("project_context_empty")),
             "custom_elements_empty": bool(draft.get("custom_elements_empty")),
-            "typography_prompt": draft.get("typography_prompt", ""),
+            "font_template_rule": "字体模板只代表字形、材质、配色和光效，不代表题材、人物、背景或道具。",
         }
 
         system_prompt = (
@@ -58,11 +75,14 @@ class CoverPromptEnhancer:
             "严格输出 JSON，不要解释，不要 Markdown。JSON 只能包含四个键："
             "characters, scene_background, symbols_props, atmosphere_color。"
             "每个值用中文短句，视觉化、具体、适合封面，避免真实平台 Logo、水印、二维码。"
-            "如果项目资料为空，只能根据书名和所选字体/题材风格补全合理画面，不要假装知道不存在的剧情设定。"
+            "字体模板只代表文字字形、材质、配色和光效，不代表小说题材。"
+            "禁止因为模板名、字体风格或颜色加入用户内容中没有出现的人物身份、背景、武器、门派、战甲或玄幻元素。"
+            "如果项目资料为空，只能根据书名、创作想法和已有四项元素补全合理画面，不要假装知道不存在的剧情设定。"
         )
         user_prompt = (
             "请把以下封面草稿补全为更适合生图模型理解的四个画面元素。\n"
-            "保留已有具体设定的核心信息；缺失字段按字体示例的题材气质补全。\n\n"
+            "必须保留已有具体设定的核心信息；缺失字段只能根据书名、创作想法和已有元素补全。\n"
+            "不要把字体模板当作题材参考；任何内容都不能因为字体风格被改成未提供的武器、宗门、战甲或仙山等元素。\n\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
 
@@ -75,12 +95,13 @@ class CoverPromptEnhancer:
         )
         parsed = _parse_json_object(str(response or ""))
         enhanced = _normalize_elements(parsed)
+        enhanced = _remove_unanchored_template_leakage(enhanced, draft)
         if not any(enhanced.values()):
             raise RuntimeError("文本模型没有返回可用的四项封面元素。")
 
         notice = "已使用所选文本模型润色角色、场景、道具和色彩元素。"
         if draft.get("prompt_generation_mode") == "template_defaults":
-            notice = "项目资料和自定义元素为空，已先按字体模板补全，再由所选文本模型润色为可用封面描写。"
+            notice = "项目资料和自定义元素为空，已先按中性封面约束补全，再由所选文本模型润色为可用封面描写。"
         return self.builder.apply_elements(
             draft,
             enhanced,
@@ -209,6 +230,36 @@ def _normalize_elements(data: Mapping[str, Any]) -> Dict[str, str]:
                     break
         result[key] = value
     return result
+
+
+def _remove_unanchored_template_leakage(elements: Mapping[str, str], draft: Mapping[str, Any]) -> Dict[str, str]:
+    existing = draft.get("elements") if isinstance(draft.get("elements"), Mapping) else {}
+    source_text = _source_text_from_draft(draft)
+    cleaned: Dict[str, str] = {}
+    for key in _FIELD_KEYS:
+        value = _clean_text(elements.get(key), limit=220)
+        if value and _contains_unanchored_template_leakage(value, source_text):
+            value = _clean_text(existing.get(key), limit=220)
+        cleaned[key] = value
+    return cleaned
+
+
+def _source_text_from_draft(draft: Mapping[str, Any]) -> str:
+    parts = [
+        draft.get("title", ""),
+        draft.get("creative_idea", ""),
+    ]
+    for container_name in ("elements", "custom_elements"):
+        container = draft.get(container_name)
+        if isinstance(container, Mapping):
+            parts.extend(container.get(key, "") for key in _FIELD_KEYS)
+    return _clean_text("；".join(str(part or "") for part in parts), limit=1800)
+
+
+def _contains_unanchored_template_leakage(value: str, source_text: str) -> bool:
+    text = str(value or "")
+    source = str(source_text or "")
+    return any(term in text and term not in source for term in _TEMPLATE_LEAKAGE_TERMS)
 
 
 def _clean_text(value: Any, *, limit: int = 220) -> str:

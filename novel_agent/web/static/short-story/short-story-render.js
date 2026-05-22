@@ -449,9 +449,22 @@ function renderShortStoryNavPanel() {
     }
 }
 
-async function renderShortStoryInterface() {
+function isShortStoryRenderCurrent(renderToken) {
+    if (!renderToken) return true;
+    const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
+    if (typeof guard === 'function') {
+        return guard('short-story', renderToken);
+    }
+    return window.store?.currentModule === 'short-story';
+}
+
+async function renderShortStoryInterface(renderToken = null) {
     await hydrateShortStoryProjectState();
+    if (!isShortStoryRenderCurrent(renderToken)) return;
+
     await loadGlobalApiConfigForShortStory();
+    if (!isShortStoryRenderCurrent(renderToken)) return;
+
     saveShortStoryData();
 
     const workflow = getCurrentShortStoryWorkflow();
@@ -560,7 +573,7 @@ async function renderShortStoryInterface() {
                     <div class="short-story-form-row short-story-form-row-4">
                         <div>
                             <label class="short-story-label">统一创作输入</label>
-                            <textarea id="short-story-keywords" rows="4" placeholder="直接粘贴灵感、例文、题材、词条或混合素材，例如：想写一个雨夜重逢却带悬疑反转的短篇；参考例文节奏偏强钩子；关键词：旧相机、失约、雨夜" class="short-story-field short-story-textarea">${escapeHtml(sourceDraft)}</textarea>
+                            <textarea id="short-story-keywords" rows="4" placeholder="直接粘贴灵感、例文、题材、词条或混合素材；建议 300-1200 字，最多约 1500 字。例如：想写一个雨夜重逢却带悬疑反转的短篇；参考例文节奏偏强钩子；关键词：旧相机、失约、雨夜" class="short-story-field short-story-textarea">${escapeHtml(sourceDraft)}</textarea>
                         </div>
                         <div>
                             <label class="short-story-label">目标字数</label>

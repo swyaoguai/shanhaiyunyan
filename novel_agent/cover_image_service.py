@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import io
 import json
 import logging
@@ -14,7 +15,7 @@ from typing import Any, Dict, Iterable, Mapping, Tuple
 
 import httpx
 
-from .agent_config import get_config_manager
+from .agent_config import get_config_manager, normalize_image_api_format
 from .utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,17 @@ _GPT_IMAGE_SIZE_SET = {"1024x1024", "1536x1024", "1024x1536", "auto"}
 _DALLE3_SIZE_SET = {"1024x1024", "1792x1024", "1024x1792"}
 _DALLE2_SIZE_SET = {"256x256", "512x512", "1024x1024"}
 _THUMBNAIL_SIZE = (160, 120)
+_AUTO_IMAGE_API_FORMATS = (
+    "openai_images",
+    "qwen_images",
+    "gemini_native",
+)
+_RETRYABLE_FORMAT_STATUS = {400, 404, 405, 422, 500, 501, 502, 503, 504, 524}
+_GATEWAY_RETRY_STATUS = {503, 504, 524}
+_IMAGE_REQUEST_TIMEOUT_SECONDS = 300.0
+_IMAGE_REQUEST_RETRY_TIMEOUT_SECONDS = 420.0
+_IMAGE_CONNECT_TIMEOUT_SECONDS = 60.0
+_IMAGE_GATEWAY_RETRY_DELAY_SECONDS = 5.0
 
 
 class CoverImageService:
@@ -39,16 +51,23 @@ class CoverImageService:
         if not prompt:
             raise ValueError("缺少封面生成提示词。")
 
+        api_config_id = str(request.get("api_config_id") or "")
         api_base, api_key, model = self._resolve_api_config(
-            api_config_id=str(request.get("api_config_id") or ""),
+            api_config_id=api_config_id,
             model=str(request.get("model") or ""),
         )
-        endpoint_mode = str(request.get("endpoint_mode") or "auto").strip() or "auto"
+        image_api_format = normalize_image_api_format(
+            request.get("image_api_format")
+            or request.get("endpoint_mode")
+            or self._resolve_image_api_format(api_config_id)
+        )
         target_size = str(request.get("size") or "1024x1536").strip() or "1024x1536"
         provider_size = self._provider_size_for_model(model, target_size)
         project_dir = Path(request["project_dir"])
 
         trace: Dict[str, Any] = {
+            "image_api_format": image_api_format,
+            "format_tried": [],
             "endpoint_tried": [],
             "target_size": target_size,
             "provider_size": provider_size,
@@ -56,9 +75,11 @@ class CoverImageService:
         }
         last_error = ""
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=60.0)) as client:
-            for mode, endpoint in self._iter_endpoints(endpoint_mode):
-                url = f"{api_base.rstrip('/')}{endpoint}"
+        async with httpx.AsyncClient(timeout=self._image_request_timeout(0)) as client:
+            for mode in self._iter_image_api_formats(image_api_format):
+                url = self._build_url(api_base=api_base, mode=mode, model=model)
+                endpoint = self._endpoint_label(mode, model)
+                trace["format_tried"].append(mode)
                 trace["endpoint_tried"].append(endpoint)
                 payload = self._build_payload(
                     mode=mode,
@@ -66,45 +87,92 @@ class CoverImageService:
                     prompt=prompt,
                     size=provider_size,
                 )
-                try:
-                    response = await client.post(
-                        url,
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                        },
-                        json=payload,
-                    )
-                    if response.status_code in {404, 405} and endpoint_mode == "auto":
-                        last_error = f"{endpoint} 不可用（HTTP {response.status_code}）"
-                        continue
-                    response.raise_for_status()
-                    image_base64, image_url = self._extract_image_payload(response.json())
-                    if image_base64:
-                        metadata = self._metadata_from_request(request, model, mode, trace, provider_size=provider_size)
-                        return self.save_base64_image(project_dir, image_base64, metadata, target_size=target_size)
-                    if image_url:
-                        image_bytes = await self._download_image(client, image_url)
-                        metadata = self._metadata_from_request(request, model, mode, trace, provider_size=provider_size)
-                        metadata["source_image_url"] = image_url
-                        return self.save_image_bytes(project_dir, image_bytes, metadata, extension=".png", target_size=target_size)
-                    last_error = "模型响应中没有找到图片 URL 或 base64 数据。"
-                except httpx.HTTPStatusError as exc:
-                    body = exc.response.text[:500] if exc.response is not None else ""
-                    last_error = f"HTTP {exc.response.status_code}: {body}" if exc.response else str(exc)
-                    trace.setdefault("http_errors", []).append(
-                        {
-                            "endpoint": endpoint,
-                            "status_code": exc.response.status_code if exc.response else None,
-                            "body": body,
-                        }
-                    )
-                    if endpoint_mode != "auto":
+                for attempt in range(2):
+                    try:
+                        response = await client.post(
+                            url,
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                                "Accept": "application/json",
+                            },
+                            json=payload,
+                            timeout=self._image_request_timeout(attempt),
+                        )
+                        body = response.text[:500] if response.text else ""
+                        if response.status_code in _GATEWAY_RETRY_STATUS and attempt == 0:
+                            last_error = f"{mode} / {endpoint} 上游超时（HTTP {response.status_code}）：{body}"
+                            trace.setdefault("http_errors", []).append(
+                                {
+                                    "format": mode,
+                                    "endpoint": endpoint,
+                                    "status_code": response.status_code,
+                                    "body": body,
+                                    "action": "retry_same_format_with_longer_timeout",
+                                }
+                            )
+                            await asyncio.sleep(_IMAGE_GATEWAY_RETRY_DELAY_SECONDS)
+                            continue
+                        if response.status_code >= 400 and self._should_try_next_format(
+                            image_api_format,
+                            response.status_code,
+                        ):
+                            last_error = f"{mode} / {endpoint} 不可用（HTTP {response.status_code}）：{body}"
+                            trace.setdefault("http_errors", []).append(
+                                {
+                                    "format": mode,
+                                    "endpoint": endpoint,
+                                    "status_code": response.status_code,
+                                    "body": body,
+                                }
+                            )
+                            break
+                        response.raise_for_status()
+                        image_base64, image_url = self._extract_image_payload(response.json())
+                        if image_base64:
+                            metadata = self._metadata_from_request(request, model, mode, trace, provider_size=provider_size)
+                            return self.save_base64_image(project_dir, image_base64, metadata, target_size=target_size)
+                        if image_url:
+                            image_bytes = await self._download_image(client, image_url)
+                            metadata = self._metadata_from_request(request, model, mode, trace, provider_size=provider_size)
+                            metadata["source_image_url"] = image_url
+                            return self.save_image_bytes(project_dir, image_bytes, metadata, extension=".png", target_size=target_size)
+                        last_error = "模型响应中没有找到图片 URL 或 base64 数据。"
                         break
-                except Exception as exc:
-                    last_error = str(exc)
-                    if endpoint_mode != "auto":
+                    except httpx.TimeoutException as exc:
+                        last_error = f"{mode} / {endpoint} 客户端等待超时：{exc}"
+                        trace.setdefault("timeout_errors", []).append(
+                            {
+                                "format": mode,
+                                "endpoint": endpoint,
+                                "attempt": attempt + 1,
+                                "timeout_seconds": self._image_timeout_seconds(attempt),
+                            }
+                        )
+                        if attempt == 0:
+                            continue
+                        if image_api_format != "auto":
+                            break
+                    except httpx.HTTPStatusError as exc:
+                        body = exc.response.text[:500] if exc.response is not None else ""
+                        last_error = f"HTTP {exc.response.status_code}: {body}" if exc.response else str(exc)
+                        trace.setdefault("http_errors", []).append(
+                            {
+                                "endpoint": endpoint,
+                                "format": mode,
+                                "status_code": exc.response.status_code if exc.response else None,
+                                "body": body,
+                            }
+                        )
+                        if not self._should_try_next_format(
+                            image_api_format,
+                            exc.response.status_code if exc.response else 0,
+                        ):
+                            break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        if image_api_format != "auto":
+                            break
                         break
 
         if last_error.startswith("HTTP 500"):
@@ -113,6 +181,18 @@ class CoverImageService:
                 f"服务商返回 500，通常不是缺少请求头，而是图像模型、尺寸或上游通道不兼容。"
                 f"本次目标尺寸为 {target_size}，请求服务商尺寸为 {provider_size}；"
                 "若仍失败，请优先在该 API 配置中使用服务商文档支持的图片模型（如 gpt-image-1 或 dall-e-3）。"
+            )
+        if last_error.startswith(("HTTP 503", "HTTP 504", "HTTP 524")):
+            last_error = (
+                f"{last_error}\n"
+                "图片上游服务超时或网关提前断开。524 通常表示代理已连接到源站，"
+                "但源站在代理读超时窗口内没有返回完整图片响应；本地继续加等待时间通常无效。"
+                "请稍后重试，或切换图片模型、图片 API 格式/渠道。"
+            )
+        if image_api_format == "auto" and trace["format_tried"]:
+            last_error = (
+                f"{last_error}\n"
+                f"Auto 已依次尝试：{', '.join(trace['format_tried'])}。"
             )
         raise RuntimeError(last_error or "封面生成失败，请检查图像模型配置。")
 
@@ -251,21 +331,57 @@ class CoverImageService:
         return value
 
     @staticmethod
-    def _iter_endpoints(endpoint_mode: str) -> Iterable[Tuple[str, str]]:
+    def _iter_image_api_formats(image_api_format: str) -> Iterable[str]:
+        normalized = normalize_image_api_format(image_api_format)
+        if normalized == "auto":
+            return list(_AUTO_IMAGE_API_FORMATS)
+        return [normalized]
+
+    @staticmethod
+    def _endpoint_label(mode: str, model: str) -> str:
+        if mode == "gemini_native":
+            clean_model = str(model or "").strip()
+            model_path = clean_model if clean_model.startswith("models/") else f"models/{clean_model}"
+            return f"/v1beta/{model_path}:generateContent"
         mapping = {
-            "images_generations": ("images_generations", "/images/generations"),
-            "responses": ("responses", "/responses"),
-            "chat_completions": ("chat_completions", "/chat/completions"),
+            "openai_images": "/images/generations",
+            "qwen_images": "/images/generations",
+            "responses": "/responses",
+            "chat_completions": "/chat/completions",
         }
-        if endpoint_mode == "auto":
-            return [
-                mapping["images_generations"],
-                mapping["responses"],
-                mapping["chat_completions"],
-            ]
-        if endpoint_mode not in mapping:
-            raise ValueError("端点模式仅支持 auto、images_generations、responses、chat_completions。")
-        return [mapping[endpoint_mode]]
+        return mapping.get(mode, "/images/generations")
+
+    @staticmethod
+    def _build_url(*, api_base: str, mode: str, model: str) -> str:
+        if mode == "gemini_native":
+            clean_model = str(model or "").strip()
+            model_path = clean_model if clean_model.startswith("models/") else f"models/{clean_model}"
+            return f"{CoverImageService._gemini_base_url(api_base)}/{model_path}:generateContent"
+        return f"{str(api_base or '').rstrip('/')}{CoverImageService._endpoint_label(mode, model)}"
+
+    @staticmethod
+    def _gemini_base_url(api_base: str) -> str:
+        base = str(api_base or "").strip().rstrip("/")
+        if base.lower().endswith("/v1beta"):
+            return base
+        if base.lower().endswith("/v1"):
+            return f"{base[:-3]}/v1beta"
+        return f"{base}/v1beta"
+
+    @staticmethod
+    def _should_try_next_format(image_api_format: str, status_code: int) -> bool:
+        return normalize_image_api_format(image_api_format) == "auto" and status_code in _RETRYABLE_FORMAT_STATUS
+
+    @staticmethod
+    def _image_timeout_seconds(attempt: int) -> float:
+        return _IMAGE_REQUEST_RETRY_TIMEOUT_SECONDS if attempt > 0 else _IMAGE_REQUEST_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _image_request_timeout(attempt: int) -> httpx.Timeout:
+        return httpx.Timeout(
+            CoverImageService._image_timeout_seconds(attempt),
+            connect=_IMAGE_CONNECT_TIMEOUT_SECONDS,
+        )
 
     @staticmethod
     def _build_payload(*, mode: str, model: str, prompt: str, size: str) -> Dict[str, Any]:
@@ -281,6 +397,37 @@ class CoverImageService:
                 "messages": [{"role": "user", "content": prompt}],
                 "modalities": ["text", "image"],
             }
+        if mode == "qwen_images":
+            return {
+                "model": model,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ]
+                },
+                "parameters": {
+                    "size": size,
+                    "n": 1,
+                },
+            }
+        if mode == "gemini_native":
+            return {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}],
+                    }
+                ],
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"],
+                    "imageConfig": {
+                        "aspectRatio": _aspect_ratio_from_size(size),
+                    },
+                },
+            }
         return {
             "model": model,
             "prompt": prompt,
@@ -292,10 +439,13 @@ class CoverImageService:
     def _extract_image_payload(payload: Any) -> Tuple[str, str]:
         if not isinstance(payload, (dict, list)):
             return "", ""
+        inline_payload = _find_inline_image_payload(payload)
+        if inline_payload:
+            return inline_payload, ""
         for key, value in _walk_json(payload):
             if key in {"b64_json", "image_base64", "base64", "b64"} and isinstance(value, str) and value.strip():
                 return value.strip(), ""
-            if key in {"url", "image_url"} and isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+            if key in {"url", "image_url", "fileUri", "file_uri"} and isinstance(value, str) and value.strip().startswith(("http://", "https://")):
                 return "", value.strip()
         content = _find_chat_content(payload)
         if content:
@@ -335,6 +485,7 @@ class CoverImageService:
             "api_config_id": str(request.get("api_config_id") or ""),
             "model": model,
             "endpoint_mode": endpoint_mode,
+            "image_api_format": endpoint_mode,
             "size": target_size,
             "target_size": target_size,
             "provider_size": provider_size,
@@ -475,6 +626,20 @@ class CoverImageService:
     def _is_likely_image_model(model: str) -> bool:
         return bool(_IMAGE_MODEL_PATTERN.search(str(model or "")))
 
+    @staticmethod
+    def _resolve_image_api_format(api_config_id: str) -> str:
+        manager = get_config_manager()
+        target = str(api_config_id or "").strip()
+        multi = manager.get_multi_config()
+        if target:
+            for cfg in multi.configs:
+                if cfg.id == target:
+                    return normalize_image_api_format(getattr(cfg, "image_api_format", "auto"))
+        active = multi.get_active_config()
+        if active:
+            return normalize_image_api_format(getattr(active, "image_api_format", "auto"))
+        return "auto"
+
 
 def _parse_size(size: str) -> Tuple[int, int] | None:
     match = re.fullmatch(r"(\d+)x(\d+)", str(size or "").strip())
@@ -485,6 +650,45 @@ def _parse_size(size: str) -> Tuple[int, int] | None:
     if width <= 0 or height <= 0:
         return None
     return width, height
+
+
+def _aspect_ratio_from_size(size: str) -> str:
+    parsed = _parse_size(size)
+    if not parsed:
+        return "1:1"
+    width, height = parsed
+    common = {
+        (1, 1): "1:1",
+        (4, 3): "4:3",
+        (3, 4): "3:4",
+        (16, 9): "16:9",
+        (9, 16): "9:16",
+    }
+    from math import gcd
+
+    divisor = gcd(width, height)
+    ratio = (width // divisor, height // divisor)
+    return common.get(ratio, f"{ratio[0]}:{ratio[1]}")
+
+
+def _find_inline_image_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for inline_key in ("inlineData", "inline_data"):
+            inline_data = payload.get(inline_key)
+            if isinstance(inline_data, dict):
+                data = inline_data.get("data")
+                if isinstance(data, str) and data.strip():
+                    return data.strip()
+        for value in payload.values():
+            found = _find_inline_image_payload(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_inline_image_payload(item)
+            if found:
+                return found
+    return ""
 
 
 def _walk_json(payload: Any) -> Iterable[Tuple[str, Any]]:

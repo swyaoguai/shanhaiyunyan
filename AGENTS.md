@@ -56,6 +56,8 @@ Notes:
 
 ### Update log
 - Record future version updates, bug fixes, UX changes, and test/build changes in `CHANGELOG.md`.
+- Keep entries outcome-oriented: describe only what feature was added, what problem was fixed, what UX changed, or what test/build result changed.
+- Do not explain implementation mechanisms, investigation process, internal call chains, or low-level vendor details in `CHANGELOG.md`; include technical names only when needed to identify the affected feature or problem.
 - Keep entries concise. The current product version line starts at `v1.0.0`; during future development, add pending items under `[未发布]` only when a release section has not been chosen yet.
 
 ## High-level architecture

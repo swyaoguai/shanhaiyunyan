@@ -221,8 +221,9 @@ def installer_variant_label(include_onnx: bool) -> str:
 
 
 def setup_base_name(include_onnx: bool) -> str:
-    suffix = "内含检索模型版" if include_onnx else "无检索模型版"
-    return f"{DISPLAY_NAME}_v{APP_VERSION}_{suffix}"
+    if include_onnx:
+        return f"{DISPLAY_NAME}创作平台V{APP_VERSION}"
+    return f"{DISPLAY_NAME}创作平台V{APP_VERSION}_无检索模型版"
 
 
 def setup_exe_path(include_onnx: bool) -> Path:
@@ -546,7 +547,7 @@ def write_inno_script(include_onnx: bool = True) -> bool:
     output_dir = _inno_path(DIST_DIR)
     flavor_label = installer_variant_label(include_onnx)
     output_base_name = setup_base_name(include_onnx)
-    script = f'''#define MyAppName "{DISPLAY_NAME}"
+    script = f'''#define MyAppName "{DISPLAY_NAME}创作平台"
 #define MyAppVersion "{APP_VERSION}"
 #define MyInstallerFlavor "{flavor_label}"
 #define MyAppExeName "{DISPLAY_NAME}.exe"
@@ -556,7 +557,7 @@ def write_inno_script(include_onnx: bool = True) -> bool:
 AppId={{{{F10F6C34-26F1-451F-9C41-650D29F5918D}}}}
 AppName={{#MyAppName}}
 AppVersion={{#MyAppVersion}}
-AppVerName={{#MyAppName}} {{#MyAppVersion}} {{#MyInstallerFlavor}}
+AppVerName={{#MyAppName}} V{{#MyAppVersion}}
 AppPublisher=山海云烟
 DefaultDirName={{localappdata}}\\Programs\\ShanhaiYunyan
 DefaultGroupName={{#MyAppName}}

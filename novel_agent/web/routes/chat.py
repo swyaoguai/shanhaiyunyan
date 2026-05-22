@@ -1874,11 +1874,11 @@ async def _ensure_chat_agent(session_key: str, session_id: str, project_id: str,
         if router_kb:
             agent.set_knowledge_base(router_kb)
 
-    _refresh_runtime_model_configs(agent, router_agent)
+    _refresh_runtime_model_configs(agent, router_agent, get_coordinator())
     return agent
 
 
-def _refresh_runtime_model_configs(agent: Any, router_agent: Any = None) -> str:
+def _refresh_runtime_model_configs(agent: Any, router_agent: Any = None, coordinator: Any = None) -> str:
     refreshed_agents = []
 
     def _refresh_one(target: Any) -> None:
@@ -1893,6 +1893,12 @@ def _refresh_runtime_model_configs(agent: Any, router_agent: Any = None) -> str:
 
     _refresh_one(agent)
     _refresh_one(router_agent)
+
+    try:
+        if coordinator is not None and hasattr(coordinator, "refresh_model_configs"):
+            coordinator.refresh_model_configs()
+    except Exception as refresh_error:
+        logger.debug(f"[Chat] refresh coordinator model configs failed: {refresh_error}")
 
     if router_agent:
         for attr_name in ("_communicator", "_polisher", "_continuous_writer"):

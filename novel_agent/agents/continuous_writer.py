@@ -16,7 +16,12 @@ from typing import Optional, Dict, Any, List, AsyncGenerator
 from dataclasses import dataclass, field
 
 from .base_agent import BaseAgent
-from .session_store import get_session_store, SessionState
+from .session_store import (
+    NORMAL_CHARACTER_STATUS,
+    SessionState,
+    get_session_store,
+    normalize_character_status,
+)
 from ..agent_config import AgentModelConfig
 from ..constants import WRITING_CONFIG
 
@@ -51,6 +56,40 @@ NON_CHAPTER_RESPONSE_PATTERNS = (
     r"粗略的想法",
 )
 
+_COMMON_CHINESE_SURNAMES = (
+    "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜"
+    "谢邹喻柏水章云苏潘葛范彭郎鲁韦昌马苗花方俞任袁柳鲍史唐费廉岑"
+    "薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元顾孟平黄穆萧"
+    "尹姚邵汪祁毛米贝明计伏成戴谈宋庞熊纪舒屈项祝董梁杜阮蓝闵季"
+    "贾路江童颜郭梅盛林刁钟徐邱骆高夏蔡田胡凌霍虞万支柯管卢莫房"
+    "解应宗丁宣邓杭洪包左石崔吉龚程邢裴陆荣翁荀惠曲封储靳井段富"
+    "焦巴牧山谷车侯全班秋仲宫宁仇甘厉祖武符刘景龙叶司韶黎白怀蒲"
+    "卓屠池乔闻党翟谭贡劳冉雍桑桂牛寿边燕浦农温庄晏柴瞿阎连习艾"
+    "向古易慎廖终居衡步耿满弘匡文寇广东欧沃利蔚越师巩聂晁勾冷辛"
+    "那简饶曾沙丰关查红游权益桓公"
+)
+_COMPOUND_CHINESE_SURNAMES = (
+    "欧阳|司马|上官|诸葛|东方|皇甫|尉迟|公孙|慕容|司徒|令狐|宇文|长孙|夏侯"
+)
+_CHARACTER_NAME_FOLLOWERS = (
+    "说|道|问|答|看|望|站|走|跑|坐|转|冲|笑|哭|喊|叫|低|抬|皱|握|捏|拉|推|"
+    "抱|扶|踢|绕|探|钻|守|退|把|将|被|给|向|对|与|和|从|在|正|又|也|却|便|"
+    "才|仍|还|已经|忽然|突然|没有|不是|另有|发现|决定|怀疑|盯|凝视|注视"
+)
+_CHARACTER_NAME_PREFIXES = (
+    "看向|望向|面对|叫住|找到|遇见|追上|扶起|抱住|拉住|问|对|向|跟|和|与"
+)
+_NON_CHARACTER_NAMES = {
+    "我们", "他们", "这里", "那里", "一个", "不是", "如果", "然后", "自己", "有人",
+    "众人", "少年", "少女", "男人", "女人", "老人", "教练", "队友", "守门员", "主角",
+    "配角", "反派", "角色", "人物",
+}
+_NON_CHARACTER_NAME_PARTS = (
+    "第", "章", "回", "节", "故事", "起源", "最近", "状态", "表现", "训练", "基地",
+    "空气", "草腥", "塑胶", "跑道", "味道", "足球", "点球", "热点", "小说", "方面",
+    "相关", "参考", "内容", "章节", "标题", "纪元",
+)
+
 def get_plot_constraint_store(knowledge_base):
     """获取剧情约束存储实例。"""
     global PlotConstraintStore
@@ -76,11 +115,15 @@ class CharacterState:
     """角色状态跟踪。"""
     name: str
     is_alive: bool = True
-    status: str = "姝ｅ父"
+    status: str = NORMAL_CHARACTER_STATUS
     location: str = ""
     last_chapter: int = 0
     notes: List[str] = field(default_factory=list)
     learned_abilities: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name or "").strip()
+        self.status = normalize_character_status(self.status)
 
 
 @dataclass
@@ -621,9 +664,7 @@ class ContinuousWriter(BaseAgent):
         start_time = time.time()
         
         try:
-            response = await self.call_llm([
-                {"role": "user", "content": prompt}
-            ])
+            response = await self._call_chapter_llm(prompt)
             
             chapter_data = self._parse_chapter_response(response, chapter_number)
             chapter_data["model_used"] = self._current_model
@@ -711,7 +752,24 @@ class ContinuousWriter(BaseAgent):
             logger.error(f"[{self.name}] 创作失败: {e}")
             self._current_chapter -= 1
             return {"success": False, "chapter_number": chapter_number, "error": str(e)}
-    
+
+    def _should_stream_chapter_generation(self) -> bool:
+        """Use provider streaming for relay-backed long chapter generation."""
+        return self._api_type in {"openai_responses", "anthropic"} or self._is_tsc5_api_base()
+
+    async def _call_chapter_llm(self, prompt: str) -> str:
+        result = await self.call_llm(
+            [{"role": "user", "content": prompt}],
+            stream=self._should_stream_chapter_generation(),
+        )
+        if hasattr(result, "__aiter__"):
+            chunks: List[str] = []
+            async for chunk in result:
+                if chunk:
+                    chunks.append(str(chunk))
+            return "".join(chunks)
+        return str(result or "")
+
     def _build_chapter_prompt(
         self,
         chapter_number: int,
@@ -1002,7 +1060,8 @@ class ContinuousWriter(BaseAgent):
         if not content or chapter_number <= 0:
             return
 
-        for name, note in self._extract_character_state_notes(content).items():
+        known_names = self._known_character_names()
+        for name, note in self._extract_character_state_notes(content, known_names).items():
             state = self._characters.get(name) or CharacterState(name=name)
             state.last_chapter = chapter_number
             if note:
@@ -1663,21 +1722,64 @@ class ContinuousWriter(BaseAgent):
         return self._written_chapters[-self.write_config.context_chapters:]
 
     @staticmethod
-    def _extract_character_state_notes(content: str) -> Dict[str, str]:
+    def _extract_character_state_notes(content: str, known_names: Optional[List[str]] = None) -> Dict[str, str]:
         notes: Dict[str, str] = {}
         sentences = re.split(r"(?<=[。！？!?])", content)
-        candidate_pattern = re.compile(r"([\u4e00-\u9fa5]{2,4})")
-        blocked = {"我们", "他们", "这里", "那里", "一个", "不是", "如果", "然后", "自己"}
+        known = sorted(
+            {
+                str(name or "").strip()
+                for name in (known_names or [])
+                if ContinuousWriter._looks_like_character_name(str(name or "").strip())
+            },
+            key=len,
+            reverse=True,
+        )
         for sentence in sentences:
             cleaned = sentence.strip()
             if not cleaned or cleaned.startswith("“") or cleaned.startswith("\""):
                 continue
-            for name in candidate_pattern.findall(cleaned):
-                if name in blocked:
-                    continue
+            names = [name for name in known if name in cleaned] if known else ContinuousWriter._extract_fallback_character_names(cleaned)
+            for name in names:
                 if name not in notes:
                     notes[name] = cleaned[:80]
         return notes
+
+    @staticmethod
+    def _looks_like_character_name(name: str) -> bool:
+        if not name or name in _NON_CHARACTER_NAMES:
+            return False
+        if len(name) < 2 or len(name) > 4:
+            return False
+        if not re.fullmatch(r"[\u4e00-\u9fa5·]+", name):
+            return False
+        if any(part in name for part in _NON_CHARACTER_NAME_PARTS):
+            return False
+        return True
+
+    @staticmethod
+    def _extract_fallback_character_names(sentence: str) -> List[str]:
+        names: List[str] = []
+
+        def add_name(value: str) -> None:
+            name = str(value or "").strip("，。！？；：、（）()《》“”\"' ")
+            if ContinuousWriter._looks_like_character_name(name) and name not in names:
+                names.append(name)
+
+        follower = rf"(?:{_CHARACTER_NAME_FOLLOWERS})"
+        prefix = rf"(?:{_CHARACTER_NAME_PREFIXES})"
+        compound_name = rf"(?:{_COMPOUND_CHINESE_SURNAMES})[\u4e00-\u9fa5]{{1,2}}"
+        single_name = rf"[{_COMMON_CHINESE_SURNAMES}][\u4e00-\u9fa5]{{1,2}}"
+        patterns = [
+            rf"({compound_name})(?={follower})",
+            rf"({single_name})(?={follower})",
+            rf"{prefix}({compound_name})",
+            rf"{prefix}({single_name})",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, sentence):
+                add_name(match.group(1))
+
+        return names
 
     def _extract_character_ability_events(self, content: str) -> Dict[str, List[str]]:
         """从章节正文中抽取“角色学会/觉醒/掌握能力”的明确事件。"""
@@ -1757,8 +1859,9 @@ class ContinuousWriter(BaseAgent):
             fragments = [state.name]
             if state.last_chapter:
                 fragments.append(f"最近出现在第{state.last_chapter}章")
-            if state.status and state.status != "姝ｅ父":
-                fragments.append(f"状态：{state.status}")
+            status = normalize_character_status(state.status)
+            if status and status != NORMAL_CHARACTER_STATUS:
+                fragments.append(f"状态：{status}")
             if state.location:
                 fragments.append(f"位置：{state.location}")
             if state.learned_abilities:

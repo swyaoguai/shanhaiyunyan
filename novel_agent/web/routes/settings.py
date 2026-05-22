@@ -4,6 +4,7 @@ API
 API?"""
 
 import json
+import asyncio
 import time
 import re
 import httpx
@@ -26,12 +27,19 @@ from ..models.requests import (
 from ..runtime_refresh import refresh_runtime_after_config_reload
 from ...config import config
 from ...constants import TIMEOUTS, LLM_DEFAULTS, SERVER_DEFAULTS, get_app_root
+from ...cover_image_service import CoverImageService
 from ...timeout_settings import get_timeout_setting_ranges, get_timeout_settings, save_timeout_settings
 from ...utils.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_IMAGE_TEST_TIMEOUT_SECONDS = 120.0
+_IMAGE_TEST_RETRY_TIMEOUT_SECONDS = 180.0
+_IMAGE_TEST_CONNECT_TIMEOUT_SECONDS = 30.0
+_IMAGE_TEST_GATEWAY_RETRY_DELAY_SECONDS = 3.0
+_IMAGE_TEST_GATEWAY_RETRY_STATUS = {503, 504, 524}
 
 
 def _normalize_openai_base_url(api_base: str) -> str:
@@ -687,6 +695,301 @@ async def test_connection(request: TestConnectionRequest):
         )
 
 
+@router.post("/test-image-connection")
+async def test_image_connection(request: TestConnectionRequest):
+    """Test the actual image-generation endpoint for a saved API config."""
+    try:
+        api_base = (request.api_base or "").strip()
+        api_key = (request.api_key or "").strip()
+        test_model = (request.model or "").strip()
+        config_id = (request.config_id or "").strip()
+        image_api_format = (getattr(request, "image_api_format", "") or "auto").strip()
+
+        if config_id:
+            from ...agent_config import DEFAULT_API_PRESET_ID, get_config_manager
+            manager = get_config_manager()
+            selected_config = next(
+                (cfg for cfg in manager.multi_config.configs if cfg.id == config_id),
+                None
+            )
+            if not selected_config:
+                return _build_test_connection_response(
+                    success=False,
+                    error_code="config_not_found",
+                    title="配置不存在",
+                    solution="刷新设置页后重新选择 API 配置。",
+                    error=f"Config ID not found: {config_id}",
+                )
+            if selected_config.id == DEFAULT_API_PRESET_ID and not selected_config.is_configured():
+                return _build_test_connection_response(
+                    success=False,
+                    error_code="preset_requires_selection",
+                    title="请先选择可用配置",
+                    solution="探索仓API只是占位入口。请新建或选择一套已填写 Key 和图片模型的 API 配置后再测试。",
+                    error="请先选择可用配置。探索仓API不能直接测试图片接口。",
+                )
+            if not api_base:
+                api_base = (selected_config.api_base or "").strip()
+            if not api_key:
+                api_key = (selected_config.get_primary_key() or "").strip()
+            if not test_model and selected_config.models:
+                test_model = str(selected_config.models[0]).strip()
+            if not image_api_format or image_api_format == "auto":
+                image_api_format = getattr(selected_config, "image_api_format", "auto") or "auto"
+
+        if not api_key and api_base and not config_id:
+            from ...agent_config import get_config_manager
+            manager = get_config_manager()
+            for cfg in manager.multi_config.configs:
+                cfg_base = (cfg.api_base or "").strip()
+                cfg_key = (cfg.get_primary_key() or "").strip()
+                if cfg_base == api_base and cfg_key:
+                    api_key = cfg_key
+                    if not test_model and cfg.models:
+                        test_model = str(cfg.models[0]).strip()
+                    if not image_api_format or image_api_format == "auto":
+                        image_api_format = getattr(cfg, "image_api_format", "auto") or "auto"
+                    break
+
+        if not api_base:
+            return _build_test_connection_response(
+                success=False,
+                error_code="missing_api_base",
+                title="缺少 API 地址",
+                solution="先填写并保存 API Base URL。",
+                error="Missing API base URL.",
+            )
+        if not api_key:
+            return _build_test_connection_response(
+                success=False,
+                error_code="missing_api_key",
+                title="缺少 API Key",
+                solution="先保存配置里的 API Key，再测试图片接口。",
+                error="Missing API key. Save the config before testing.",
+            )
+        if not test_model:
+            return _build_test_connection_response(
+                success=False,
+                error_code="missing_image_model",
+                title="缺少图像模型",
+                solution="在当前配置里添加 image、imagen、dall-e、flux 等图像模型后再测试。",
+                error="Missing image model.",
+            )
+        if not CoverImageService._is_likely_image_model(test_model):
+            return _build_test_connection_response(
+                success=False,
+                error_code="not_image_model",
+                title="当前模型不像图片模型",
+                solution="请选择图片模型；文本模型通过测试不代表封面生成可用。",
+                error=f"{test_model} 不像图片生成模型。",
+                model_tested=test_model,
+            )
+
+        return await _test_image_generation_connection(api_base, api_key, test_model, image_api_format)
+    except httpx.TimeoutException:
+        return _build_test_connection_response(
+            success=False,
+            error_code="image_timeout",
+            title="图片接口超时",
+            solution="这通常是上游图片服务处理过慢或网关超时。稍后重试，或切换图片模型/渠道。",
+            error="图片接口连接或生成超时。",
+            model_tested=(request.model or "").strip(),
+        )
+    except httpx.ConnectError as e:
+        return _build_test_connection_response(
+            success=False,
+            error_code="connect_error",
+            title="图片接口连不上",
+            solution="检查 API Base、网络出口、代理和防火墙。",
+            error="根本没连上目标图片接口。",
+            detail=str(e),
+            model_tested=(request.model or "").strip(),
+        )
+    except Exception as e:
+        return _build_test_connection_response(
+            success=False,
+            error_code="unexpected_error",
+            title="图片测试失败",
+            solution="根据详细报错继续排查 API 地址、图片模型、图片格式或账户权限。",
+            error="图片接口测试没跑通，先看看详细报错。",
+            detail=str(e),
+            model_tested=(request.model or "").strip(),
+        )
+
+
+async def _test_image_generation_connection(
+    api_base: str,
+    api_key: str,
+    test_model: str,
+    image_api_format: str,
+) -> JSONResponse:
+    """Send a tiny real image-generation request and report endpoint compatibility."""
+    start_time = time.time()
+    provider_size = CoverImageService._provider_size_for_model(test_model, "1024x1024")
+    format_tried: list[str] = []
+    endpoint_tried: list[str] = []
+    http_errors: list[str] = []
+    last_status: int | None = None
+    last_detail = ""
+
+    async with httpx.AsyncClient(timeout=_image_test_timeout(0)) as client:
+        for mode in CoverImageService._iter_image_api_formats(image_api_format):
+            endpoint = CoverImageService._endpoint_label(mode, test_model)
+            url = CoverImageService._build_url(api_base=api_base, mode=mode, model=test_model)
+            payload = CoverImageService._build_payload(
+                mode=mode,
+                model=test_model,
+                prompt="A simple clean book cover test image, no text.",
+                size=provider_size,
+            )
+            format_tried.append(mode)
+            endpoint_tried.append(endpoint)
+
+            for attempt in range(2):
+                try:
+                    response = await client.post(
+                        url,
+                        headers=_build_openai_compatible_headers(api_key, api_base),
+                        json=payload,
+                        timeout=_image_test_timeout(attempt),
+                    )
+                except httpx.TimeoutException as exc:
+                    last_detail = str(exc)
+                    http_errors.append(
+                        f"{mode} {endpoint} 客户端超时（{_image_test_timeout_seconds(attempt):.0f}s）"
+                    )
+                    if attempt == 0:
+                        continue
+                    if image_api_format == "auto":
+                        break
+                    raise
+
+                response_time = int((time.time() - start_time) * 1000)
+                last_status = response.status_code
+                body_preview = (response.text or "")[:400]
+
+                if response.status_code in _IMAGE_TEST_GATEWAY_RETRY_STATUS and attempt == 0:
+                    last_detail = body_preview
+                    http_errors.append(f"{mode} {endpoint} HTTP {response.status_code}: {body_preview[:160]}，已加时重试")
+                    await asyncio.sleep(_IMAGE_TEST_GATEWAY_RETRY_DELAY_SECONDS)
+                    continue
+
+                if response.status_code >= 400:
+                    last_detail = body_preview
+                    http_errors.append(f"{mode} {endpoint} HTTP {response.status_code}: {body_preview[:160]}")
+                    if CoverImageService._should_try_next_format(image_api_format, response.status_code):
+                        break
+                    mapped = _map_image_connection_error(response.status_code, body_preview, test_model)
+                    return _build_test_connection_response(
+                        success=False,
+                        error_code=mapped["error_code"],
+                        title=mapped["title"],
+                        solution=mapped["solution"],
+                        error=f"{mapped['title']}。{mapped['solution']}",
+                        detail=_format_image_test_detail(format_tried, endpoint_tried, http_errors, body_preview),
+                        status_code=response.status_code,
+                        model_tested=test_model,
+                        response_time=response_time,
+                    )
+
+                try:
+                    image_base64, image_url = CoverImageService._extract_image_payload(response.json())
+                except Exception as exc:
+                    last_detail = str(exc)
+                    image_base64, image_url = "", ""
+
+                if image_base64 or image_url:
+                    return _build_test_connection_response(
+                        success=True,
+                        title="图片接口可以正常用",
+                        solution="这套配置已经通过真实图片接口测试，可以用于封面生成。",
+                        error="图片接口连通，并返回了图片数据。",
+                        detail=_format_image_test_detail(format_tried, endpoint_tried, http_errors, "已返回图片数据"),
+                        status_code=response.status_code,
+                        model_tested=test_model,
+                        response_time=response_time,
+                    )
+
+                last_detail = body_preview or "响应成功，但没有找到图片 URL 或 base64 数据。"
+                http_errors.append(f"{mode} {endpoint} 未返回图片数据")
+                if image_api_format == "auto":
+                    break
+                return _build_test_connection_response(
+                    success=False,
+                    error_code="image_payload_missing",
+                    title="图片接口没有返回图片",
+                    solution="确认模型是否支持当前图片 API 格式，或切换图片 API 格式后再试。",
+                    error="接口成功响应，但没有图片 URL 或 base64。",
+                    detail=_format_image_test_detail(format_tried, endpoint_tried, http_errors, last_detail),
+                    status_code=response.status_code,
+                    model_tested=test_model,
+                    response_time=response_time,
+                )
+
+    mapped = _map_image_connection_error(last_status or 0, last_detail, test_model)
+    return _build_test_connection_response(
+        success=False,
+        error_code=mapped["error_code"],
+        title=mapped["title"],
+        solution=mapped["solution"],
+        error=f"{mapped['title']}。{mapped['solution']}",
+        detail=_format_image_test_detail(format_tried, endpoint_tried, http_errors, last_detail),
+        status_code=last_status,
+        model_tested=test_model,
+        response_time=int((time.time() - start_time) * 1000),
+    )
+
+
+def _image_test_timeout_seconds(attempt: int) -> float:
+    return _IMAGE_TEST_RETRY_TIMEOUT_SECONDS if attempt > 0 else _IMAGE_TEST_TIMEOUT_SECONDS
+
+
+def _image_test_timeout(attempt: int) -> httpx.Timeout:
+    return httpx.Timeout(
+        _image_test_timeout_seconds(attempt),
+        connect=_IMAGE_TEST_CONNECT_TIMEOUT_SECONDS,
+    )
+
+
+def _map_image_connection_error(status_code: int, error_detail: str, test_model: str) -> dict:
+    if status_code in {503, 504, 524}:
+        solution = "文本接口可用不代表图片接口可用；请稍后重试，或换图片模型/渠道/API 格式。"
+        if status_code == 524:
+            solution = (
+                "524 表示代理已连到图片源站，但源站在 120 秒左右没有返回完整响应。"
+                "本地继续加等待时间通常无效；请稍后重试，或换图片模型/渠道/API 格式。"
+            )
+        return {
+            "error_code": "image_gateway_timeout",
+            "title": "图片上游超时",
+            "solution": solution,
+        }
+    if status_code == 429:
+        return {
+            "error_code": "image_rate_limited",
+            "title": "图片接口被限流",
+            "solution": "稍后再试，或切换到额度更充足的图片模型/渠道。",
+        }
+    return _map_test_connection_error(status_code, error_detail, test_model)
+
+
+def _format_image_test_detail(
+    format_tried: list[str],
+    endpoint_tried: list[str],
+    http_errors: list[str],
+    last_detail: str,
+) -> str:
+    parts = [
+        f"已尝试格式：{', '.join(format_tried) or '无'}",
+        f"已尝试端点：{', '.join(endpoint_tried) or '无'}",
+    ]
+    if http_errors:
+        parts.append("错误摘要：" + " | ".join(http_errors[-3:]))
+    if last_detail:
+        parts.append(f"最后返回：{last_detail[:240]}")
+    return "\n".join(parts)
+
+
 async def _test_openai_connection(api_base: str, api_key: str, test_model: str) -> JSONResponse:
     """测试 OpenAI 兼容 API 连接"""
     base_url = api_base.rstrip("/")
@@ -814,6 +1117,48 @@ async def _test_openai_responses_connection(api_base: str, api_key: str, test_mo
                 model_tested=test_model,
                 response_time=response_time,
                 status_code=response.status_code,
+            )
+        if response.status_code == 404 and (
+            "bad_response_status_code" in error_detail.lower()
+            or "openai_error" in error_detail.lower()
+            or "bad_response_status_code" in error_text.lower()
+            or "openai_error" in error_text.lower()
+        ):
+            chat_request_body = {
+                "model": test_model,
+                "messages": [{"role": "user", "content": "Hi"}],
+            }
+            if not _is_tsc5_api_base(api_base):
+                chat_request_body["max_tokens"] = 5
+            try:
+                chat_response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=_build_openai_compatible_headers(api_key, api_base),
+                    json=chat_request_body,
+                )
+                if chat_response.status_code == 200:
+                    return _build_test_connection_response(
+                        success=True,
+                        error_code="responses_fallback_chat_available",
+                        title="Responses 不通，Chat 降级可用",
+                        solution="当前模型的 /v1/responses 上游不可用，但 /v1/chat/completions 已通过；运行时会自动降级到 Chat Completions。若需要原生 Responses，请在后台切换支持 Responses 的渠道。",
+                        error="Responses 上游返回 404，Chat Completions 可用。",
+                        detail=error_detail or error_text[:200],
+                        status_code=response.status_code,
+                        model_tested=test_model,
+                        response_time=int((time.time() - start_time) * 1000),
+                    )
+            except Exception:
+                pass
+            return _build_test_connection_response(
+                success=False,
+                error_code="responses_upstream_not_found",
+                title="当前模型没有可用 Responses 通道",
+                solution="探索仓入口已响应，但当前 Key/模型转发到上游后返回 404。运行时会优先尝试 Chat Completions 降级；如需原生 Responses，请在后台换成支持 /v1/responses 的模型或渠道。",
+                error="Responses 端点存在，但这个模型的上游不支持 Responses。",
+                detail=error_detail or error_text[:200],
+                status_code=response.status_code,
+                model_tested=test_model,
             )
         mapped = _map_test_connection_error(response.status_code, error_detail, test_model)
         return _build_test_connection_response(
@@ -1046,7 +1391,8 @@ async def add_api_config(request: AddAPIConfigRequest):
         models=request.models,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
-        api_type=getattr(request, 'api_type', 'openai_chat') or 'openai_chat'
+        api_type=getattr(request, 'api_type', 'openai_chat') or 'openai_chat',
+        image_api_format=getattr(request, 'image_api_format', 'auto') or 'auto'
     )
     
     return JSONResponse({
@@ -1079,11 +1425,18 @@ async def update_api_config_by_id(config_id: str, request: UpdateAPIConfigReques
         updates["max_tokens"] = request.max_tokens
     if getattr(request, 'api_type', None) is not None:
         updates["api_type"] = request.api_type
+    if getattr(request, 'image_api_format', None) is not None:
+        updates["image_api_format"] = request.image_api_format
     
     old_active_model = manager.get_global_config().model
+    was_active = config_id == manager.get_multi_config().active_config_id
     cfg = manager.update_api_config(config_id, **updates)
-    
+
     if cfg:
+        runtime_refreshed = False
+        if was_active and updates:
+            refresh_runtime_after_config_reload()
+            runtime_refreshed = True
         active_model = manager.get_global_config().model
         return JSONResponse({
             "success": True,
@@ -1091,6 +1444,7 @@ async def update_api_config_by_id(config_id: str, request: UpdateAPIConfigReques
             "config": cfg.to_dict(),
             "active_model": active_model,
             "active_model_changed": active_model != old_active_model,
+            "runtime_refreshed": runtime_refreshed,
         })
     else:
         raise HTTPException(status_code=404, detail="")

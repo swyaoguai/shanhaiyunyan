@@ -25,6 +25,7 @@ class CoverGenerateRequest(BaseModel):
     api_config_id: str = ""
     model: str = ""
     size: str = "1024x1536"
+    image_api_format: str = ""
 
 
 class CoverBatchDeleteRequest(BaseModel):

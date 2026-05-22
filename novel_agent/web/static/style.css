@@ -126,21 +126,31 @@ body.has-bg-image #app-overlay {
 
 /* 专注模式：隐藏左侧栏，工作区占满 */
 .workbench.focus-mode {
-    grid-template-columns: 0 0 1fr auto;
+    grid-template-columns: 0 0 minmax(0, 1fr) auto;
     background: transparent;
 }
 
 .workbench.focus-mode .resource-bar,
 .workbench.focus-mode .nav-panel {
-    background: var(--bg-panel);
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    backdrop-filter: blur(var(--glass-blur));
-    -webkit-backdrop-filter: blur(var(--glass-blur));
-    position: relative;
-    transition: var(--transition-smooth);
-    box-shadow: 4px 0 20px rgba(0,0,0,0.1);
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    border-right: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.workbench.focus-mode:has(.copilot-panel.collapsed) {
+    grid-template-columns: 0 0 minmax(0, 1fr) 0px;
+}
+
+.workbench.focus-mode .workspace {
+    min-width: 0;
 }
 
 /* 侧边栏收缩模式 */
@@ -150,15 +160,17 @@ body.has-bg-image #app-overlay {
 }
 
 .workbench.sidebar-collapsed .nav-panel {
-    background: var(--bg-panel);
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    backdrop-filter: blur(var(--glass-blur));
-    -webkit-backdrop-filter: blur(var(--glass-blur));
-    position: relative;
-    transition: var(--transition-smooth);
-    box-shadow: 4px 0 20px rgba(0,0,0,0.1);
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    border-right: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
 }
 
 /* 侧边栏收缩按钮图标旋转 */
@@ -4260,33 +4272,32 @@ select optgroup {
     --transition-smooth: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-    .workbench {
-        grid-template-columns: var(--res-bar-w) minmax(0, 1fr);
+    .workbench,
+    .workbench:has(.copilot-panel.collapsed),
+    .workbench.sidebar-collapsed,
+    .workbench.sidebar-collapsed:has(.copilot-panel.collapsed) {
+        grid-template-columns: var(--res-bar-w) 0 minmax(0, 1fr) 0;
     }
 
-    .nav-panel {
-    background: var(--bg-panel);
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    backdrop-filter: blur(var(--glass-blur));
-    -webkit-backdrop-filter: blur(var(--glass-blur));
-    position: relative;
-    transition: var(--transition-smooth);
-    box-shadow: 4px 0 20px rgba(0,0,0,0.1);
-}
+    .workbench.focus-mode,
+    .workbench.focus-mode:has(.copilot-panel.collapsed) {
+        grid-template-columns: 0 0 minmax(0, 1fr) 0;
+    }
 
+    .nav-panel,
     .workbench.sidebar-collapsed .nav-panel,
     .workbench.focus-mode .nav-panel {
-    background: var(--bg-panel);
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    backdrop-filter: blur(var(--glass-blur));
-    -webkit-backdrop-filter: blur(var(--glass-blur));
-    position: relative;
-    transition: var(--transition-smooth);
-    box-shadow: 4px 0 20px rgba(0,0,0,0.1);
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    border-right: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
 }
 
     .copilot-panel {

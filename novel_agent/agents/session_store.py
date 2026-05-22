@@ -26,6 +26,40 @@ from ..constants import get_data_dir
 logger = logging.getLogger(__name__)
 
 _PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NORMAL_CHARACTER_STATUS = "正常"
+_LEGACY_CHARACTER_STATUS_MAP = {
+    "姝ｅ父": NORMAL_CHARACTER_STATUS,
+}
+
+
+def normalize_character_status(status: Any) -> str:
+    """Normalize legacy character status values persisted by older builds."""
+    value = str(status or "").strip()
+    if not value:
+        return NORMAL_CHARACTER_STATUS
+    return _LEGACY_CHARACTER_STATUS_MAP.get(value, value)
+
+
+def is_default_character_status(status: Any) -> bool:
+    return normalize_character_status(status) == NORMAL_CHARACTER_STATUS
+
+
+def normalize_character_states(character_states: Any) -> Dict[str, Dict]:
+    if not isinstance(character_states, dict):
+        return {}
+
+    normalized: Dict[str, Dict] = {}
+    for key, payload in character_states.items():
+        if not isinstance(payload, dict):
+            continue
+        name = str(payload.get("name") or key or "").strip()
+        if not name:
+            continue
+        row = dict(payload)
+        row["name"] = name
+        row["status"] = normalize_character_status(row.get("status"))
+        normalized[name] = row
+    return normalized
 
 
 @dataclass
@@ -84,6 +118,7 @@ class SessionState:
         if not self.created_at:
             self.created_at = now
         self.updated_at = now
+        self.character_states = normalize_character_states(self.character_states)
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -136,8 +171,9 @@ class SessionState:
                 fragments = [str(item.get("name") or "").strip()]
                 if item.get("last_chapter"):
                     fragments.append(f"最近出现在第{item.get('last_chapter')}章")
-                if item.get("status"):
-                    fragments.append(f"状态：{item.get('status')}")
+                status = normalize_character_status(item.get("status"))
+                if status and status != NORMAL_CHARACTER_STATUS:
+                    fragments.append(f"状态：{status}")
                 if item.get("location"):
                     fragments.append(f"位置：{item.get('location')}")
                 abilities = item.get("learned_abilities") or item.get("abilities") or []
@@ -676,7 +712,7 @@ class SessionStore(_SessionStoreBase):
                 "story_beginning": state.story_beginning,
                 "context_summary": state.get_context_summary(),
                 "dead_characters": state.dead_characters,
-                "character_states": state.character_states,
+                "character_states": normalize_character_states(state.character_states),
                 "last_model": state.last_model,
                 "model_history": state.model_history,
                 "version": state.version,

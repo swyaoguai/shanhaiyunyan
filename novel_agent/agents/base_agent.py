@@ -23,7 +23,7 @@ from ..agent_config import AgentModelConfig, get_config_manager
 from ..utils.retry import async_retry, RetryConfig
 from ..utils.metrics import get_metrics_collector, MetricsContext
 from ..utils.token_stats import extract_token_usage, estimate_tokens_from_messages, estimate_tokens_from_text, record_token_usage
-from ..utils.llm_params import normalize_max_tokens
+from ..utils.llm_params import add_temperature_param, is_temperature_parameter_error, normalize_max_tokens
 from ..constants import TIMEOUTS, RETRY_DEFAULTS
 from ..timeout_settings import get_llm_timeout_settings
 from .api_key_rotation import (
@@ -300,6 +300,15 @@ class BaseAgent(ABC):
     def _should_omit_max_tokens(self) -> bool:
         """探索仓等严格 OpenAI 兼容中转不携带 max_tokens。"""
         return self._is_tsc5_api_base()
+
+    def _temperatureless_retry_params(self, params: Dict[str, Any], error: Exception) -> Optional[Dict[str, Any]]:
+        """Retry once without temperature when a strict provider rejects it."""
+        if "temperature" not in params or not is_temperature_parameter_error(error):
+            return None
+        retry_params = dict(params)
+        retry_params.pop("temperature", None)
+        logger.warning("[%s] 当前模型接口拒绝 temperature 参数，已去掉该参数后重试一次", self.name)
+        return retry_params
 
     def _split_system_messages(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, Any]], str]:
         system_parts: List[str] = []
@@ -857,9 +866,14 @@ class BaseAgent(ABC):
         params = {
             "model": self._get_model_name(),
             "messages": full_messages,
-            "temperature": temperature if temperature is not None else self._get_temperature(),
             "stream": stream
         }
+        add_temperature_param(
+            params,
+            model=params["model"],
+            temperature=temperature if temperature is not None else self._get_temperature(),
+            source=self.name,
+        )
         if not self._should_omit_max_tokens():
             params["max_tokens"] = resolved_max_tokens
         
@@ -921,7 +935,10 @@ class BaseAgent(ABC):
                 try:
                     response = await self._create_chat_completion_with_rotation(params)
                 except Exception as create_error:
-                    if self._should_force_stream_fallback(create_error, stream=stream):
+                    retry_params = self._temperatureless_retry_params(params, create_error)
+                    if retry_params is not None:
+                        response = await self._create_chat_completion_with_rotation(retry_params)
+                    elif self._should_force_stream_fallback(create_error, stream=stream):
                         logger.warning(
                             f"[{self.name}] Non-stream request rejected by provider, retrying with streaming fallback"
                         )
@@ -958,7 +975,8 @@ class BaseAgent(ABC):
                             f"time: {duration:.2f}s"
                         )
                         return content
-                    raise
+                    else:
+                        raise
                 
                 # 验证响应格式
                 if isinstance(response, str):
@@ -1407,7 +1425,11 @@ class BaseAgent(ABC):
             try:
                 response = await self._create_chat_completion_with_rotation(request_params)
             except Exception as exc:
-                if "stream_options" in request_params and self._should_retry_stream_without_options(exc):
+                retry_params = self._temperatureless_retry_params(request_params, exc)
+                if retry_params is not None:
+                    request_params = retry_params
+                    response = await self._create_chat_completion_with_rotation(request_params)
+                elif "stream_options" in request_params and self._should_retry_stream_without_options(exc):
                     logger.info(
                         f"[{self.name}] 当前模型接口不兼容 stream_options.include_usage，退回普通流式请求"
                     )

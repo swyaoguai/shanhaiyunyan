@@ -195,19 +195,19 @@ class NovelCoordinator:
         self.collab_agent_registry = CollabAgentRegistry(
             fallback_registry_provider=lambda: self.capability_registry
         )
-        default_collab_participants = build_default_collab_participants(
+        self.default_collab_participants = build_default_collab_participants(
             {
                 name: self.collab_service_registry.get(name)
                 for name in self.collab_service_registry.list_agents()
             }
         )
-        self.collab_agent_registry.register_many(list(default_collab_participants.values()))
-        self.context_strategy = default_collab_participants["ContextStrategy"]
-        self.content_reader = default_collab_participants["ContentReader"]
-        self.content_expansion = default_collab_participants["ContentExpansion"]
+        self.collab_agent_registry.register_many(list(self.default_collab_participants.values()))
+        self.context_strategy = self.default_collab_participants["ContextStrategy"]
+        self.content_reader = self.default_collab_participants["ContentReader"]
+        self.content_expansion = self.default_collab_participants["ContentExpansion"]
         # 问题6修复：使用 ServiceBackedCollabParticipant 包装后的实例，与其他服务保持一致
-        self.file_naming = default_collab_participants.get("FileNaming") or self.collab_service_registry.get("file_naming")
-        self.summary_orchestrator = default_collab_participants["SummaryOrchestrator"]
+        self.file_naming = self.default_collab_participants.get("FileNaming") or self.collab_service_registry.get("file_naming")
+        self.summary_orchestrator = self.default_collab_participants["SummaryOrchestrator"]
 
         # 为Agent设置回调处理器
         if progress_callback:
@@ -283,24 +283,8 @@ class NovelCoordinator:
         )
 
         # 问题9修复：为需要 LLM 的 Service 创建共享 LLMClient 并注入
-        from ..agents.llm_client import create_llm_client
-        from ..agent_config import get_config_manager
-        _cfg_mgr = get_config_manager()
-        _active_cfg = _cfg_mgr.multi_config.get_active_config()
-        _active_api_type = getattr(_active_cfg, 'api_type', 'openai_chat') if _active_cfg else 'openai_chat'
-        self._service_llm_client = create_llm_client(
-            metrics_namespace="collab_service",
-            api_type=_active_api_type,
-        )
-        for service_name in ("content_expansion", "summary_orchestrator"):
-            svc = self.collab_service_registry.get(service_name)
-            if svc is not None and hasattr(svc, "set_llm_client"):
-                svc.set_llm_client(self._service_llm_client)
-        # 同时为 ServiceBackedCollabParticipant 包装的实例注入
-        for participant_name in ("ContentExpansion", "SummaryOrchestrator"):
-            participant = default_collab_participants.get(participant_name)
-            if participant is not None and hasattr(participant, "set_llm_client"):
-                participant.set_llm_client(self._service_llm_client)
+        self._service_llm_client = self._create_service_llm_client()
+        self._install_service_llm_client(self._service_llm_client)
 
         # 共享知识库实例（由Web层统一注入）
         self.knowledge_base = None
@@ -322,6 +306,82 @@ class NovelCoordinator:
         self._project_persistence_lock = asyncio.Lock()
 
         logger.info(f"NovelCoordinator initialized with project dir: {self.project_dir}")
+
+    def _create_service_llm_client(self):
+        """Create a collab service LLM client from the active API config."""
+        from ..agents.llm_client import create_llm_client
+        from ..agent_config import get_config_manager
+
+        cfg_mgr = get_config_manager()
+        active_cfg = cfg_mgr.multi_config.get_active_config()
+        if active_cfg:
+            return create_llm_client(
+                model_name=cfg_mgr.multi_config.get_effective_model(),
+                temperature=active_cfg.temperature,
+                max_tokens=active_cfg.max_tokens,
+                api_key=active_cfg.get_primary_key(),
+                api_base=active_cfg.api_base,
+                api_type=getattr(active_cfg, "api_type", "openai_chat") or "openai_chat",
+                metrics_namespace="collab_service",
+            )
+
+        global_cfg = cfg_mgr.get_global_config()
+        return create_llm_client(
+            model_name=global_cfg.model,
+            temperature=global_cfg.temperature,
+            max_tokens=global_cfg.max_tokens,
+            api_key=global_cfg.get_primary_key(),
+            api_base=global_cfg.api_base,
+            api_type=getattr(global_cfg, "api_type", "openai_chat") or "openai_chat",
+            metrics_namespace="collab_service",
+        )
+
+    def _install_service_llm_client(self, llm_client) -> None:
+        """Inject the shared collab service LLM client into service-backed participants."""
+        for service_name in ("content_expansion", "summary_orchestrator"):
+            svc = self.collab_service_registry.get(service_name)
+            if svc is not None and hasattr(svc, "set_llm_client"):
+                svc.set_llm_client(llm_client)
+        # 同时为 ServiceBackedCollabParticipant 包装的实例注入
+        default_collab_participants = getattr(self, "default_collab_participants", {}) or {}
+        for participant_name in ("ContentExpansion", "SummaryOrchestrator"):
+            participant = default_collab_participants.get(participant_name)
+            if participant is not None and hasattr(participant, "set_llm_client"):
+                participant.set_llm_client(llm_client)
+
+    def refresh_model_configs(self) -> int:
+        """Refresh coordinator-owned agents and shared LLM services after config edits."""
+        refreshed_count = 0
+        seen_ids = set()
+
+        for agent in (
+            self.worldbuilder,
+            self.outliner,
+            self.chapter_writer,
+            self.polisher,
+            self.evaluator,
+            self.character_builder,
+            self.chapter_setting_builder,
+        ):
+            if agent is None or id(agent) in seen_ids:
+                continue
+            seen_ids.add(id(agent))
+            refresh = getattr(agent, "refresh_model_config", None)
+            if callable(refresh):
+                try:
+                    if refresh():
+                        refreshed_count += 1
+                except Exception as exc:
+                    logger.debug(
+                        "[Coordinator] refresh model config failed for %s: %s",
+                        getattr(agent, "name", type(agent).__name__),
+                        exc,
+                    )
+
+        self._service_llm_client = self._create_service_llm_client()
+        self._install_service_llm_client(self._service_llm_client)
+        logger.info("[Coordinator] Refreshed model configs for %s agents and collab services", refreshed_count)
+        return refreshed_count
 
     def _sync_outline_to_library(self, outline_rows: List[Dict[str, Any]]) -> None:
         """Dedup: sync outline to library service."""

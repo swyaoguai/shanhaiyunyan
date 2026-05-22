@@ -6,6 +6,7 @@
     'use strict';
 
     const COVER_API = '/api/cover-images';
+    const COVER_JOB_POLL_INTERVAL_MS = 2000;
 
     const COVER_PLATFORM_PRESETS = [
         { id: 'fanqie', label: '番茄小说', size: '800x600', note: '番茄平台封面预设，最终保存为横版 800x600；请求服务商时会自动适配模型支持的尺寸。' },
@@ -25,6 +26,7 @@
         previewCover: null,
         selectedHistoryIds: [],
         loadingAction: '',
+        loadingKind: '',
         form: {
             title: '',
             author: '',
@@ -49,7 +51,16 @@
     window.renderCoverImagesInterface = renderCoverImagesInterface;
     window.renderCoverImagesNavPanel = renderCoverImagesNavPanel;
 
-    async function renderCoverImagesInterface() {
+    function isCoverImagesRenderCurrent(renderToken) {
+        if (!renderToken) return true;
+        const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
+        if (typeof guard === 'function') {
+            return guard('cover-images', renderToken);
+        }
+        return window.store?.currentModule === 'cover-images';
+    }
+
+    async function renderCoverImagesInterface(renderToken = null) {
         ensureCoverStyles();
         if (typeof updateBreadcrumbs === 'function') {
             updateBreadcrumbs(['项目资源', '封面生成']);
@@ -68,6 +79,8 @@
         `;
 
         await loadCoverWorkbenchData();
+        if (!isCoverImagesRenderCurrent(renderToken)) return;
+
         renderCoverWorkbench();
     }
 
@@ -130,6 +143,10 @@
         coverState.form.model = selectedModel;
         const imageModels = getImageModels(activeConfig);
         const selectedPreset = getSelectedPreset();
+        const busy = isCoverActionBusy();
+        const draftingPrompt = isCoverActionBusy('prompt-draft');
+        const generatingCover = isCoverActionBusy('cover-generation');
+        const canGenerateCover = Boolean(coverState.draft?.final_prompt && selectedModel);
 
         container.innerHTML = `
             <div class="cover-workbench">
@@ -228,16 +245,16 @@
 
                         <div class="cover-prompt-actions">
                             <div class="cover-action-row">
-                                <button type="button" class="cover-btn cover-btn-primary" id="cover-draft-prompt">
-                                    <i class="ri-magic-line"></i> 生成描写提示词
+                                <button type="button" class="cover-btn cover-btn-primary" id="cover-draft-prompt" ${draftingPrompt ? 'disabled aria-busy="true"' : (busy ? 'disabled' : '')}>
+                                    <i class="${draftingPrompt ? 'ri-loader-4-line cover-spin' : 'ri-magic-line'}"></i> ${draftingPrompt ? '正在生成提示词' : '生成描写提示词'}
                                 </button>
                             </div>
                             <div class="cover-action-row cover-action-row-secondary">
-                                <button type="button" class="cover-btn cover-btn-ghost" id="cover-copy-prompt" ${coverState.draft?.final_prompt ? '' : 'disabled'}>
+                                <button type="button" class="cover-btn cover-btn-ghost" id="cover-copy-prompt" ${coverState.draft?.final_prompt && !busy ? '' : 'disabled'}>
                                     <i class="ri-file-copy-line"></i> 复制提示词
                                 </button>
-                                <button type="button" class="cover-btn cover-btn-primary" id="cover-generate" ${coverState.draft?.final_prompt && selectedModel ? '' : 'disabled'}>
-                                    <i class="ri-sparkling-line"></i> 生成封面
+                                <button type="button" class="cover-btn cover-btn-primary" id="cover-generate" ${canGenerateCover && !busy ? '' : 'disabled'} ${generatingCover ? 'aria-busy="true"' : ''}>
+                                    <i class="${generatingCover ? 'ri-loader-4-line cover-spin' : 'ri-sparkling-line'}"></i> ${generatingCover ? '正在生成封面' : '生成封面'}
                                 </button>
                             </div>
                             <span class="cover-status" id="cover-status">${escapeHtml(getStatusText())}</span>
@@ -523,8 +540,9 @@
     }
 
     async function runPromptDraft() {
+        if (isCoverActionBusy()) return;
         captureFormState();
-        setLoading('正在生成提示词...');
+        setLoading('正在生成提示词...', 'prompt-draft');
         try {
             const response = await apiCall(`${COVER_API}/prompt-draft`, 'POST', {
                 template_id: coverState.selectedTemplateId,
@@ -536,17 +554,18 @@
                 custom_elements: collectCustomElements(),
             });
             coverState.draft = response.data;
-            coverState.loadingAction = '';
+            clearLoading();
             renderCoverWorkbench();
             showToast?.('封面提示词已生成', 'success');
         } catch (error) {
-            coverState.loadingAction = '';
+            clearLoading();
             renderCoverWorkbench();
             showToast?.(error.message || '提示词生成失败', 'error');
         }
     }
 
     async function runCoverGeneration() {
+        if (isCoverActionBusy()) return;
         captureFormState();
         const prompt = getFieldValue('cover-final-prompt');
         if (!prompt) {
@@ -559,9 +578,9 @@
             showToast?.('请选择支持图像生成的图片模型', 'warning');
             return;
         }
-        setLoading('正在生成封面...');
+        setLoading('正在提交封面生成任务...', 'cover-generation');
         try {
-            const response = await apiCall(`${COVER_API}/generate`, 'POST', {
+            const response = await apiCall(`${COVER_API}/generate-jobs`, 'POST', {
                 template_id: coverState.selectedTemplateId,
                 prompt,
                 typography_prompt: coverState.draft?.typography_prompt || '',
@@ -572,17 +591,56 @@
                 model: coverState.form.model,
                 size,
             });
-            coverState.result = response.data;
-            coverState.loadingAction = '';
-            coverState.history = [response.data, ...coverState.history.filter((item) => item.cover_id !== response.data.cover_id)];
+            const taskId = response.task_id || response.data?.task_id || '';
+            if (!taskId) {
+                throw new Error('封面生成任务创建失败：未返回任务 ID。');
+            }
+            setLoading('封面生成任务已提交，正在等待图片接口返回...', 'cover-generation');
+            const result = await pollCoverGenerationJob(taskId, response.poll_interval_ms);
+            coverState.result = result;
+            clearLoading();
+            coverState.history = [result, ...coverState.history.filter((item) => item.cover_id !== result.cover_id)];
             coverState.selectedHistoryIds = [];
             renderCoverWorkbench();
             showToast?.('封面已生成，请及时保存到本地', 'success');
         } catch (error) {
-            coverState.loadingAction = '';
+            clearLoading();
             renderCoverWorkbench();
             showToast?.(error.message || '封面生成失败', 'error');
         }
+    }
+
+    async function pollCoverGenerationJob(taskId, pollIntervalMs = COVER_JOB_POLL_INTERVAL_MS) {
+        const intervalMs = normalizePollInterval(pollIntervalMs);
+        while (true) {
+            const response = await apiCall(`${COVER_API}/generate-jobs/${encodeURIComponent(taskId)}`, 'GET');
+            const job = response.data || response.job || response;
+            const status = String(job.status || '').toLowerCase();
+            if (status === 'completed') {
+                if (!job.result) {
+                    throw new Error('封面生成任务已完成，但没有返回图片结果。');
+                }
+                return job.result;
+            }
+            if (status === 'failed') {
+                throw new Error(job.error || job.message || '封面生成失败，请检查图像模型配置。');
+            }
+            const message = job.message || (status === 'queued'
+                ? '封面生成任务已提交，正在等待执行...'
+                : '封面正在生成中，图片接口可能需要较长时间...');
+            setLoading(message, 'cover-generation');
+            await waitForCoverJob(intervalMs);
+        }
+    }
+
+    function normalizePollInterval(value) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed <= 0) return COVER_JOB_POLL_INTERVAL_MS;
+        return Math.min(Math.max(parsed, 500), 10000);
+    }
+
+    function waitForCoverJob(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     async function copyFinalPrompt() {
@@ -800,7 +858,8 @@
             ? `生成描写提示词会使用文本模型“${promptModelText}”。`
             : '生成描写提示词会使用模板兜底；请先在 API 配置中添加并选择文本模型以启用模型润色。';
         if (imageModelText) {
-            return `${promptPart} 生成封面会使用图像模型“${imageModelText}”。`;
+            const imageFormat = getImageApiFormatLabel(getActiveConfig()?.image_api_format || 'auto');
+            return `${promptPart} 生成封面会使用图像模型“${imageModelText}”，图片格式：${imageFormat}。`;
         }
         return `${promptPart} 请先在 API 配置中添加并选择图片模型后再生成封面。`;
     }
@@ -808,7 +867,19 @@
     function getImageModelHint(config) {
         if (!config) return '当前没有可用 API 配置；请先在设置中添加图片模型配置。';
         if (!getImageModels(config).length) return '当前 API 配置没有识别到图片模型；请在设置中添加 image / imagen / dall-e 等图片模型。';
-        return '这里只能从当前 API 配置中的图片模型下拉选择，不能手动输入语言模型。';
+        return `这里只能从当前 API 配置中的图片模型下拉选择；图片格式：${getImageApiFormatLabel(config.image_api_format || 'auto')}。`;
+    }
+
+    function getImageApiFormatLabel(format) {
+        const labels = {
+            auto: 'Auto 自动尝试',
+            openai_images: 'OpenAI Images',
+            qwen_images: 'Qwen Images',
+            gemini_native: 'Gemini 原生图片',
+            responses: 'OpenAI Responses 图片',
+            chat_completions: 'Chat 图片输出',
+        };
+        return labels[format] || labels.auto;
     }
 
     function getPromptModelHint(config) {
@@ -817,10 +888,47 @@
         return '用于生成和润色描写提示词，只能从当前 API 配置中的文本模型下拉选择。';
     }
 
-    function setLoading(text) {
+    function setLoading(text, kind) {
         coverState.loadingAction = text;
+        coverState.loadingKind = text ? (kind || coverState.loadingKind || 'general') : '';
         const status = document.getElementById('cover-status');
         if (status) status.textContent = text;
+        syncCoverActionDisabledState();
+    }
+
+    function clearLoading() {
+        setLoading('', '');
+    }
+
+    function isCoverActionBusy(kind = '') {
+        if (!coverState.loadingAction) return false;
+        return kind ? coverState.loadingKind === kind : true;
+    }
+
+    function syncCoverActionDisabledState() {
+        const busy = isCoverActionBusy();
+        const generateButton = document.getElementById('cover-generate');
+        const draftButton = document.getElementById('cover-draft-prompt');
+        const copyButton = document.getElementById('cover-copy-prompt');
+        const draftingPrompt = isCoverActionBusy('prompt-draft');
+        const generatingCover = isCoverActionBusy('cover-generation');
+        if (draftButton) {
+            draftButton.disabled = busy;
+            draftButton.setAttribute('aria-busy', String(draftingPrompt));
+            draftButton.innerHTML = draftingPrompt
+                ? '<i class="ri-loader-4-line cover-spin"></i> 正在生成提示词'
+                : '<i class="ri-magic-line"></i> 生成描写提示词';
+        }
+        if (generateButton) {
+            generateButton.disabled = busy || !coverState.draft?.final_prompt || !coverState.form.model;
+            generateButton.setAttribute('aria-busy', String(generatingCover));
+            generateButton.innerHTML = generatingCover
+                ? '<i class="ri-loader-4-line cover-spin"></i> 正在生成封面'
+                : '<i class="ri-sparkling-line"></i> 生成封面';
+        }
+        if (copyButton) {
+            copyButton.disabled = busy || !coverState.draft?.final_prompt;
+        }
     }
 
     function formatCoverTime(value) {
@@ -883,6 +991,8 @@
             .cover-model-note { color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
             .cover-btn { border: 1px solid var(--border-color); border-radius: 8px; padding: 9px 14px; color: var(--text-primary); background: rgba(255,255,255,0.06); cursor: pointer; display: inline-flex; gap: 8px; align-items: center; justify-content: center; }
             .cover-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+            .cover-spin { animation: cover-spin 0.9s linear infinite; }
+            @keyframes cover-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
             .cover-btn-primary { border-color: rgba(99, 102, 241, 0.75); background: rgba(99, 102, 241, 0.88); color: white; }
             .cover-btn-ghost { background: transparent; }
             .cover-btn-danger { border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.14); color: #fecaca; }

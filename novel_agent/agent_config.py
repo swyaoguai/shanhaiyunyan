@@ -6,6 +6,7 @@ Agent模型配置数据结构和管理器
 
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Dict, Optional, List, Any
@@ -21,6 +22,52 @@ DEFAULT_API_PRESET_ID = "preset-tsc5"
 LEGACY_API_PRESET_NAME = "预设接口"
 DEFAULT_API_PRESET_NAME = "探索仓API"
 DEFAULT_API_PRESET_BASE = "https://test.tsc5.top/v1"
+IMAGE_API_FORMATS = {
+    "auto",
+    "openai_images",
+    "qwen_images",
+    "gemini_native",
+    "responses",
+    "chat_completions",
+}
+
+
+def _is_tsc5_api_base(api_base: str) -> bool:
+    return "tsc5.top" in str(api_base or "").lower()
+
+
+def _normalize_versioned_openai_base_url(api_base: str) -> str:
+    base_url = str(api_base or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    last_segment = base_url.rsplit("/", 1)[-1].lower()
+    if not re.fullmatch(r"v\d+(\.\d+)?", last_segment):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _normalize_api_base_for_config(api_base: str, *, config_id: str = "") -> str:
+    base_url = str(api_base or "").strip()
+    if config_id == DEFAULT_API_PRESET_ID or _is_tsc5_api_base(base_url):
+        return _normalize_versioned_openai_base_url(base_url)
+    return base_url
+
+
+def normalize_image_api_format(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "": "auto",
+        "images_generations": "openai_images",
+        "image_generations": "openai_images",
+        "openai_image_generations": "openai_images",
+        "openai": "openai_images",
+        "qwen": "qwen_images",
+        "gemini": "gemini_native",
+        "gemini_images": "gemini_native",
+        "openai_responses": "responses",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in IMAGE_API_FORMATS else "auto"
 
 
 def _default_agent_config_dir() -> Path:
@@ -164,6 +211,7 @@ class APIConfigItem(APIKeyPoolMixin):
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
     created_at: str = ""
     api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
+    image_api_format: str = "auto"
     
     def __post_init__(self):
         if not self.id:
@@ -171,6 +219,8 @@ class APIConfigItem(APIKeyPoolMixin):
         if not self.created_at:
             from datetime import datetime
             self.created_at = datetime.now().isoformat()
+        self.api_base = _normalize_api_base_for_config(self.api_base, config_id=self.id)
+        self.image_api_format = normalize_image_api_format(self.image_api_format)
         self.normalize_key_pool()
     
     def is_configured(self) -> bool:
@@ -190,7 +240,8 @@ class APIConfigItem(APIKeyPoolMixin):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "created_at": self.created_at,
-            "api_type": self.api_type
+            "api_type": self.api_type,
+            "image_api_format": self.image_api_format,
         }
 
 
@@ -239,6 +290,7 @@ class GlobalAPIConfig(APIKeyPoolMixin):
     api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
 
     def __post_init__(self):
+        self.api_base = _normalize_api_base_for_config(self.api_base)
         self.normalize_key_pool()
 
     def is_configured(self) -> bool:
@@ -263,6 +315,7 @@ class AgentModelConfig(APIKeyPoolMixin):
     api_type: str = "openai_chat"  # 可选值: "openai_chat", "openai_responses", "anthropic"
 
     def __post_init__(self):
+        self.api_base = _normalize_api_base_for_config(self.api_base, config_id=self.api_config_id)
         self.normalize_key_pool()
 
     def is_configured(self) -> bool:
@@ -494,6 +547,10 @@ class AgentConfigManager:
             if config.id == DEFAULT_API_PRESET_ID and config.name in ("", LEGACY_API_PRESET_NAME):
                 config.name = DEFAULT_API_PRESET_NAME
                 changed = True
+            normalized_base = _normalize_api_base_for_config(config.api_base, config_id=config.id)
+            if normalized_base != config.api_base:
+                config.api_base = normalized_base
+                changed = True
         return changed
     
     def _migrate_to_multi_config(self) -> None:
@@ -581,6 +638,8 @@ class AgentConfigManager:
         Args:
             sync_env: 是否同步更新.env文件（仅在应用配置时为True）
         """
+        for cfg in self.multi_config.configs:
+            cfg.api_base = _normalize_api_base_for_config(cfg.api_base, config_id=cfg.id)
         data = {
             "configs": [asdict(cfg) for cfg in self.multi_config.configs],
             "active_config_id": self.multi_config.active_config_id,
@@ -661,7 +720,7 @@ class AgentConfigManager:
         active = self.multi_config.get_active_config()
         if active:
             # 更新现有配置
-            active.api_base = api_base
+            active.api_base = _normalize_api_base_for_config(api_base, config_id=active.id)
             active.set_primary_key(api_key)
             if model and model not in active.models:
                 active.models.append(model)
@@ -692,18 +751,20 @@ class AgentConfigManager:
                        models: List[str], temperature: float = LLM_DEFAULTS.TEMPERATURE,
                        max_tokens: int = LLM_DEFAULTS.MAX_TOKENS,
                        api_type: str = "openai_chat",
+                       image_api_format: str = "auto",
                        api_keys: Optional[List[APIKeyEntry]] = None) -> APIConfigItem:
         """添加新的API配置"""
         normalized_max_tokens = self._normalize_config_max_tokens(max_tokens, source=f"APIConfig:add:{name}")
         config_item = APIConfigItem(
             name=name,
-            api_base=api_base,
+            api_base=_normalize_api_base_for_config(api_base),
             api_key=api_key,
             api_keys=api_keys or [],
             models=models,
             temperature=temperature,
             max_tokens=normalized_max_tokens,
-            api_type=api_type
+            api_type=api_type,
+            image_api_format=normalize_image_api_format(image_api_format),
         )
         self.multi_config.configs.append(config_item)
         
@@ -728,6 +789,10 @@ class AgentConfigManager:
                                 value,
                                 source=f"APIConfig:update:{config.name or config.id}",
                             )
+                        if key == "api_base":
+                            value = _normalize_api_base_for_config(value, config_id=config.id)
+                        if key == "image_api_format":
+                            value = normalize_image_api_format(value)
                         if key == "api_key":
                             config.set_primary_key(value)
                         elif key == "api_keys":

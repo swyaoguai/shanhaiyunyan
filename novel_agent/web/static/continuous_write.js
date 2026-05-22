@@ -154,30 +154,82 @@ async function loadInfiniteWriteContinuationContext() {
     }
 }
 
-function renderInfiniteWriteCharacterAnchors() {
-    const context = infiniteWriteState.continuationContext;
-    const characterStates = context?.character_states && typeof context.character_states === 'object'
+const IW_NORMAL_CHARACTER_STATUS = '正常';
+const IW_LEGACY_CHARACTER_STATUS_MAP = {
+    '姝ｅ父': IW_NORMAL_CHARACTER_STATUS
+};
+const IW_NON_CHARACTER_NAMES = new Set([
+    '我们', '他们', '这里', '那里', '一个', '不是', '如果', '然后', '自己', '有人',
+    '众人', '少年', '少女', '男人', '女人', '老人', '教练', '队友', '守门员', '主角',
+    '配角', '反派', '角色', '人物'
+]);
+const IW_NON_CHARACTER_NAME_PARTS = [
+    '第', '章', '回', '节', '故事', '起源', '最近', '状态', '表现', '训练', '基地',
+    '空气', '草腥', '塑胶', '跑道', '味道', '足球', '点球', '热点', '小说', '方面',
+    '相关', '参考', '内容', '章节', '标题', '纪元'
+];
+
+function normalizeInfiniteWriteCharacterStatus(status) {
+    const value = String(status || '').trim();
+    if (!value) return IW_NORMAL_CHARACTER_STATUS;
+    return IW_LEGACY_CHARACTER_STATUS_MAP[value] || value;
+}
+
+function isDefaultInfiniteWriteCharacterStatus(status) {
+    return normalizeInfiniteWriteCharacterStatus(status) === IW_NORMAL_CHARACTER_STATUS;
+}
+
+function normalizeInfiniteWriteMemoryText(value) {
+    return String(value || '').replace(/姝ｅ父/g, IW_NORMAL_CHARACTER_STATUS).trim();
+}
+
+function isLikelyInfiniteWriteAnchorName(name) {
+    const value = String(name || '').trim();
+    if (!value || value.length < 2 || value.length > 4) return false;
+    if (IW_NON_CHARACTER_NAMES.has(value)) return false;
+    if (!/^[\u4e00-\u9fa5·]+$/.test(value)) return false;
+    return !IW_NON_CHARACTER_NAME_PARTS.some((part) => value.includes(part));
+}
+
+function getInfiniteWriteCharacterAnchors(context) {
+    const rawStates = context?.character_states && typeof context.character_states === 'object'
         ? Object.values(context.character_states)
         : [];
-    const contextSummary = String(context?.context_summary || '').trim();
+    return rawStates
+        .map((item) => {
+            const notes = Array.isArray(item?.notes) ? item.notes : [];
+            return {
+                ...item,
+                name: String(item?.name || '').trim(),
+                status: normalizeInfiniteWriteCharacterStatus(item?.status),
+                notes
+            };
+        })
+        .filter((item) => isLikelyInfiniteWriteAnchorName(item.name))
+        .sort((a, b) => Number(b?.last_chapter || 0) - Number(a?.last_chapter || 0))
+        .slice(0, 6);
+}
+
+function renderInfiniteWriteCharacterAnchors() {
+    const context = infiniteWriteState.continuationContext;
+    const characterStates = getInfiniteWriteCharacterAnchors(context);
+    const contextSummary = normalizeInfiniteWriteMemoryText(context?.context_summary);
 
     if (characterStates.length === 0 && !contextSummary) {
         return '';
     }
 
     const cards = characterStates
-        .sort((a, b) => Number(b?.last_chapter || 0) - Number(a?.last_chapter || 0))
-        .slice(0, 6)
         .map((item) => {
-            const notes = Array.isArray(item?.notes) ? item.notes : [];
+            const showStatus = item?.status && !isDefaultInfiniteWriteCharacterStatus(item.status);
             return `
                 <div style="padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 14px; color: var(--text-primary); font-weight: 600;">${escapeHtml(item?.name || '未命名角色')}</div>
                     <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.6;">
                         ${item?.last_chapter ? `<div>最近出现：第${escapeHtml(String(item.last_chapter))}章</div>` : ''}
-                        ${item?.status ? `<div>当前状态：${escapeHtml(String(item.status))}</div>` : ''}
+                        ${showStatus ? `<div>当前状态：${escapeHtml(String(item.status))}</div>` : ''}
                         ${item?.location ? `<div>当前位置：${escapeHtml(String(item.location))}</div>` : ''}
-                        ${notes.length > 0 ? `<div>最近表现：${escapeHtml(String(notes[notes.length - 1]))}</div>` : ''}
+                        ${item.notes.length > 0 ? `<div>最近表现：${escapeHtml(normalizeInfiniteWriteMemoryText(item.notes[item.notes.length - 1]))}</div>` : ''}
                     </div>
                 </div>
             `;
@@ -187,10 +239,10 @@ function renderInfiniteWriteCharacterAnchors() {
         <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
             <h3 style="margin-bottom: 12px; font-size: 15px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                 <i class="ri-user-star-line" style="color: #60a5fa;"></i>
-                人物和设定锚点
+                系统记忆快照
             </h3>
             <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin-bottom: 14px;">
-                这里展示系统当前记住的人物状态和最近剧情，能帮你判断续写有没有跑偏。
+                最近剧情与角色状态
             </div>
             ${contextSummary ? `<div style="padding: 12px 14px; border-radius: 10px; background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.2); color: var(--text-secondary); font-size: 12px; line-height: 1.7; margin-bottom: 14px;">${escapeHtml(contextSummary)}</div>` : ''}
             ${cards ? `<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">${cards}</div>` : ''}
@@ -209,7 +261,7 @@ function toggleInfiniteWriteMemoryPreview(force = null) {
         panel.style.display = next ? '' : 'none';
     }
     if (btn) {
-        btn.textContent = next ? '收起系统记忆' : '先看系统记忆';
+        btn.textContent = next ? '收起系统记忆' : '查看系统记忆';
     }
     saveInfiniteWriteData();
 }
@@ -2399,7 +2451,16 @@ async function loadInfiniteWriteChapterList() {
 }
 
 // ===== 无限续写界面 =====
-async function renderInfiniteWriteInterface() {
+function isInfiniteWriteRenderCurrent(renderToken) {
+    if (!renderToken) return true;
+    const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
+    if (typeof guard === 'function') {
+        return guard('infinite-write', renderToken);
+    }
+    return window.store?.currentModule === 'infinite-write';
+}
+
+async function renderInfiniteWriteInterface(renderToken = null) {
     loadInfiniteWriteDataForCurrentProject();
     setInfiniteWriteActiveView('panel');
 
@@ -2412,7 +2473,10 @@ async function renderInfiniteWriteInterface() {
 
     // 先加载全局API配置
     await loadGlobalApiConfigForInfiniteWrite();
+    if (!isInfiniteWriteRenderCurrent(renderToken)) return;
+
     await loadInfiniteWriteContinuationContext();
+    if (!isInfiniteWriteRenderCurrent(renderToken)) return;
 
     const resolvedConfigId = resolveInfiniteWriteApiConfigId(
         infiniteWriteState.selectedApiConfigId || infiniteWriteState.activeConfigId
@@ -2548,8 +2612,6 @@ async function renderInfiniteWriteInterface() {
                 </div>
             </div>
 
-            ${renderInfiniteWriteCharacterAnchors()}
-
             <!-- 开始新故事区域（当没有章节时显示） -->
             <div id="iw-start-section" style="${infiniteWriteState.chapters.length > 0 ? 'display: none;' : ''} background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px; margin-bottom: 24px;">
                 <h3 style="margin-bottom: 16px; font-size: 16px; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
@@ -2603,7 +2665,7 @@ async function renderInfiniteWriteInterface() {
                     <button id="iw-continue-btn" style="flex: 1; min-width: 200px; padding: 14px; background: linear-gradient(135deg, #22c55e, #10b981); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px;">
                         <i class="ri-play-line"></i> 续写下一章                    </button>
                     <button id="iw-memory-preview-toggle" style="padding: 14px 20px; background: rgba(96, 165, 250, 0.16); border: 1px solid rgba(96, 165, 250, 0.38); color: #93c5fd; border-radius: 8px; cursor: pointer; font-weight: 500;">
-                        ${infiniteWriteState.showMemoryPreview ? '收起系统记忆' : '先看系统记忆'}
+                        ${infiniteWriteState.showMemoryPreview ? '收起系统记忆' : '查看系统记忆'}
                     </button>
                     <button id="iw-import-btn-inline" style="padding: 14px 20px; background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; border-radius: 8px; cursor: pointer; font-weight: 500;">
                         <i class="ri-upload-cloud-2-line"></i> 导入小说
@@ -2707,20 +2769,22 @@ async function renderInfiniteWriteInterface() {
     loadInfiniteWriteNavChapterList();
 
     // 初始化热点面板
-    initInfiniteWriteTrends();
+    initInfiniteWriteTrends(renderToken);
 }
 
 // ===== 初始化热点面板 =====
-async function initInfiniteWriteTrends() {
+async function initInfiniteWriteTrends(renderToken = null) {
     // 加载热点配置
     if (typeof loadTrendsConfig === 'function') {
         await loadTrendsConfig();
     }
+    if (!isInfiniteWriteRenderCurrent(renderToken)) return;
 
     // 检查热点服务状态
     if (typeof checkTrendsService === 'function') {
         await checkTrendsService();
     }
+    if (!isInfiniteWriteRenderCurrent(renderToken)) return;
 
     // 检查是否在无限续写中显示热点
     if (typeof trendsState !== 'undefined' && trendsState.config) {
@@ -4612,4 +4676,3 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 console.log('[continuous_write.js] 无限续写模块已加载（独立版本，含错误处理增强）');
-

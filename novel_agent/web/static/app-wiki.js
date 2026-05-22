@@ -112,7 +112,17 @@
         console.log('[Wiki] 模块初始化');
     }
 
-    async function renderWikiView() {
+    function isWikiRenderCurrent(renderToken) {
+        if (!renderToken) return true;
+        const moduleId = renderToken.moduleId || 'wiki';
+        const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
+        if (typeof guard === 'function') {
+            return guard(moduleId, renderToken);
+        }
+        return ['wiki', 'aux-memory', 'knowledge-workbench'].includes(window.store?.currentModule);
+    }
+
+    async function renderWikiView(renderToken = null) {
         const container = document.getElementById('main-view');
         if (!container) return;
 
@@ -150,16 +160,17 @@
             if (event.key === 'Enter') search();
         });
 
-        await loadPages();
+        await loadPages(undefined, renderToken);
     }
 
-    async function loadPages(pageType) {
+    async function loadPages(pageType, renderToken = null) {
         try {
             let url = `${WIKI_API}/pages`;
             if (pageType) url += `?page_type=${encodeURIComponent(pageType)}`;
 
             const resp = await fetch(url);
             const data = await resp.json();
+            if (!isWikiRenderCurrent(renderToken)) return;
 
             if (data.success) {
                 allPages = data.data || [];

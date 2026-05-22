@@ -8,6 +8,7 @@ const DEBUG_COPILOT_WORKFLOW = false;
 // 全局状态 Store
 const store = {
     currentModule: 'dashboard',
+    moduleRenderGeneration: 0,
     currentChapterId: null,
     currentDashboardView: 'home', // 'home' 或 'stats'
     // 项目相关
@@ -540,6 +541,7 @@ function switchModule(moduleId) {
     const normalizedModuleId = shouldOpenMergedKnowledge ? 'write' : moduleId;
     const previousModule = store.currentModule;
     store.currentModule = normalizedModuleId;
+    const renderToken = beginModuleRender(normalizedModuleId);
 
     // 更新资源栏激活状态
     ui.resItems.forEach(item => {
@@ -557,7 +559,7 @@ function switchModule(moduleId) {
         setCopilotVisible(false);
     }
     // 首次进入创作模块时默认打开山海·云烟助手
-    if (isWritingModule && !wasWritingModule && !store.copilotVisible) {
+    if (isWritingModule && !wasWritingModule && !store.copilotVisible && !isCompactViewport()) {
         setCopilotVisible(true);
     }
     syncCopilotToggleButton();
@@ -579,26 +581,26 @@ function switchModule(moduleId) {
         renderDashboard();
     } else if (normalizedModuleId === 'short-story') {
         if (typeof renderShortStoryInterface === 'function') {
-            renderShortStoryInterface();
+            renderShortStoryInterface(renderToken);
         } else {
             console.error('[switchModule] renderShortStoryInterface not found');
         }
     } else if (normalizedModuleId === 'novel-to-script') {
         if (typeof renderNovelToScriptInterface === 'function') {
-            renderNovelToScriptInterface();
+            renderNovelToScriptInterface(renderToken);
         } else {
             console.error('[switchModule] renderNovelToScriptInterface not found');
         }
     } else if (normalizedModuleId === 'cover-images') {
         if (typeof renderCoverImagesInterface === 'function') {
-            renderCoverImagesInterface();
+            renderCoverImagesInterface(renderToken);
         } else {
             console.error('[switchModule] renderCoverImagesInterface not found');
         }
     } else if (normalizedModuleId === 'infinite-write') {
         // 无限续写模块
         if (typeof renderInfiniteWriteInterface === 'function') {
-            renderInfiniteWriteInterface();
+            renderInfiniteWriteInterface(renderToken);
         } else {
             console.error('[switchModule] renderInfiniteWriteInterface not found');
         }
@@ -614,7 +616,7 @@ function switchModule(moduleId) {
     } else if (normalizedModuleId === 'aux-memory' || normalizedModuleId === 'knowledge-workbench') {
         // 知识中心已合并到Wiki系统
         if (typeof WikiModule !== 'undefined' && typeof WikiModule.render === 'function') {
-            WikiModule.render();
+            WikiModule.render(renderToken);
         } else {
             console.error('[switchModule] WikiModule not found');
         }
@@ -626,7 +628,7 @@ function switchModule(moduleId) {
     } else if (normalizedModuleId === 'wiki') {
         // Wiki知识系统
         if (typeof WikiModule !== 'undefined' && typeof WikiModule.render === 'function') {
-            WikiModule.render();
+            WikiModule.render(renderToken);
         } else {
             console.error('[switchModule] WikiModule not found');
         }
@@ -652,7 +654,7 @@ function toggleSidebar() {
             workbench.classList.add('sidebar-collapsed');
             workbench.style.gridTemplateColumns = 'var(--res-bar-w) 0px 1fr auto';
             navPanel.style.width = '0';
-            navPanel.style.display = 'none';
+            navPanel.style.display = '';
         }
 
         localStorage.setItem('sidebar_collapsed', !isCollapsed ? 'true' : 'false');
@@ -669,7 +671,7 @@ function restoreSidebarState() {
             workbench.classList.add('sidebar-collapsed');
             workbench.style.gridTemplateColumns = 'var(--res-bar-w) 0px 1fr auto';
             navPanel.style.width = '0';
-            navPanel.style.display = 'none';
+            navPanel.style.display = '';
         }
     }
 }
@@ -680,6 +682,27 @@ const COPILOT_SESSION_STORAGE_KEY = 'copilot_active_session_id';
 
 function isCopilotModule() {
     return store.currentModule === 'write';
+}
+
+function beginModuleRender(moduleId) {
+    store.moduleRenderGeneration = (store.moduleRenderGeneration || 0) + 1;
+    return {
+        moduleId,
+        generation: store.moduleRenderGeneration
+    };
+}
+
+function isCurrentModuleRender(moduleId, renderToken) {
+    if (!renderToken) return store.currentModule === moduleId;
+    return store.currentModule === moduleId
+        && renderToken.moduleId === moduleId
+        && renderToken.generation === store.moduleRenderGeneration;
+}
+
+function isCompactViewport() {
+    return typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(max-width: 860px)').matches;
 }
 
 function setCopilotVisible(visible) {
@@ -3875,6 +3898,8 @@ window.NovelAgentApp.core = {
     checkGlobalAPIConfig,
     bindEvents,
     switchModule,
+    beginModuleRender,
+    isCurrentModuleRender,
     toggleSidebar,
     restoreSidebarState,
     clearCopilotChat,

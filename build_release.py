@@ -169,6 +169,7 @@ def clean_release_dist(ctx: BuildContext) -> None:
         *ctx.expected_exes,
     }
     candidates.update(ctx.dist_dir.glob(f"{ctx.display_name}_v*_*.exe"))
+    candidates.update(ctx.dist_dir.glob(f"{ctx.display_name}创作平台V*.exe"))
     candidates.update(ctx.dist_dir.glob(f"{ctx.display_name}_v*_Portable"))
     candidates.update(ctx.dist_dir.glob(f"{ctx.display_name}_v*_Portable.zip"))
     candidates.update(ctx.dist_dir.glob(f"{ctx.display_name}_v*_Portable.zip.sha256"))
@@ -260,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     ctx = load_build_context()
 
     print("=" * 60)
-    print(f"{ctx.display_name} v{ctx.app_version} - 内含检索模型版 exe 发布构建")
+    print(f"{ctx.display_name} v{ctx.app_version} - Windows 安装包发布构建")
     print("=" * 60)
     print("输出目标:")
     print(f"  {ctx.expected_exes[0].relative_to(ctx.root_dir)}")

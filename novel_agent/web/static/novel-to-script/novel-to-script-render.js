@@ -474,10 +474,25 @@ function renderNovelToScriptNavPanel() {
     }
 }
 
-async function renderNovelToScriptInterface() {
+function isNovelToScriptRenderCurrent(renderToken) {
+    if (!renderToken) return true;
+    const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
+    if (typeof guard === 'function') {
+        return guard('novel-to-script', renderToken);
+    }
+    return window.store?.currentModule === 'novel-to-script';
+}
+
+async function renderNovelToScriptInterface(renderToken = null) {
     await hydrateNovelToScriptProjectState();
+    if (!isNovelToScriptRenderCurrent(renderToken)) return;
+
     await loadNovelToScriptCapabilities();
+    if (!isNovelToScriptRenderCurrent(renderToken)) return;
+
     await loadGlobalApiConfigForNovelToScript();
+    if (!isNovelToScriptRenderCurrent(renderToken)) return;
+
     saveNovelToScriptData();
 
     const hasResult = Boolean(novelToScriptState.result?.formatted_text || novelToScriptState.result?.full_text);

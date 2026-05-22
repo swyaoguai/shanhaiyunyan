@@ -266,6 +266,59 @@ function bindGlobalAPISettingsEvents(timeoutSettings = {}) {
         }
     });
 
+    document.getElementById('test-active-image-config')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        const configId = configSelect?.value;
+        const model = modelSelect?.value;
+        const resultEl = document.getElementById('active-config-test-result');
+
+        if (!configId) {
+            showToast('请先选择一个配置', 'error');
+            return;
+        }
+        const selectedConfig = currentApiConfigs.find((item) => item.id === configId);
+        if (isBuiltinPresetApiConfig(selectedConfig)) {
+            showToast('探索仓API不能直接测试，请先新建或选择一套已填写 Key 和图片模型的配置', 'error');
+            configSelect?.focus();
+            return;
+        }
+
+        button.disabled = true;
+        button.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 测试中...';
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div class="settings-inline-panel-title">图片接口测试</div>
+                <div class="settings-inline-panel-copy">正在发起一次真实图片接口试连，可能会比文本测试慢一些。</div>
+            `;
+        }
+
+        try {
+            const result = await testImageApiConnection(configId, model);
+            if (resultEl) {
+                resultEl.innerHTML = renderApiTestResultPanel(result);
+            }
+            if (result.success) {
+                showToast(`图片接口通过了，${result.model_tested} 可以用于封面生成。`, 'success');
+            } else {
+                showToast(result.error || '图片接口测试没过。', 'error');
+            }
+        } catch (e) {
+            if (resultEl) {
+                resultEl.innerHTML = renderApiTestResultPanel({
+                    success: false,
+                    error_code: 'image_request_failed',
+                    title: '图片测试没跑通',
+                    solution: '先看错误详情，再检查图片模型、API 格式和账户权限。',
+                    detail: e.message || '请求失败，请稍后再试。',
+                });
+            }
+            showToast(`图片测试失败: ${e.message}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.innerHTML = '<i class="ri-image-line"></i> 测试图片接口';
+        }
+    });
+
     document.getElementById('add-new-config')?.addEventListener('click', () => {
         editingConfigId = null;
         showConfigEditModal();
@@ -563,6 +616,7 @@ function showConfigEditModal(configId = null) {
     const isEdit = !!config;
 
     const currentApiType = config?.api_type || 'openai_chat';
+    const currentImageApiFormat = config?.image_api_format || 'auto';
     const displayName = config && typeof normalizeApiConfigDisplayName === 'function'
         ? normalizeApiConfigDisplayName(config)
         : (config?.name || '');
@@ -590,6 +644,21 @@ function showConfigEditModal(configId = null) {
                 </select>
                 <div id="api-type-hint" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
                     ${currentApiType === 'anthropic' ? '使用 Anthropic Messages 接口，需要填写 Base URL（如 https://api.anthropic.com 或中转地址）' : '使用 OpenAI 兼容的聊天补全端点'}
+                </div>
+            </div>
+            <div>
+                <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">图片 API 格式</label>
+                <select id="config-image-api-format" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
+                    <option value="auto" ${currentImageApiFormat === 'auto' ? 'selected' : ''}>Auto 自动尝试</option>
+                    <option value="openai_images" ${currentImageApiFormat === 'openai_images' ? 'selected' : ''}>OpenAI Images</option>
+                    <option value="qwen_images" ${currentImageApiFormat === 'qwen_images' ? 'selected' : ''}>Qwen Images</option>
+                    <option value="gemini_native" ${currentImageApiFormat === 'gemini_native' ? 'selected' : ''}>Gemini 原生图片</option>
+                    <option value="responses" ${currentImageApiFormat === 'responses' ? 'selected' : ''}>OpenAI Responses 图片</option>
+                    <option value="chat_completions" ${currentImageApiFormat === 'chat_completions' ? 'selected' : ''}>Chat 图片输出</option>
+                </select>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+                    Auto 只会尝试真正的图片生成端点：OpenAI Images、Qwen Images 和 Gemini 原生图片。
+                    Responses 或 Chat 图片输出仅在你明确选择对应格式时使用。
                 </div>
             </div>
             <div><label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">API Base URL <span style="color: #ef4444;">*</span></label><input type="text" id="config-api-base" value="${safeAttr(config?.api_base || '')}" placeholder="${currentApiType === 'anthropic' ? 'https://api.anthropic.com 或中转地址' : 'https://api.openai.com/v1'}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;"></div>
@@ -874,6 +943,7 @@ function showConfigEditModal(configId = null) {
         const apiKeys = parseConfigApiKeys(apiKey);
         const apiKeyEntries = buildConfigApiKeyEntries(apiKeys);
         const apiType = document.getElementById('config-api-type')?.value || 'openai_chat';
+        const imageApiFormat = document.getElementById('config-image-api-format')?.value || 'auto';
         const temperature = parseFloat(document.getElementById('config-temperature')?.value) || 0.7;
         const maxTokens = parseInt(document.getElementById('config-max-tokens')?.value, 10) || 4096;
         if (!name) {
@@ -890,7 +960,7 @@ function showConfigEditModal(configId = null) {
 
         try {
             if (isEdit) {
-                const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType };
+                const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType, image_api_format: imageApiFormat };
                 if (apiKeys.length > 0) {
                     updateData.api_key = apiKeys[0];
                     updateData.api_keys = apiKeyEntries;
@@ -906,7 +976,8 @@ function showConfigEditModal(configId = null) {
                     models: currentModels,
                     temperature,
                     max_tokens: maxTokens,
-                    api_type: apiType
+                    api_type: apiType,
+                    image_api_format: imageApiFormat
                 });
                 showToast('配置已创建 ✓', 'success');
             }

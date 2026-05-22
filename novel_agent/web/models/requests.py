@@ -78,6 +78,7 @@ class TestConnectionRequest(BaseModel):
     model: str = ""
     config_id: str = ""
     api_type: str = "openai_chat"
+    image_api_format: str = "auto"
 
 
 class GlobalAPIConfigRequest(BaseModel):
@@ -127,6 +128,7 @@ class AddAPIConfigRequest(BaseModel):
     temperature: float = LLM_DEFAULTS.TEMPERATURE
     max_tokens: int = LLM_DEFAULTS.MAX_TOKENS
     api_type: str = "openai_chat"
+    image_api_format: str = "auto"
 
 
 class UpdateAPIConfigRequest(BaseModel):
@@ -138,6 +140,7 @@ class UpdateAPIConfigRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     api_type: Optional[str] = None
+    image_api_format: Optional[str] = None
 
 
 class SetActiveConfigRequest(BaseModel):

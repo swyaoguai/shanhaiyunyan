@@ -28,7 +28,7 @@ from ..config import config
 from ..agent_config import AgentModelConfig
 from ..constants import RETRY_DEFAULTS
 from ..timeout_settings import get_llm_timeout_settings
-from ..utils.llm_params import normalize_max_tokens
+from ..utils.llm_params import add_temperature_param, is_temperature_parameter_error, normalize_max_tokens
 from ..utils.metrics import get_metrics_collector
 from ..utils.token_stats import extract_token_usage, estimate_tokens_from_messages, estimate_tokens_from_text, record_token_usage
 from .api_key_rotation import (
@@ -320,9 +320,36 @@ class LLMClient:
     def _should_omit_max_tokens(self) -> bool:
         return self._is_tsc5_api_base()
 
+    def _temperatureless_retry_params(self, params: Dict[str, Any], error: Exception) -> Optional[Dict[str, Any]]:
+        if "temperature" not in params or not is_temperature_parameter_error(error):
+            return None
+        retry_params = dict(params)
+        retry_params.pop("temperature", None)
+        logger.warning(
+            "[LLMClient:%s] Provider rejected temperature; retrying once without it",
+            self.metrics_namespace,
+        )
+        return retry_params
+
     def _should_use_responses_string_input(self) -> bool:
         """Use the documented Responses string input shape for stricter New API relays."""
         return self._is_tsc5_api_base()
+
+    @staticmethod
+    def _is_responses_upstream_not_found(error: Exception) -> bool:
+        """Detect relays that expose /responses but route the selected model to a missing upstream."""
+        error_text = str(error or "").lower()
+        status_code = getattr(error, "status_code", None)
+        if status_code != 404 and "404" not in error_text:
+            return False
+        return any(
+            token in error_text
+            for token in (
+                "bad_response_status_code",
+                "openai_error",
+                "responses_upstream_not_found",
+            )
+        )
 
     @staticmethod
     def _split_system_messages(
@@ -504,9 +531,14 @@ class LLMClient:
         params = {
             "model": self.model_name,
             "messages": full_messages,
-            "temperature": temperature if temperature is not None else self.temperature,
             "stream": stream
         }
+        add_temperature_param(
+            params,
+            model=params["model"],
+            temperature=temperature if temperature is not None else self.temperature,
+            source=f"LLMClient:{self.metrics_namespace}",
+        )
         if not self._should_omit_max_tokens():
             params["max_tokens"] = resolved_max_tokens
 
@@ -523,9 +555,18 @@ class LLMClient:
             if stream:
                 return self._stream_openai_chat(params, usage_collector=usage_collector)
             else:
-                response = await self._run_openai_operation_with_rotation(
-                    lambda client: client.chat.completions.create(**params)
-                )
+                try:
+                    response = await self._run_openai_operation_with_rotation(
+                        lambda client: client.chat.completions.create(**params)
+                    )
+                except Exception as exc:
+                    retry_params = self._temperatureless_retry_params(params, exc)
+                    if retry_params is None:
+                        raise
+                    params = retry_params
+                    response = await self._run_openai_operation_with_rotation(
+                        lambda client: client.chat.completions.create(**params)
+                    )
                 content = response.choices[0].message.content
 
                 # 提取token使用
@@ -593,7 +634,13 @@ class LLMClient:
                 lambda client: client.chat.completions.create(**request_params)
             )
         except Exception as exc:
-            if "stream_options" in request_params and self._is_stream_options_unsupported(exc):
+            retry_params = self._temperatureless_retry_params(request_params, exc)
+            if retry_params is not None:
+                request_params = retry_params
+                response = await self._run_openai_operation_with_rotation(
+                    lambda client: client.chat.completions.create(**request_params)
+                )
+            elif "stream_options" in request_params and self._is_stream_options_unsupported(exc):
                 if usage_collector is not None:
                     usage_collector["usage_unavailable_reason"] = "stream_options_unsupported"
                 request_params.pop("stream_options", None)
@@ -657,9 +704,14 @@ class LLMClient:
         params = {
             "model": self.model_name,
             "input": responses_input,
-            "temperature": temperature if temperature is not None else self.temperature,
             "max_output_tokens": resolved_max_tokens,
         }
+        add_temperature_param(
+            params,
+            model=params["model"],
+            temperature=temperature if temperature is not None else self.temperature,
+            source=f"LLMClient:{self.metrics_namespace}",
+        )
         if resolved_system_prompt and not use_string_input:
             params["instructions"] = resolved_system_prompt
 
@@ -680,11 +732,27 @@ class LLMClient:
 
         try:
             if stream:
-                return self._stream_openai_responses(params, usage_collector=usage_collector)
-            else:
-                response = await self._run_openai_operation_with_rotation(
-                    lambda client: client.responses.create(**params)
+                return self._stream_openai_responses_with_chat_fallback(
+                    params,
+                    messages,
+                    temperature,
+                    max_tokens,
+                    system_prompt,
+                    usage_collector,
                 )
+            else:
+                try:
+                    response = await self._run_openai_operation_with_rotation(
+                        lambda client: client.responses.create(**params)
+                    )
+                except Exception as exc:
+                    retry_params = self._temperatureless_retry_params(params, exc)
+                    if retry_params is None:
+                        raise
+                    params = retry_params
+                    response = await self._run_openai_operation_with_rotation(
+                        lambda client: client.responses.create(**params)
+                    )
 
                 # 提取内容 - Responses API 的输出格式
                 content = self._extract_responses_content(response)
@@ -722,6 +790,22 @@ class LLMClient:
         except Exception as e:
             duration = time.time() - start_time
             self._record_metrics(estimated_tokens_in, 0, duration, False, str(e))
+
+            if self._is_responses_upstream_not_found(e):
+                logger.warning(
+                    "[LLMClient:%s] Responses upstream is unavailable for model %s; "
+                    "falling back to OpenAI Chat Completions",
+                    self.metrics_namespace,
+                    params["model"],
+                )
+                return await self._call_openai_chat(
+                    messages,
+                    temperature,
+                    max_tokens,
+                    system_prompt,
+                    stream,
+                    usage_collector,
+                )
 
             user_msg = self._parse_error(str(e), params['model'])
             logger.error(
@@ -931,9 +1015,19 @@ class LLMClient:
         usage_collector: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[str, None]:
         """OpenAI Responses 流式响应生成器"""
-        stream = await self._run_openai_operation_with_rotation(
-            lambda client: client.responses.create(stream=True, **params)
-        )
+        request_params = dict(params)
+        try:
+            stream = await self._run_openai_operation_with_rotation(
+                lambda client: client.responses.create(stream=True, **request_params)
+            )
+        except Exception as exc:
+            retry_params = self._temperatureless_retry_params(request_params, exc)
+            if retry_params is None:
+                raise
+            request_params = retry_params
+            stream = await self._run_openai_operation_with_rotation(
+                lambda client: client.responses.create(stream=True, **request_params)
+            )
         async for event in stream:
             usage = event.get("usage") if isinstance(event, dict) else getattr(event, "usage", None)
             if usage is not None and usage_collector is not None:
@@ -949,6 +1043,39 @@ class LLMClient:
                 delta_text = raw_delta.get("text", "") if isinstance(raw_delta, dict) else getattr(raw_delta, 'text', '') if hasattr(raw_delta, 'text') else str(raw_delta)
                 if delta_text:
                     yield delta_text
+
+    async def _stream_openai_responses_with_chat_fallback(
+        self,
+        params: dict,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        system_prompt: Optional[str],
+        usage_collector: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream Responses output, falling back to Chat when the relay lacks a Responses upstream."""
+        try:
+            async for chunk in self._stream_openai_responses(params, usage_collector=usage_collector):
+                yield chunk
+        except Exception as exc:
+            if not self._is_responses_upstream_not_found(exc):
+                raise
+            logger.warning(
+                "[LLMClient:%s] Responses stream upstream is unavailable for model %s; "
+                "falling back to OpenAI Chat Completions",
+                self.metrics_namespace,
+                params.get("model"),
+            )
+            fallback_stream = await self._call_openai_chat(
+                messages,
+                temperature,
+                max_tokens,
+                system_prompt,
+                True,
+                usage_collector,
+            )
+            async for chunk in fallback_stream:
+                yield chunk
 
     # ============================================================
     # Anthropic Messages API
@@ -986,8 +1113,13 @@ class LLMClient:
             "model": self.model_name,
             "messages": anthropic_messages,
             "max_tokens": resolved_max_tokens,
-            "temperature": temperature if temperature is not None else self.temperature,
         }
+        add_temperature_param(
+            params,
+            model=params["model"],
+            temperature=temperature if temperature is not None else self.temperature,
+            source=f"LLMClient:{self.metrics_namespace}",
+        )
 
         if system_prompt:
             params["system"] = system_prompt

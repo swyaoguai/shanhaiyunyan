@@ -192,7 +192,7 @@ http://localhost:5656
 | API 类型 | 用途 |
 | --- | --- |
 | OpenAI Chat Completions | 常见 OpenAI 兼容接口与中转服务 |
-| OpenAI Responses | 支持 Responses 格式的模型服务 |
+| OpenAI Responses | 支持 Responses 格式的模型服务；若中转入口可用但当前模型上游缺少 Responses 通道，文本生成会自动降级到 Chat Completions |
 | Anthropic Messages | 支持 Claude/Anthropic 格式的模型服务 |
 
 设置页可以维护多个 API 配置、模型列表、激活配置，并为不同 Agent 指定不同模型。对于知识库检索，可使用发布包内置的本地 ONNX 向量模型，也可改用外部 Embedding API。
@@ -210,7 +210,7 @@ python build_release.py
 发布脚本会生成一个 Windows 安装 EXE：
 
 ```text
-dist/山海·云烟_v<版本号>_内含检索模型版.exe
+dist/山海·云烟创作平台V<版本号>.exe
 ```
 
 该构建会复制静态资源、页面模板、提示词、Skills、干净的发布数据副本和本地 ONNX 向量模型，并使用根目录的 `logo.ico` 作为应用图标。发布产物不生成 zip。

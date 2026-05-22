@@ -989,8 +989,34 @@ function renderFeedbackPage() {
                     问题日志
                 </h3>
                 <p style="color: var(--text-secondary); font-size: 14px; line-height: 1.8; margin-bottom: 16px;">
-                    遇到异常时，可以把后台运行日志复制或导出为 TXT，一起发到邮箱，方便定位问题。
+                    遇到异常时，可以把后台运行日志复制或导出为 TXT，一起发到邮箱，方便定位问题。默认只包含本次启动后的精简日志。
                 </p>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px;">
+                    <label style="display: grid; gap: 6px; color: var(--text-secondary); font-size: 12px;">
+                        日志范围
+                        <select id="support-log-scope" style="width: 100%; background: rgba(0,0,0,0.24); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 9px 10px;">
+                            <option value="session">本次启动</option>
+                            <option value="24h">最近 24 小时</option>
+                            <option value="range">自定义时间段</option>
+                            <option value="all">全部可用日志</option>
+                        </select>
+                    </label>
+                    <label style="display: grid; gap: 6px; color: var(--text-secondary); font-size: 12px;">
+                        日志内容
+                        <select id="support-log-detail" style="width: 100%; background: rgba(0,0,0,0.24); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 9px 10px;">
+                            <option value="compact">精简日志</option>
+                            <option value="full">完整日志</option>
+                        </select>
+                    </label>
+                    <label data-support-range-field style="display: none; gap: 6px; color: var(--text-secondary); font-size: 12px;">
+                        开始时间
+                        <input id="support-log-start" type="datetime-local" style="width: 100%; background: rgba(0,0,0,0.24); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 8px 10px;">
+                    </label>
+                    <label data-support-range-field style="display: none; gap: 6px; color: var(--text-secondary); font-size: 12px;">
+                        结束时间
+                        <input id="support-log-end" type="datetime-local" style="width: 100%; background: rgba(0,0,0,0.24); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 8px 10px;">
+                    </label>
+                </div>
                 <div style="display: flex; flex-wrap: wrap; gap: 12px;">
                     <button id="copy-support-logs" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; background: rgba(59, 130, 246, 0.18); border: 1px solid rgba(59, 130, 246, 0.45); color: var(--text-primary); border-radius: 8px; cursor: pointer;">
                         <i class="ri-file-copy-line"></i>
@@ -1041,15 +1067,46 @@ async function copyTextToClipboard(text) {
     textarea.remove();
 }
 
+function getSupportLogQuery() {
+    const scope = document.getElementById('support-log-scope')?.value || 'session';
+    const detail = document.getElementById('support-log-detail')?.value || 'compact';
+    const params = new URLSearchParams();
+    if (scope !== 'session') {
+        params.set('scope', scope);
+    }
+    if (detail === 'full') {
+        params.set('detail', detail);
+    }
+    if (scope === 'range') {
+        const start = document.getElementById('support-log-start')?.value || '';
+        const end = document.getElementById('support-log-end')?.value || '';
+        if (start) params.set('start', start);
+        if (end) params.set('end', end);
+    }
+    const query = params.toString();
+    return query ? `?${query}` : '';
+}
+
+function updateSupportLogRangeFields() {
+    const showRange = (document.getElementById('support-log-scope')?.value || 'session') === 'range';
+    document.querySelectorAll('[data-support-range-field]').forEach((field) => {
+        field.style.display = showRange ? 'grid' : 'none';
+    });
+}
+
 function bindFeedbackLogActions() {
     const copyButton = document.getElementById('copy-support-logs');
     const exportButton = document.getElementById('export-support-logs');
+    const scopeSelect = document.getElementById('support-log-scope');
     const status = document.getElementById('support-log-status');
+
+    updateSupportLogRangeFields();
+    scopeSelect?.addEventListener('change', updateSupportLogRangeFields);
 
     copyButton?.addEventListener('click', async () => {
         try {
             if (status) status.textContent = '正在读取后台日志...';
-            const response = await fetch(normalizeApiUrl('/api/diagnostics/logs'), { cache: 'no-store' });
+            const response = await fetch(normalizeApiUrl(`/api/diagnostics/logs${getSupportLogQuery()}`), { cache: 'no-store' });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const text = await response.text();
             await copyTextToClipboard(text);
@@ -1062,7 +1119,7 @@ function bindFeedbackLogActions() {
     });
 
     exportButton?.addEventListener('click', () => {
-        window.location.href = normalizeApiUrl('/api/diagnostics/logs/export');
+        window.location.href = normalizeApiUrl(`/api/diagnostics/logs/export${getSupportLogQuery()}`);
     });
 }
 
