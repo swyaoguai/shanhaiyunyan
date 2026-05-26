@@ -29,8 +29,13 @@ def configure_runtime_paths():
 
 def _get_runtime_log_file() -> Path:
     """Return a stable writable startup log path for dev and packaged runs."""
-    root = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
-    log_dir = root / "data" / "logs"
+    try:
+        from novel_agent.constants import get_data_dir
+
+        log_dir = get_data_dir() / "logs"
+    except Exception:
+        root = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+        log_dir = root / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "agent.log"
 

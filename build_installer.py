@@ -200,7 +200,7 @@ StatusRollback=正在回滚更改...
 ErrorExecutingProgram=无法执行文件：%n%1
 UninstallNotFound=文件 %1 不存在，无法卸载。
 UninstallOpenError=无法打开文件 %1，无法卸载。
-ConfirmUninstall=确定要卸载 %1 吗？%n%n程序文件会被移除；项目、知识库、API 配置（.env）、备份、统计和日志默认保留在安装目录。%n%n如需彻底清除，请卸载后手动删除安装目录中的 data 文件夹和 .env 文件。
+ConfirmUninstall=确定要卸载 %1 吗？%n%n程序文件会被移除；项目、封面、知识库、API 配置、备份、统计和日志默认保留在用户数据目录。旧版安装目录中的 data 和 .env 也会保留。%n%n如需彻底清除，请卸载后手动删除用户数据目录、安装目录中的 data 文件夹和 .env 文件。
 UninstallStatusLabel=请稍候，正在从您的计算机中移除 %1。
 UninstalledAll=%1 已成功从您的计算机中移除。
 UninstalledMost=%1 卸载完成。%n%n某些项目无法移除，可以手动删除。
@@ -587,6 +587,13 @@ Name: "{{app}}\\data\\sessions"; Flags: uninsneveruninstall
 Name: "{{app}}\\data\\logs"; Flags: uninsneveruninstall
 Name: "{{app}}\\data\\knowledge_base"; Flags: uninsneveruninstall
 Name: "{{app}}\\data\\backups"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\projects"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\stats"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\sessions"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\logs"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\knowledge_base"; Flags: uninsneveruninstall
+Name: "{{localappdata}}\\ShanhaiYunyan\\data\\backups"; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{{group}}\\{{#MyAppName}}"; Filename: "{{app}}\\{{#MyAppExeName}}"
