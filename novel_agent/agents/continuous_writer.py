@@ -56,15 +56,15 @@ NON_CHAPTER_RESPONSE_PATTERNS = (
     r"粗略的想法",
 )
 
-_CHAPTER_MARK_RE = r"第\s*[\d一二三四五六七八九十百千万零〇两]+\s*[章节回]"
+_CHAPTER_MARK_RE = r"第[ \t]*[\d一二三四五六七八九十百千万零〇两]+[ \t]*[章节回]"
 _MARKDOWN_CHAPTER_HEADING_RE = re.compile(
-    rf"^\s{{0,3}}#{{1,6}}\s*(?:{_CHAPTER_MARK_RE})\s*[-—:：、.．\s]*(?P<title>[^\n\r]*)\s*(?:\r?\n|$)"
+    rf"^\s{{0,3}}#{{1,6}}[ \t]*(?:{_CHAPTER_MARK_RE})[ \t]*[-—:：、.． \t]*(?P<title>[^\n\r]*)[ \t]*(?:\r?\n|$)"
 )
 _PLAIN_CHAPTER_HEADING_RE = re.compile(
-    rf"^\s{{0,3}}(?:{_CHAPTER_MARK_RE})(?:(?:\s*[-—:：、.．]\s*|\s+)(?P<title>[^\n\r]*))?\s*(?:\r?\n|$)"
+    rf"^\s{{0,3}}(?:{_CHAPTER_MARK_RE})(?:(?:[ \t]*[-—:：、.．][ \t]*|[ \t]+)(?P<title>[^\n\r]*))?[ \t]*(?:\r?\n|$)"
 )
 _CHAPTER_TITLE_PREFIX_RE = re.compile(
-    rf"^\s*(?:#{{1,6}}\s*)?(?:{_CHAPTER_MARK_RE})(?:\s*[-—:：、.．]\s*|\s+)?"
+    rf"^\s*(?:#{{1,6}}[ \t]*)?(?:{_CHAPTER_MARK_RE})(?:[ \t]*[-—:：、.．][ \t]*|[ \t]+)?"
 )
 _BARE_CHAPTER_TITLE_RE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?(?:{_CHAPTER_MARK_RE})\s*$")
 

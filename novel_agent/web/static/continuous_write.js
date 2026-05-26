@@ -33,10 +33,10 @@ function createInfiniteWriteProjectState() {
 
 const INFINITE_WRITE_LEGACY_STORAGE_KEY = 'infinite_write_data';
 const INFINITE_WRITE_LEGACY_MODEL_KEY = 'infinite_write_model';
-const IW_CHAPTER_MARK_PATTERN = '第\\s*[\\d一二三四五六七八九十百千万零〇两]+\\s*[章节回]';
-const IW_MARKDOWN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}#{1,6}\\s*(?:${IW_CHAPTER_MARK_PATTERN})\\s*[-—:：、.．\\s]*([^\\n\\r]*)\\s*(?:\\r?\\n|$)`);
-const IW_PLAIN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}(?:${IW_CHAPTER_MARK_PATTERN})(?:(?:\\s*[-—:：、.．]\\s*|\\s+)([^\\n\\r]*))?\\s*(?:\\r?\\n|$)`);
-const IW_CHAPTER_TITLE_PREFIX_RE = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:${IW_CHAPTER_MARK_PATTERN})(?:\\s*[-—:：、.．]\\s*|\\s+)?`);
+const IW_CHAPTER_MARK_PATTERN = '第[ \\t]*[\\d一二三四五六七八九十百千万零〇两]+[ \\t]*[章节回]';
+const IW_MARKDOWN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}#{1,6}[ \\t]*(?:${IW_CHAPTER_MARK_PATTERN})[ \\t]*[-—:：、.． \\t]*([^\\n\\r]*)[ \\t]*(?:\\r?\\n|$)`);
+const IW_PLAIN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}(?:${IW_CHAPTER_MARK_PATTERN})(?:(?:[ \\t]*[-—:：、.．][ \\t]*|[ \\t]+)([^\\n\\r]*))?[ \\t]*(?:\\r?\\n|$)`);
+const IW_CHAPTER_TITLE_PREFIX_RE = new RegExp(`^\\s*(?:#{1,6}[ \\t]*)?(?:${IW_CHAPTER_MARK_PATTERN})(?:[ \\t]*[-—:：、.．][ \\t]*|[ \\t]+)?`);
 const IW_BARE_CHAPTER_TITLE_RE = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:${IW_CHAPTER_MARK_PATTERN})\\s*$`);
 
 const infiniteWriteState = {
@@ -72,9 +72,9 @@ function normalizeInfiniteWriteChapter(chapter, fallbackNumber = 1) {
     const parsedNumber = Number(source.chapter_number || source.chapter || fallbackNumber || 1);
     const chapterNumber = Number.isFinite(parsedNumber) && parsedNumber > 0 ? parsedNumber : (fallbackNumber || 1);
     const contentText = String(source.content || '');
-    const headingMatch = contentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
-        .match(IW_MARKDOWN_CHAPTER_HEADING_RE) || contentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
-        .match(IW_PLAIN_CHAPTER_HEADING_RE);
+    const normalizedContentText = contentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    const headingMatch = normalizedContentText.match(IW_MARKDOWN_CHAPTER_HEADING_RE)
+        || normalizedContentText.match(IW_PLAIN_CHAPTER_HEADING_RE);
     const headingTitle = headingMatch ? (headingMatch[1] || '') : '';
     const rawTitle = String(source.title || source.name || '').trim();
     const title = normalizeInfiniteWriteChapterTitle(
