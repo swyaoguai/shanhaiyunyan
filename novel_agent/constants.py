@@ -8,6 +8,7 @@
 """
 
 import os
+import shutil
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -484,6 +485,62 @@ def get_app_root():
         return Path.cwd()
 
 
+def _is_installed_package_root(root):
+    """Return True for the Inno-installed app layout."""
+    return (root / "installer_manifest.json").exists()
+
+
+def _get_user_data_dir():
+    """Return a stable per-user data directory for installed packages."""
+    from pathlib import Path
+
+    override = os.getenv("SHANHAI_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    if os.name == "nt":
+        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
+        if base:
+            return Path(base) / "ShanhaiYunyan" / "data"
+        return Path.home() / "AppData" / "Local" / "ShanhaiYunyan" / "data"
+
+    xdg_data_home = os.getenv("XDG_DATA_HOME", "").strip()
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / "shanhai-yunyan" / "data"
+    return Path.home() / ".local" / "share" / "shanhai-yunyan" / "data"
+
+
+def _copy_missing_tree(source, target):
+    """Copy missing files from source to target without overwriting user data."""
+    from pathlib import Path
+
+    source = Path(source)
+    target = Path(target)
+    if not source.exists() or source.resolve() == target.resolve():
+        return
+
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        destination = target / relative
+        try:
+            if path.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            elif not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
+        except Exception:
+            # Migration is best-effort; startup should not fail because one old
+            # cache/log file could not be copied.
+            continue
+
+
+def _migrate_legacy_installed_data(app_root, data_dir):
+    """Migrate data from older installer versions that stored data beside exe."""
+    legacy_data_dir = app_root / "data"
+    if legacy_data_dir.exists():
+        _copy_missing_tree(legacy_data_dir, data_dir)
+
+
 def get_runtime_resource_root():
     """获取只读内置资源根目录，兼容 PyInstaller 的临时解包目录。"""
     import sys
@@ -524,10 +581,17 @@ def get_skills_dir():
 
 def get_data_dir():
     """获取数据目录"""
-    from pathlib import Path
+    import sys
+
     root = get_app_root()
-    data_dir = root / "data"
+    is_installed_package = getattr(sys, "frozen", False) and _is_installed_package_root(root)
+    if is_installed_package:
+        data_dir = _get_user_data_dir()
+    else:
+        data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    if is_installed_package:
+        _migrate_legacy_installed_data(root, data_dir)
     return data_dir
 
 

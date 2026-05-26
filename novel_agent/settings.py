@@ -147,9 +147,8 @@ class PathsSettings(BaseSettings):
     @staticmethod
     def _get_default_data_dir() -> Path:
         """获取默认数据目录"""
-        data_dir = PathsSettings._get_app_root() / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        return data_dir
+        from .constants import get_data_dir
+        return get_data_dir()
 
 
 class AppSettings(BaseSettings):
