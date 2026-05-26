@@ -337,6 +337,9 @@ const IW_TREND_PLATFORMS = [
 ];
 function formatChapterNavDisplay(chapterNumber, title) {
     const cleanTitle = normalizeInfiniteWriteChapterTitle(title, chapterNumber);
+    if (IW_BARE_CHAPTER_TITLE_RE.test(cleanTitle)) {
+        return `第${chapterNumber}章`;
+    }
     if (typeof window.formatChapterDisplay === 'function') {
         return window.formatChapterDisplay(chapterNumber, cleanTitle);
     }
@@ -353,6 +356,10 @@ function getChapterNavNumber(chapter, fallback) {
 
 function normalizeChapterSearchText(value) {
     return String(value || '').trim().toLocaleLowerCase('zh-CN');
+}
+
+function getInfiniteWriteDisplayTitle(chapter) {
+    return formatChapterNavDisplay(chapter?.chapter_number || 1, chapter?.title || chapter?.name || '');
 }
 
 function escapeChapterNavHtml(value) {
@@ -4003,6 +4010,7 @@ async function regeneratePreviewChapter(chapterNumber, isFirstChapter) {
 
 // ===== 显示章节预览（带确认选项，用于新创作的章节） =====
 function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = false) {
+    chapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
     console.log('[InfiniteWrite] preview confirm open:', {
         chapterNumber: chapter.chapter_number,
         isFirstChapter: isFirstChapter
@@ -4020,7 +4028,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
                         <i class="ri-eye-line"></i> 预览
                     </div>
                     <h2 style="margin: 0; font-size: 18px; color: var(--text-primary);">
-                        第${chapter.chapter_number}章 ${chapter.title || ''}
+                        ${escapeChapterNavHtml(getInfiniteWriteDisplayTitle(chapter))}
                     </h2>
                     <span style="font-size: 13px; color: var(--text-secondary);">${(chapter.word_count || 0).toLocaleString()} 字</span>
                     <div style="flex: 1;"></div>
@@ -4110,6 +4118,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
 
 // ===== 显示章节预览（用于查看已保存的章节） =====
 function showInfiniteWriteChapterPreview(chapter) {
+    chapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
     const modal = document.getElementById('modal-container');
     if (!modal) return;
 
@@ -4120,7 +4129,7 @@ function showInfiniteWriteChapterPreview(chapter) {
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; width: 800px; max-width: 100%; max-height: 90vh; display: flex; flex-direction: column;">
                 <div style="padding: 20px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 12px;">
                     <h2 style="margin: 0; font-size: 18px; color: var(--text-primary);">
-                        第${chapter.chapter_number}章 ${chapter.title || ''}
+                        ${escapeChapterNavHtml(getInfiniteWriteDisplayTitle(chapter))}
                     </h2>
                     <span style="font-size: 13px; color: var(--text-secondary);">${(chapter.word_count || 0).toLocaleString()} 字</span>
                     <div style="flex: 1;"></div>
@@ -4188,6 +4197,7 @@ function showInfiniteWriteChapterPreview(chapter) {
 // ===== 保存章节到项目 =====
 async function saveChapterToProject(chapter) {
     try {
+        chapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
         // 获取当前项目的独立章节数量
         const chaptersRes = await apiCall('/api/project-data/chapters', 'GET');
         let outline = chaptersRes.data || [];
@@ -4663,7 +4673,7 @@ async function executeFinishStory() {
 
         // 将无限续写的章节添加到独立章节正文
         for (let i = 0; i < infiniteWriteState.chapters.length; i++) {
-            const ch = infiniteWriteState.chapters[i];
+            const ch = normalizeInfiniteWriteChapter(infiniteWriteState.chapters[i], startIndex + i + 1);
             outline.push({
                 title: ch.title || `第${startIndex + i + 1}章`,
                 summary: ch.summary || '',
