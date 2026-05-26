@@ -478,10 +478,9 @@ function bindSystemPromptEvents(agentType) {
     
     if (resetBtn) {
         resetBtn.addEventListener('click', async () => {
-            if (!confirm('确定要恢复默认系统提示词吗？\n\n您的自定义修改将被删除。')) {
+            if (!(await window.showConfirmDialog('确定要恢复默认系统提示词吗？\n\n您的自定义修改将被删除。'))) {
                 return;
-            }
-            
+            }          
             resetBtn.innerHTML = '<i class="ri-loader-4-line"></i> 恢复中...';
             resetBtn.disabled = true;
             
@@ -553,7 +552,7 @@ function bindTasksPromptEvents(agentType, tasks) {
         
         if (resetBtn) {
             resetBtn.addEventListener('click', async () => {
-                if (!confirm(`确定要恢复默认提示词「${taskName}」吗？\n\n您的自定义修改将被删除。`)) {
+                if (!(await window.showConfirmDialog(`确定要恢复默认提示词「${taskName}」吗？\n\n您的自定义修改将被删除。`))) {
                     return;
                 }
                 

@@ -117,9 +117,12 @@ class Frontmatter:
     def from_yaml_dict(cls, d: Dict[str, Any]) -> "Frontmatter":
         """从 YAML 字典创建"""
         page_type = PageType(d.get("type", "custom"))
+        title = d.get("title", "")
+        if not isinstance(title, str):
+            title = "" if title in (None, []) else str(title)
         return cls(
             page_type=page_type,
-            title=d.get("title", ""),
+            title=title,
             sources=d.get("sources", []),
             tags=d.get("tags", []),
             created_at=d.get("created_at", ""),
@@ -199,6 +202,8 @@ class WikiPage:
                 # 空列表不输出
             elif isinstance(value, bool):
                 lines.append(f"{key}: {'true' if value else 'false'}")
+            elif isinstance(value, str) and value == "":
+                lines.append(f'{key}: ""')
             elif value is not None:
                 lines.append(f"{key}: {value}")
         lines.append("---")

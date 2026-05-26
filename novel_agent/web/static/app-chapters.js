@@ -279,12 +279,12 @@ function editChapterTitle(index) {
     }
 }
 
-function deleteChapter(index) {
+async function deleteChapter(index) {
     const chapter = getMultiAgentChapters()[index];
     if (!chapter) return;
 
     const chapterNumber = getChapterDisplayNumber(chapter, index + 1);
-    if (confirm(`确定要删除「${formatChapterDisplay(chapterNumber, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
+    if (await window.showConfirmDialog(`确定要删除「${formatChapterDisplay(chapterNumber, chapter.title)}」吗？\n\n此操作不可恢复！`)) {
         const storedIndex = getStoredChapterIndexFromVisibleIndex(index);
         if (storedIndex < 0) return;
         getStoredChapters().splice(storedIndex, 1);
@@ -421,8 +421,8 @@ function openChapterEditor(index) {
     });
     
     wordCheckBtn.addEventListener('click', () => {
-        const content = contentInput.value.trim();
-        if (!content) {
+        const content = contentInput.value;
+        if (!content.trim()) {
             showToast('请先输入需要检测的内容', 'warning');
             return;
         }

@@ -150,6 +150,7 @@ def process_assistant_auto_save(
     auto_save_enabled: bool,
     categories: Optional[List[Dict[str, Any]]] = None,
     session_id: str = "",
+    source_mode: str = "multi_agent",
 ) -> Optional[Dict[str, Any]]:
     """Extract and persist assistant-generated artifacts when auto-save is enabled."""
     if str(mode or "").strip().lower() != "execute" or not auto_save_enabled:
@@ -179,6 +180,7 @@ def process_assistant_auto_save(
                 artifact,
                 session_id=session_id,
                 source_text=text,
+                source_mode=source_mode,
             )
         except Exception as exc:
             errors.append({
@@ -267,10 +269,14 @@ def _persist_artifact(
     *,
     session_id: str,
     source_text: str,
+    source_mode: str,
 ) -> Tuple[Dict[str, str], int]:
+    from .source_modes import ensure_record_source_mode, normalize_source_mode
+
     data_type = artifact.data_type
     path = project_manager.get_project_data_path(data_type)
     existed_before = path.exists()
+    normalized_source_mode = normalize_source_mode(source_mode, default="multi_agent")
 
     existing_rows = project_manager.load_project_data(data_type)
     if not isinstance(existing_rows, list):
@@ -285,6 +291,12 @@ def _persist_artifact(
         if session_id:
             row_copy.setdefault("source_session_id", session_id)
         row_copy.setdefault("source_preview", source_text[:300])
+        row_copy = ensure_record_source_mode(
+            row_copy,
+            normalized_source_mode,
+            source_type="copilot_chat",
+            source_session_id=session_id,
+        )
         row_copy["updated_at"] = now
         row_copy.setdefault("created_at", now)
         prepared_rows.append(row_copy)

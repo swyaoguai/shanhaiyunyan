@@ -83,7 +83,7 @@ class KnowledgeBase:
             # 仅在用户明确要求测试时才允许使用模拟
             logger.warning(
                 "⚠️ 知识库正在使用模拟向量化服务！这仅应用于测试目的！"
-                "生产环境请配置 SILICONFLOW_API_KEY 环境变量或在设置中配置。"
+                "生产环境请配置向量API密钥或在设置中配置。"
             )
         else:
             errors = self.config.validate()
@@ -91,7 +91,7 @@ class KnowledgeBase:
                 # 配置有问题时抛出异常，而非仅警告
                 raise ValueError(
                     f"知识库配置错误: {'; '.join(errors)}。"
-                    "请在设置中配置SiliconFlow API Key，或设置SILICONFLOW_API_KEY环境变量。"
+                    "请在设置中配置向量API密钥，或设置KB_EMBEDDING_API_KEY环境变量。"
                 )
         
         # 初始化各层组件

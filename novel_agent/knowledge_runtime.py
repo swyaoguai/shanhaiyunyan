@@ -125,9 +125,9 @@ def _has_saved_embedding_choice(payload: Dict[str, Any]) -> bool:
     if provider == "nvidia":
         return bool(str(payload.get("nvidia_api_key") or "").strip())
     if provider in {"api", "siliconflow"}:
-        return bool(str(payload.get("siliconflow_api_key") or "").strip())
+        return bool(str(payload.get("siliconflow_api_key") or payload.get("embedding_api_key") or "").strip())
 
-    for key in ("siliconflow_api_key", "onnx_model_dir", "nvidia_api_key"):
+    for key in ("siliconflow_api_key", "embedding_api_key", "onnx_model_dir", "nvidia_api_key"):
         if str(payload.get(key) or "").strip():
             return True
     return False
@@ -147,11 +147,8 @@ def should_default_to_bundled_local_onnx(settings: Optional[Dict[str, Any]] = No
     if provider not in {"", "api", "siliconflow", "local", "local_onnx"}:
         return False
 
-    if str(os.getenv("SILICONFLOW_API_KEY", "")).strip():
+    if str(os.getenv("KB_EMBEDDING_API_KEY") or os.getenv("SILICONFLOW_API_KEY") or "").strip():
         return False
-    if provider in {"api", "siliconflow"} and str(os.getenv("KB_ONNX_MODEL_DIR", "")).strip():
-        return False
-
     if _default_local_onnx_model_is_installed():
         return True
     return _installer_manifest_includes_onnx() and _default_local_onnx_model_is_installed()
@@ -190,7 +187,13 @@ def has_embedding_config(settings: Optional[Dict[str, Any]] = None) -> bool:
         return _local_onnx_files_available(resolve_local_onnx_model_dir(model_dir), model_file)
     if provider == "nvidia":
         return bool(str(payload.get("nvidia_api_key") or os.getenv("NVIDIA_API_KEY") or "").strip())
-    return bool(str(payload.get("siliconflow_api_key") or os.getenv("SILICONFLOW_API_KEY") or "").strip())
+    return bool(str(
+        payload.get("siliconflow_api_key")
+        or payload.get("embedding_api_key")
+        or os.getenv("KB_EMBEDDING_API_KEY")
+        or os.getenv("SILICONFLOW_API_KEY")
+        or ""
+    ).strip())
 
 
 def build_knowledge_base_config(
@@ -213,13 +216,24 @@ def build_knowledge_base_config(
 
     if "siliconflow_api_key" in payload:
         config.siliconflow.api_key = str(payload.get("siliconflow_api_key") or "")
+    elif "embedding_api_key" in payload:
+        config.siliconflow.api_key = str(payload.get("embedding_api_key") or "")
     if payload.get("siliconflow_base_url"):
         config.siliconflow.base_url = str(payload.get("siliconflow_base_url"))
+    elif payload.get("embedding_base_url"):
+        config.siliconflow.base_url = str(payload.get("embedding_base_url"))
     if payload.get("siliconflow_model"):
         config.siliconflow.model = str(payload.get("siliconflow_model"))
+    elif payload.get("embedding_model"):
+        config.siliconflow.model = str(payload.get("embedding_model"))
     if payload.get("siliconflow_embedding_dim"):
         try:
             config.siliconflow.embedding_dim = int(payload.get("siliconflow_embedding_dim"))
+        except (TypeError, ValueError):
+            pass
+    elif payload.get("embedding_dim") is not None:
+        try:
+            config.siliconflow.embedding_dim = int(payload.get("embedding_dim"))
         except (TypeError, ValueError):
             pass
 

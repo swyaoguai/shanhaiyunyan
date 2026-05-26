@@ -12,8 +12,6 @@
         { id: 'fanqie', label: '番茄小说', size: '800x600', note: '番茄平台封面预设，最终保存为横版 800x600；请求服务商时会自动适配模型支持的尺寸。' },
         { id: 'custom', label: '自定义分辨率', size: 'custom', note: '自定义分辨率需要当前图像模型和服务商接口支持。' },
     ];
-    const IMAGE_MODEL_PATTERN = /(image|imagen|dall[-_ ]?e|gpt-image|codex-gpt-image|flux|stable[-_ ]?diffusion|seedream|jimeng|midjourney|ideogram|recraft|hidream|playground|pixverse)/i;
-    const NON_TEXT_MODEL_PATTERN = /(embedding|embed|rerank|tts|whisper|audio|speech|moderation)/i;
 
     const coverState = {
         templates: [],
@@ -31,8 +29,6 @@
             title: '',
             author: '',
             sourceMode: 'project_plus_custom',
-            promptApiConfigId: '',
-            promptModel: '',
             apiConfigId: '',
             model: '',
             platformPreset: 'fanqie',
@@ -87,19 +83,7 @@
     function renderCoverImagesNavPanel() {
         const nav = document.getElementById('nav-list-container');
         if (!nav) return;
-        nav.innerHTML = `
-            <button type="button" class="nav-item active" data-cover-nav="workspace">
-                <i class="ri-image-add-line"></i>
-                <span>封面工作台</span>
-            </button>
-            <button type="button" class="nav-item" data-cover-nav="history">
-                <i class="ri-gallery-line"></i>
-                <span>生成历史</span>
-            </button>
-        `;
-        nav.querySelector('[data-cover-nav="history"]')?.addEventListener('click', () => {
-            document.getElementById('cover-history-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
+        nav.innerHTML = '';
     }
 
     async function loadCoverWorkbenchData() {
@@ -113,11 +97,6 @@
         coverState.history = historyResp.covers || [];
         coverState.apiConfigs = configsResp.configs || [];
         coverState.activeConfigId = configsResp.active_config_id || coverState.apiConfigs[0]?.id || '';
-        const textConfig = getTextCapableConfig(coverState.form.promptApiConfigId || coverState.activeConfigId);
-        coverState.form.promptApiConfigId = textConfig?.id || coverState.form.promptApiConfigId || coverState.activeConfigId;
-        if (!coverState.form.promptModel || !isTextModelName(coverState.form.promptModel)) {
-            coverState.form.promptModel = getSelectedPromptModel(getPromptActiveConfig());
-        }
         const imageConfig = getImageCapableConfig(coverState.form.apiConfigId || coverState.activeConfigId);
         coverState.form.apiConfigId = imageConfig?.id || coverState.form.apiConfigId || coverState.activeConfigId;
 
@@ -134,10 +113,6 @@
         if (!container) return;
 
         const selectedTemplate = getSelectedTemplate();
-        const promptConfig = getPromptActiveConfig();
-        const selectedPromptModel = getSelectedPromptModel(promptConfig);
-        coverState.form.promptModel = selectedPromptModel;
-        const textModels = getTextModels(promptConfig);
         const activeConfig = getActiveConfig();
         const selectedModel = getSelectedModel(activeConfig);
         coverState.form.model = selectedModel;
@@ -153,7 +128,7 @@
                 <header class="cover-header">
                     <div>
                         <h2><i class="ri-image-add-line"></i> 小说封面生成</h2>
-                        <p>选择字体风格与平台分辨率，确认书名后生成封面提示词和图片。</p>
+                        <p>选择字体风格与平台分辨率，确认书名后用本地变量生成封面提示词和图片。</p>
                     </div>
                 </header>
 
@@ -197,19 +172,6 @@
                                 <small class="cover-field-hint">${escapeHtml(selectedPreset.note)}</small>
                             </label>
                             <label>
-                                <span>提示词 API 配置</span>
-                                <select id="cover-prompt-api-config" class="cover-input">
-                                    ${renderPromptConfigOptions()}
-                                </select>
-                            </label>
-                            <label>
-                                <span>提示词文本模型</span>
-                                <select id="cover-prompt-model" class="cover-input" ${textModels.length ? '' : 'disabled'}>
-                                    ${renderPromptModelOptions(promptConfig, selectedPromptModel)}
-                                </select>
-                                <small class="cover-field-hint">${escapeHtml(getPromptModelHint(promptConfig))}</small>
-                            </label>
-                            <label>
                                 <span>图片 API 配置</span>
                                 <select id="cover-api-config" class="cover-input">
                                     ${renderConfigOptions()}
@@ -246,7 +208,7 @@
                         <div class="cover-prompt-actions">
                             <div class="cover-action-row">
                                 <button type="button" class="cover-btn cover-btn-primary" id="cover-draft-prompt" ${draftingPrompt ? 'disabled aria-busy="true"' : (busy ? 'disabled' : '')}>
-                                    <i class="${draftingPrompt ? 'ri-loader-4-line cover-spin' : 'ri-magic-line'}"></i> ${draftingPrompt ? '正在生成提示词' : '生成描写提示词'}
+                                    <i class="${draftingPrompt ? 'ri-loader-4-line cover-spin' : 'ri-magic-line'}"></i> ${draftingPrompt ? '正在生成提示词' : '生成封面提示词'}
                                 </button>
                             </div>
                             <div class="cover-action-row cover-action-row-secondary">
@@ -258,7 +220,7 @@
                                 </button>
                             </div>
                             <span class="cover-status" id="cover-status">${escapeHtml(getStatusText())}</span>
-                            <small class="cover-model-note">${escapeHtml(getModelUsageHint(selectedPromptModel, selectedModel))}</small>
+                            <small class="cover-model-note">${escapeHtml(getModelUsageHint(selectedModel))}</small>
                         </div>
 
                         ${renderExtractedElements()}
@@ -319,7 +281,6 @@
             <div class="cover-extracted">
                 <div class="cover-section-title">自动提取与补充结果</div>
                 ${coverState.draft?.completion_notice ? `<div class="cover-extracted-note">${escapeHtml(coverState.draft.completion_notice)}</div>` : ''}
-                ${coverState.draft?.prompt_model_warning ? `<div class="cover-extracted-note cover-extracted-warning">${escapeHtml(coverState.draft.prompt_model_warning)}</div>` : ''}
                 ${rows.map(([label, value]) => `
                     <div class="cover-extracted-row">
                         <strong>${escapeHtml(label)}</strong>
@@ -339,28 +300,6 @@
             <option value="${escapeHtml(config.id)}" ${config.id === coverState.form.apiConfigId ? 'selected' : ''}>
                 ${escapeHtml(config.name || config.id)}
             </option>
-        `).join('');
-    }
-
-    function renderPromptConfigOptions() {
-        const textConfigs = getTextCapableConfigs();
-        if (!textConfigs.length) {
-            return '<option value="">暂无配置了文本模型的 API 配置</option>';
-        }
-        return textConfigs.map((config) => `
-            <option value="${escapeHtml(config.id)}" ${config.id === coverState.form.promptApiConfigId ? 'selected' : ''}>
-                ${escapeHtml(config.name || config.id)}
-            </option>
-        `).join('');
-    }
-
-    function renderPromptModelOptions(config, selectedModel) {
-        const models = getTextModels(config);
-        if (!models.length) {
-            return '<option value="">请先在 API 配置中添加文本模型</option>';
-        }
-        return models.map((model) => `
-            <option value="${escapeHtml(model)}" ${model === selectedModel ? 'selected' : ''}>${escapeHtml(model)}</option>
         `).join('');
     }
 
@@ -485,16 +424,6 @@
             });
         });
 
-        document.getElementById('cover-prompt-api-config')?.addEventListener('change', (event) => {
-            captureFormState();
-            coverState.form.promptApiConfigId = event.target.value;
-            const config = getPromptActiveConfig();
-            coverState.form.promptModel = getSelectedPromptModel(config);
-            coverState.draft = null;
-            coverState.result = null;
-            renderCoverWorkbench();
-        });
-
         document.getElementById('cover-api-config')?.addEventListener('change', (event) => {
             captureFormState();
             coverState.activeConfigId = event.target.value;
@@ -511,7 +440,7 @@
             renderCoverWorkbench();
         });
 
-        ['cover-title', 'cover-author', 'cover-source-mode', 'cover-prompt-model', 'cover-model', 'cover-custom-width', 'cover-custom-height'].forEach((id) => {
+        ['cover-title', 'cover-author', 'cover-source-mode', 'cover-model', 'cover-custom-width', 'cover-custom-height'].forEach((id) => {
             document.getElementById(id)?.addEventListener('input', () => captureFormState());
             document.getElementById(id)?.addEventListener('change', () => captureFormState());
         });
@@ -549,8 +478,6 @@
                 source_mode: coverState.form.sourceMode || 'project_plus_custom',
                 title: coverState.form.title,
                 author: coverState.form.author,
-                prompt_api_config_id: coverState.form.promptApiConfigId,
-                prompt_model: coverState.form.promptModel,
                 custom_elements: collectCustomElements(),
             });
             coverState.draft = response.data;
@@ -652,7 +579,7 @@
 
     async function deleteCover(coverId) {
         if (!coverId) return;
-        if (!askConfirm('确定删除这张历史封面吗？删除后本地历史文件也会移除。')) return;
+        if (!(await askConfirm('确定删除这张历史封面吗？删除后本地历史文件也会移除。'))) return;
         try {
             await apiCall(`${COVER_API}/history/${encodeURIComponent(coverId)}`, 'DELETE');
             coverState.history = coverState.history.filter((item) => item.cover_id !== coverId);
@@ -669,7 +596,7 @@
     async function deleteSelectedCovers() {
         const ids = [...coverState.selectedHistoryIds];
         if (!ids.length) return;
-        if (!askConfirm(`确定删除选中的 ${ids.length} 张历史封面吗？删除后本地历史文件也会移除。`)) return;
+        if (!(await askConfirm(`确定删除选中的 ${ids.length} 张历史封面吗？删除后本地历史文件也会移除。`))) return;
         try {
             const response = await apiCall(`${COVER_API}/history/delete-batch`, 'POST', { cover_ids: ids });
             const deleted = response.deleted || [];
@@ -715,17 +642,15 @@
         renderCoverWorkbench();
     }
 
-    function askConfirm(message) {
-        if (typeof window.confirm !== 'function') return true;
-        return window.confirm(message);
+    async function askConfirm(message) {
+        if (typeof window.showConfirmDialog !== 'function') return true;
+        return await window.showConfirmDialog(message);
     }
 
     function captureFormState() {
         coverState.form.title = getFieldValue('cover-title');
         coverState.form.author = getFieldValue('cover-author');
         coverState.form.sourceMode = getFieldValue('cover-source-mode') || coverState.form.sourceMode;
-        coverState.form.promptApiConfigId = getFieldValue('cover-prompt-api-config') || coverState.form.promptApiConfigId || coverState.activeConfigId;
-        coverState.form.promptModel = getFieldValue('cover-prompt-model') || coverState.form.promptModel;
         coverState.form.apiConfigId = getFieldValue('cover-api-config') || coverState.form.apiConfigId || coverState.activeConfigId;
         coverState.form.model = getFieldValue('cover-model') || coverState.form.model;
         coverState.form.platformPreset = getFieldValue('cover-platform') || coverState.form.platformPreset;
@@ -771,26 +696,6 @@
         return models[0] || '';
     }
 
-    function getPromptActiveConfig() {
-        const activeId = coverState.form.promptApiConfigId || coverState.activeConfigId;
-        return coverState.apiConfigs.find((config) => config.id === activeId) || getTextCapableConfigs()[0] || null;
-    }
-
-    function getSelectedPromptModel(config) {
-        const models = getTextModels(config);
-        if (coverState.form.promptModel && models.includes(coverState.form.promptModel)) return coverState.form.promptModel;
-        return models[0] || '';
-    }
-
-    function getTextCapableConfigs() {
-        return coverState.apiConfigs.filter((config) => getTextModels(config).length > 0);
-    }
-
-    function getTextCapableConfig(preferredId) {
-        const textConfigs = getTextCapableConfigs();
-        return textConfigs.find((config) => config.id === preferredId) || textConfigs[0] || null;
-    }
-
     function getImageCapableConfigs() {
         return coverState.apiConfigs.filter((config) => getImageModels(config).length > 0);
     }
@@ -801,20 +706,15 @@
     }
 
     function getImageModels(config) {
-        return Array.isArray(config?.models) ? config.models.filter((model) => isImageModelName(model)) : [];
-    }
-
-    function getTextModels(config) {
-        return Array.isArray(config?.models) ? config.models.filter((model) => isTextModelName(model)) : [];
+        return typeof window.getImageModelsFromConfig === 'function'
+            ? window.getImageModelsFromConfig(config)
+            : [];
     }
 
     function isImageModelName(model) {
-        return IMAGE_MODEL_PATTERN.test(String(model || ''));
-    }
-
-    function isTextModelName(model) {
-        const value = String(model || '');
-        return Boolean(value.trim()) && !IMAGE_MODEL_PATTERN.test(value) && !NON_TEXT_MODEL_PATTERN.test(value);
+        return typeof window.isImageModelName === 'function'
+            ? window.isImageModelName(model)
+            : false;
     }
 
     function getSelectedPreset() {
@@ -845,18 +745,14 @@
 
     function getStatusText() {
         if (coverState.loadingAction) return coverState.loadingAction;
-        if (coverState.draft?.prompt_model_warning) return coverState.draft.prompt_model_warning;
         if (coverState.draft?.completion_notice) return coverState.draft.completion_notice;
         if (coverState.draft?.final_prompt) return '提示词已就绪，可继续微调后生成封面。';
         return '四个元素可自动从世界观、主角档案、物品设定和大纲中提取；留空即可使用项目内容。';
     }
 
-    function getModelUsageHint(promptModel, imageModel) {
-        const promptModelText = String(promptModel || '').trim();
+    function getModelUsageHint(imageModel) {
         const imageModelText = String(imageModel || '').trim();
-        const promptPart = promptModelText
-            ? `生成描写提示词会使用文本模型“${promptModelText}”。`
-            : '生成描写提示词会使用模板兜底；请先在 API 配置中添加并选择文本模型以启用模型润色。';
+        const promptPart = '封面提示词由本地模板和变量生成，不调用文本模型。';
         if (imageModelText) {
             const imageFormat = getImageApiFormatLabel(getActiveConfig()?.image_api_format || 'auto');
             return `${promptPart} 生成封面会使用图像模型“${imageModelText}”，图片格式：${imageFormat}。`;
@@ -880,12 +776,6 @@
             chat_completions: 'Chat 图片输出',
         };
         return labels[format] || labels.auto;
-    }
-
-    function getPromptModelHint(config) {
-        if (!config) return '当前没有可用 API 配置；请先在设置中添加文本模型配置。';
-        if (!getTextModels(config).length) return '当前 API 配置没有识别到文本模型；图片、嵌入、语音等模型不会出现在这里。';
-        return '用于生成和润色描写提示词，只能从当前 API 配置中的文本模型下拉选择。';
     }
 
     function setLoading(text, kind) {
@@ -917,7 +807,7 @@
             draftButton.setAttribute('aria-busy', String(draftingPrompt));
             draftButton.innerHTML = draftingPrompt
                 ? '<i class="ri-loader-4-line cover-spin"></i> 正在生成提示词'
-                : '<i class="ri-magic-line"></i> 生成描写提示词';
+                : '<i class="ri-magic-line"></i> 生成封面提示词';
         }
         if (generateButton) {
             generateButton.disabled = busy || !coverState.draft?.final_prompt || !coverState.form.model;

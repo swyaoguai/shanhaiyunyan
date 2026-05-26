@@ -258,8 +258,19 @@ function setCopilotModelApplying(applying) {
     store.copilotModel.applying = Boolean(applying);
     const select = ui.copilotModelSelect || document.getElementById('copilot-model-select');
     if (select) {
-        select.disabled = Boolean(applying || store.copilotModel.loading || !store.copilotModel.configs.length);
+        const hasTextModels = getCopilotTextCapableConfigs().length > 0;
+        select.disabled = Boolean(applying || store.copilotModel.loading || !hasTextModels);
     }
+}
+
+function getCopilotTextModels(config) {
+    return typeof window.getTextModelsFromConfig === 'function'
+        ? window.getTextModelsFromConfig(config)
+        : (Array.isArray(config?.models) ? config.models.map((model) => String(model || '').trim()).filter(Boolean) : []);
+}
+
+function getCopilotTextCapableConfigs(configs = store.copilotModel.configs) {
+    return (Array.isArray(configs) ? configs : []).filter((cfg) => getCopilotTextModels(cfg).length > 0);
 }
 
 function renderCopilotModelSelector() {
@@ -280,11 +291,11 @@ function renderCopilotModelSelector() {
         return;
     }
 
-    const configured = configs.filter((cfg) => cfg && Array.isArray(cfg.models) && cfg.models.length > 0);
+    const configured = getCopilotTextCapableConfigs(configs);
     if (!configured.length) {
         const option = document.createElement('option');
         option.value = '';
-        option.textContent = '未配置可切换模型';
+        option.textContent = '未配置可切换文本模型';
         select.appendChild(option);
         select.disabled = true;
         return;
@@ -294,7 +305,7 @@ function renderCopilotModelSelector() {
     configured.forEach((cfg) => {
         const configId = String(cfg.id || '').trim();
         const configName = String(cfg.name || '未命名配置').trim();
-        (cfg.models || []).forEach((rawModel) => {
+        getCopilotTextModels(cfg).forEach((rawModel) => {
             const model = String(rawModel || '').trim();
             if (!configId || !model) return;
             const option = document.createElement('option');
@@ -348,10 +359,16 @@ async function loadCopilotModelOptions(options = {}) {
         store.copilotModel.configs = Array.isArray(data?.configs) ? data.configs : [];
         store.copilotModel.activeConfigId = String(data?.active_config_id || '').trim();
         store.copilotModel.activeModel = String(data?.active_model || '').trim();
-        if (store.copilotModel.activeModel) {
+        const activeConfig = store.copilotModel.configs.find((cfg) => cfg?.id === store.copilotModel.activeConfigId);
+        const activeTextModels = getCopilotTextModels(activeConfig);
+        if (store.copilotModel.activeModel && activeTextModels.includes(store.copilotModel.activeModel)) {
             updateCopilotSessionModelLabel(store.copilotModel.activeModel);
+        } else if (store.copilotModel.activeModel && typeof window.isTextModelName === 'function' && !window.isTextModelName(store.copilotModel.activeModel)) {
+            setCopilotModelStatus('图片模型已隐藏，请切换文本模型', 'warning');
         }
-        setCopilotModelStatus('');
+        if (!store.copilotModel.activeModel || activeTextModels.includes(store.copilotModel.activeModel)) {
+            setCopilotModelStatus('');
+        }
     } catch (error) {
         console.warn('[Copilot] 加载模型选择器失败:', error);
         if (!silent) {
@@ -420,6 +437,10 @@ function bindEvents() {
             checkGlobalAPIConfig();
             void loadCopilotModelOptions({ silent: true });
         }
+    });
+
+    window.addEventListener('api-configs-updated', () => {
+        void loadCopilotModelOptions({ silent: true });
     });
 
     if (ui.copilotModelSelect && ui.copilotModelSelect.dataset.bound !== 'true') {
@@ -3381,6 +3402,19 @@ async function sendCopilotMessage() {
     if (!ui.copilotInput) return;
     const text = ui.copilotInput.value.trim();
     if (!text) return;
+    let outboundText = text;
+    try {
+        if (typeof window.sendCopilotMessageWithMentions === 'function') {
+            const mentionPayload = await window.sendCopilotMessageWithMentions(text);
+            if (mentionPayload && mentionPayload.context) {
+                outboundText = `${mentionPayload.message}\n\n【用户引用的项目上下文】${mentionPayload.context}`;
+            } else if (mentionPayload && mentionPayload.message) {
+                outboundText = mentionPayload.message;
+            }
+        }
+    } catch (mentionError) {
+        console.warn('[Copilot] 构建引用上下文失败，将发送原始消息', mentionError);
+    }
 
     if (typeof window.hideCopilotAutocomplete === 'function') {
         window.hideCopilotAutocomplete();
@@ -3426,7 +3460,7 @@ async function sendCopilotMessage() {
         const response = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, session_id: sid, creative_mode: creativeMode }),
+            body: JSON.stringify({ message: outboundText, session_id: sid, creative_mode: creativeMode }),
             signal: currentStreamAbort.signal
         });
 
@@ -3434,7 +3468,7 @@ async function sendCopilotMessage() {
             // 流式端点不可用，回退到普通模式
             aiDiv.remove();
             const res = await apiCall('/api/chat', 'POST', {
-                message: text,
+                message: outboundText,
                 session_id: sid,
                 creative_mode: creativeMode
             });
@@ -3794,7 +3828,12 @@ function showInlineStatus(agentName, detail, status, stage) {
     }
 
     // 如果已有状态指示器，更新它（而非创建新的）
-    if (_currentInlineStatusEl && _currentInlineStatusEl.parentNode) {
+    const canUpdateCurrentStatus = Boolean(
+        _currentInlineStatusEl
+        && _currentInlineStatusEl.parentNode
+        && ui.copilotMsgs.contains(_currentInlineStatusEl)
+    );
+    if (canUpdateCurrentStatus) {
         _currentInlineStatusEl.className = `copilot-inline-status${isCompleted ? ' is-completed' : ''}${isFailed ? ' is-failed' : ''}`;
         const iconEl = _currentInlineStatusEl.querySelector('.copilot-inline-status-icon');
         const textEl = _currentInlineStatusEl.querySelector('.copilot-inline-status-text');
@@ -3820,8 +3859,8 @@ function showInlineStatus(agentName, detail, status, stage) {
 
     scrollCopilotToBottom();
 
-    // 完成/失败状态自动淡出
-    if (isCompleted || isFailed) {
+    // 完成状态自动淡出；失败状态保留，方便用户看清原因。
+    if (isCompleted) {
         _inlineStatusFadeTimer = setTimeout(() => {
             if (_currentInlineStatusEl && _currentInlineStatusEl.parentNode) {
                 _currentInlineStatusEl.classList.add('is-fading');
@@ -3832,7 +3871,7 @@ function showInlineStatus(agentName, detail, status, stage) {
                     _currentInlineStatusEl = null;
                 }, 400);
             }
-        }, isCompleted ? 2000 : 4000);
+        }, 2000);
     }
 }
 

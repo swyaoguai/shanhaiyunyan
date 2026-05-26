@@ -90,15 +90,28 @@
         semantic: '语义相关',
         related: '相关',
     };
+    const SOURCE_FILTERS = [
+        { key: 'all', label: '全部来源' },
+        { key: 'multi_agent', label: '多Agent' },
+        { key: 'infinite_write', label: '无限续写' },
+        { key: 'manual_import', label: '手动导入' },
+        { key: 'manual', label: '手动创建' },
+        { key: 'unknown', label: '未标记' },
+    ];
+    const SOURCE_LABELS = Object.fromEntries(SOURCE_FILTERS.map(item => [item.key, item.label]));
 
     let currentPage = null;
     let allPages = [];
     let wikiState = {
         showSystemPages: false,
+        sourceFilter: 'all',
         activeGraphType: 'all',
         graphScope: 'all',
+        graphMode: 'character',
+        graphRange: 'all',
         graphData: null,
         selectedGraphNode: '',
+        graphAnalyzing: false,
     };
 
     if (typeof window !== 'undefined') {
@@ -122,6 +135,37 @@
         return ['wiki', 'aux-memory', 'knowledge-workbench'].includes(window.store?.currentModule);
     }
 
+    function getPageDisplayTitle(pageOrTitle) {
+        const title = typeof pageOrTitle === 'object' ? pageOrTitle?.title : pageOrTitle;
+        return String(title ?? '').trim() || '未命名页面';
+    }
+
+    function getPageEndpoint(title, filePath = '') {
+        const rawTitle = String(title ?? '');
+        if (rawTitle.trim()) {
+            return `${WIKI_API}/pages/${encodeURIComponent(rawTitle)}`;
+        }
+        const rawFilePath = String(filePath ?? '').trim();
+        if (rawFilePath) {
+            return `${WIKI_API}/pages/by-file?file_path=${encodeURIComponent(rawFilePath)}`;
+        }
+        return '';
+    }
+
+    function getPageActionArgs(page) {
+        return `'${escapeJsString(page?.title || '')}', '${escapeJsString(page?.file_path || '')}'`;
+    }
+
+    async function confirmWikiAction(message) {
+        if (typeof window.showConfirmDialog === 'function') {
+            return window.showConfirmDialog(message);
+        }
+        if (typeof window.confirm === 'function') {
+            return window.confirm(message);
+        }
+        return true;
+    }
+
     async function renderWikiView(renderToken = null) {
         const container = document.getElementById('main-view');
         if (!container) return;
@@ -130,13 +174,13 @@
             <div class="wiki-container" style="padding: 24px; max-width: 1280px; margin: 0 auto;">
                 <div class="wiki-header" style="display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 22px;">
                     <h2 style="margin: 0; color: var(--text-primary); display: flex; align-items: center; gap: 10px;">
-                        <i class="ri-book-open-line" style="color: #8ab4ff;"></i>
+                        <i class="ri-book-open-line" style="color: var(--accent-color, #8ab4ff);"></i>
                         Wiki 知识系统
                     </h2>
                     <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                         <input type="text" id="wiki-search-input" placeholder="搜索页面..."
                             style="padding: 10px 12px; border: 1px solid var(--border-color, #333);
-                            border-radius: 8px; background: rgba(0,0,0,0.22);
+                            border-radius: 8px; background: var(--bg-workspace, rgba(0,0,0,0.18));
                             color: var(--text-primary, #fff); width: 260px;">
                         <button onclick="WikiModule.search()" class="btn btn-primary"
                             style="padding: 9px 16px; border-radius: 8px;"><i class="ri-search-line"></i> 搜索</button>
@@ -191,17 +235,35 @@
         if (!statsEl) return;
 
         const visiblePages = getVisiblePages(allPages);
+        const sourceCounts = {};
         const typeCounts = {};
         visiblePages.forEach(p => {
             typeCounts[p.page_type] = (typeCounts[p.page_type] || 0) + 1;
         });
+        getSystemFilteredPages(allPages).forEach(p => {
+            const sourceMode = getPageSourceMode(p);
+            sourceCounts[sourceMode] = (sourceCounts[sourceMode] || 0) + 1;
+        });
+
+        const sourceButtons = SOURCE_FILTERS.map(item => {
+            const active = wikiState.sourceFilter === item.key;
+            const count = item.key === 'all' ? getSystemFilteredPages(allPages).length : (sourceCounts[item.key] || 0);
+            return `
+                <button onclick="WikiModule.filterSource('${escapeJsString(item.key)}')"
+                    style="padding: 5px 12px; border-radius: 999px; border: 1px solid ${active ? 'var(--accent-color, #4a9eff)' : 'var(--border-color, #444)'};
+                    background: ${active ? 'color-mix(in srgb, var(--accent-color, #4a9eff) 13%, transparent)' : 'var(--bg-workspace, rgba(255,255,255,0.04))'};
+                    color: ${active ? 'var(--accent-color, #4a9eff)' : 'var(--text-primary, #fff)'}; cursor: pointer; font-size: 12px;">
+                    ${item.label} (${count})
+                </button>
+            `;
+        }).join('');
 
         const typeButtons = Object.entries(typeCounts)
             .sort(([left], [right]) => getPageTypeLabel(left).localeCompare(getPageTypeLabel(right), 'zh-Hans-CN'))
             .map(([type, count]) => `
                 <button onclick="WikiModule.filterType('${escapeJsString(type)}')"
                     style="padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-color, #444);
-                    background: rgba(255,255,255,0.04); color: var(--text-primary, #fff); cursor: pointer; font-size: 12px;">
+                    background: var(--bg-workspace, rgba(255,255,255,0.04)); color: var(--text-primary, #fff); cursor: pointer; font-size: 12px;">
                     ${getPageTypeLabel(type)} (${count})
                 </button>
             `).join('');
@@ -212,13 +274,14 @@
                 ${total !== visiblePages.length ? `<span style="color: var(--text-secondary, #888); font-size: 12px;">已隐藏 ${total - visiblePages.length} 个系统页</span>` : ''}
                 <button onclick="WikiModule.loadPages()"
                     style="padding: 5px 12px; border-radius: 999px; border: 1px solid var(--accent-color, #4a9eff);
-                    background: rgba(74,158,255,0.1); color: var(--accent-color, #4a9eff); cursor: pointer; font-size: 12px;">
+                    background: color-mix(in srgb, var(--accent-color, #4a9eff) 12%, transparent); color: var(--accent-color, #4a9eff); cursor: pointer; font-size: 12px;">
                     全部
                 </button>
+                ${sourceButtons}
                 ${typeButtons}
                 <button onclick="WikiModule.toggleSystemPages()"
                     style="padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-color, #444);
-                    background: ${wikiState.showSystemPages ? 'rgba(74,158,255,0.14)' : 'rgba(255,255,255,0.03)'};
+                    background: ${wikiState.showSystemPages ? 'color-mix(in srgb, var(--accent-color, #4a9eff) 14%, transparent)' : 'var(--bg-workspace, rgba(255,255,255,0.03))'};
                     color: var(--text-secondary, #a5adbd); cursor: pointer; font-size: 12px;">
                     ${wikiState.showSystemPages ? '隐藏系统页' : '显示系统页'}
                 </button>
@@ -238,17 +301,17 @@
         content.innerHTML = `
             <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px;">
                 ${pages.map(p => `
-                    <button onclick="WikiModule.viewPage('${escapeJsString(p.title)}')"
+                    <button onclick="WikiModule.viewPage(${getPageActionArgs(p)})"
                         style="text-align: left; padding: 18px; min-height: 104px; border: 1px solid var(--border-color, #333);
-                        border-radius: 10px; cursor: pointer; background: rgba(18, 20, 42, 0.72);
+                        border-radius: 10px; cursor: pointer; background: var(--bg-panel, rgba(18, 20, 42, 0.72));
                         color: var(--text-primary, #fff); transition: border-color 0.2s, transform 0.2s;"
                         onmouseover="this.style.borderColor='var(--accent-color, #4a9eff)'; this.style.transform='translateY(-1px)'"
                         onmouseout="this.style.borderColor='var(--border-color, #333)'; this.style.transform='translateY(0)'">
                         <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;">
-                            <i class="${getPageTypeIcon(p.page_type)}" style="font-size: 21px; color: #b6c6ff; margin-top: 1px;"></i>
-                            <strong style="font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(p.title || '未命名页面')}</strong>
+                            <i class="${getPageTypeIcon(p.page_type)}" style="font-size: 21px; color: var(--accent-color, #b6c6ff); margin-top: 1px;"></i>
+                            <strong style="font-size: 15px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(getPageDisplayTitle(p))}</strong>
                             <span style="margin-left: auto; font-size: 11px; color: var(--text-secondary, #a5adbd);
-                                padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.06); white-space: nowrap;">
+                                padding: 2px 8px; border-radius: 999px; background: var(--bg-workspace, rgba(255,255,255,0.06)); white-space: nowrap;">
                                 ${getPageTypeLabel(p.page_type)}
                             </span>
                         </div>
@@ -259,7 +322,7 @@
                             <div style="display: flex; gap: 4px; flex-wrap: wrap;">
                                 ${p.tags.slice(0, 4).map(t => `
                                     <span style="font-size: 10px; padding: 2px 6px; border-radius: 999px;
-                                    background: rgba(74,158,255,0.12); color: #8ab4ff;">${escapeHtml(localizeTag(t))}</span>
+                                    background: color-mix(in srgb, var(--accent-color, #8ab4ff) 13%, transparent); color: var(--accent-color, #8ab4ff);">${escapeHtml(localizeTag(t))}</span>
                                 `).join('')}
                             </div>
                         ` : ''}
@@ -269,9 +332,12 @@
         `;
     }
 
-    async function viewPage(title) {
+    async function viewPage(title, filePath = '') {
         try {
-            const resp = await fetch(`${WIKI_API}/pages/${encodeURIComponent(title)}`);
+            const endpoint = getPageEndpoint(title, filePath);
+            if (!endpoint) throw new Error('缺少页面标识');
+
+            const resp = await fetch(endpoint);
             const data = await resp.json();
 
             if (!data.success) throw new Error(data.detail || '获取失败');
@@ -289,6 +355,8 @@
 
         const cleanBody = cleanWikiBodyForReading(page);
         const bodyHtml = markdownToHtml(cleanBody || '暂无正文内容。');
+        const displayTitle = getPageDisplayTitle(page);
+        const actionArgs = getPageActionArgs(page);
 
         content.innerHTML = `
             <div style="max-width: 860px;">
@@ -300,27 +368,27 @@
                 </div>
 
                 <article style="padding: 26px 28px; border: 1px solid var(--border-color, #333); border-radius: 12px;
-                    background: rgba(18, 20, 42, 0.78); color: var(--text-primary, #fff);">
+                    background: var(--bg-panel, rgba(18, 20, 42, 0.78)); color: var(--text-primary, #fff);">
                     <header style="display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; margin-bottom: 18px;">
                         <div>
                             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                                <span style="font-size: 12px; padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,0.06); color: var(--text-secondary, #a5adbd);">
+                                <span style="font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--bg-workspace, rgba(255,255,255,0.06)); color: var(--text-secondary, #a5adbd);">
                                     ${getPageTypeLabel(page.page_type)}
                                 </span>
                                 ${SYSTEM_PAGE_TYPES.has(page.page_type) ? '<span style="font-size: 12px; color: #f59e0b;">系统页</span>' : ''}
                             </div>
-                            <h2 style="margin: 0; font-size: 24px; line-height: 1.3;">${escapeHtml(page.title)}</h2>
+                            <h2 style="margin: 0; font-size: 24px; line-height: 1.3;">${escapeHtml(displayTitle)}</h2>
                             <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-top: 8px;">
                                 ${Number(page.word_count || 0)} 字 · ${formatDate(page.updated_at) ? `更新于 ${formatDate(page.updated_at)}` : '暂无更新时间'}
                             </div>
                         </div>
                         <div style="display: flex; gap: 8px; flex-shrink: 0;">
-                            <button onclick="WikiModule.editPage('${escapeJsString(page.title)}')"
+                            <button onclick="WikiModule.editPage(${actionArgs})"
                                 style="padding: 7px 12px; border-radius: 7px; border: 1px solid var(--border-color, #444);
-                                background: rgba(255,255,255,0.04); color: var(--text-primary, #fff); cursor: pointer; font-size: 12px;">
+                                background: var(--bg-workspace, rgba(255,255,255,0.04)); color: var(--text-primary, #fff); cursor: pointer; font-size: 12px;">
                                 <i class="ri-edit-line"></i> 编辑
                             </button>
-                            <button onclick="WikiModule.deletePage('${escapeJsString(page.title)}')"
+                            <button onclick="WikiModule.deletePage(${actionArgs})"
                                 style="padding: 7px 12px; border-radius: 7px; border: 1px solid #ef4444;
                                 background: transparent; color: #ef4444; cursor: pointer; font-size: 12px;">
                                 <i class="ri-delete-bin-line"></i> 删除
@@ -332,7 +400,7 @@
                         <div style="display: flex; gap: 5px; margin-bottom: 18px; flex-wrap: wrap;">
                             ${page.tags.map(t => `
                                 <span style="font-size: 11px; padding: 2px 8px; border-radius: 999px;
-                                background: rgba(74,158,255,0.12); color: #8ab4ff;">${escapeHtml(localizeTag(t))}</span>
+                                background: color-mix(in srgb, var(--accent-color, #8ab4ff) 13%, transparent); color: var(--accent-color, #8ab4ff);">${escapeHtml(localizeTag(t))}</span>
                             `).join('')}
                         </div>
                     ` : ''}
@@ -373,7 +441,7 @@
         return `
             <a href="javascript:void(0)" onclick="WikiModule.viewPage('${escapeJsString(title)}')"
                 style="font-size: 12px; padding: 3px 9px; border-radius: 999px;
-                background: rgba(255,255,255,0.06); color: #8ab4ff; text-decoration: none;">
+                background: var(--bg-workspace, rgba(255,255,255,0.06)); color: var(--accent-color, #8ab4ff); text-decoration: none;">
                 ${escapeHtml(title)}
             </a>
         `;
@@ -407,6 +475,12 @@
         renderPageList(filtered);
     }
 
+    function filterSource(sourceMode) {
+        wikiState.sourceFilter = String(sourceMode || 'all');
+        renderStats(allPages.length);
+        renderPageList(getVisiblePages(allPages));
+    }
+
     function toggleSystemPages() {
         wikiState.showSystemPages = !wikiState.showSystemPages;
         renderStats(allPages.length);
@@ -420,17 +494,66 @@
         content.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-secondary, #888);">加载图谱数据...</div>';
 
         try {
-            const resp = await fetch(`${WIKI_API}/graph`);
+            const resp = await fetch(`${WIKI_API}/relationship-graph`);
             const data = await resp.json();
 
             if (!data.success) throw new Error('获取图谱失败');
 
             wikiState.graphData = data.data;
             wikiState.selectedGraphNode = '';
+            wikiState.graphMode = data.data?.mode || wikiState.graphMode || 'character';
+            wikiState.graphRange = data.data?.scope || wikiState.graphRange || 'all';
             renderGraphView(data.data);
         } catch (e) {
             content.innerHTML = `<div style="color: #ef4444; padding: 20px;">加载图谱失败: ${escapeHtml(e.message)}</div>`;
         }
+    }
+
+    async function analyzeRelationshipGraph() {
+        const content = document.getElementById('wiki-content');
+        if (!content || wikiState.graphAnalyzing) return;
+        wikiState.graphAnalyzing = true;
+        renderGraphView(wikiState.graphData || { nodes: [], edges: [], statistics: {} });
+
+        try {
+            const resp = await fetch(`${WIKI_API}/relationship-graph/analyze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildGraphRequestBody()),
+            });
+            const data = await resp.json();
+            if (!data.success) throw new Error(data.detail || '分析图谱失败');
+            wikiState.graphData = data.data;
+            wikiState.selectedGraphNode = '';
+            renderGraphView(data.data);
+        } catch (e) {
+            if (typeof showToast === 'function') {
+                showToast(`分析图谱失败: ${e.message}`);
+            }
+            const status = content.querySelector('#wiki-graph-status');
+            if (status) status.textContent = `分析失败：${e.message}`;
+        } finally {
+            wikiState.graphAnalyzing = false;
+            renderGraphView(wikiState.graphData || { nodes: [], edges: [], statistics: {} });
+        }
+    }
+
+    function buildGraphRequestBody() {
+        const range = String(wikiState.graphRange || 'all');
+        const body = {
+            mode: wikiState.graphMode || 'character',
+            scope: range,
+        };
+        if (range === 'range') {
+            const start = Number(document.getElementById('wiki-graph-chapter-start')?.value || 1);
+            const end = Number(document.getElementById('wiki-graph-chapter-end')?.value || start);
+            body.chapter_start = Number.isFinite(start) ? start : 1;
+            body.chapter_end = Number.isFinite(end) ? end : body.chapter_start;
+        }
+        if (wikiState.selectedGraphNode) {
+            body.center_id = wikiState.selectedGraphNode;
+        }
+        return body;
     }
 
     function renderGraphView(graphData) {
@@ -444,40 +567,69 @@
         const layout = buildGraphLayout(visibleNodes, visibleEdges);
         const selectedNode = visibleNodes.find(node => node.id === wikiState.selectedGraphNode) || null;
         const statistics = graphData?.statistics || {};
+        const generatedAt = graphData?.generated_at ? formatDate(graphData.generated_at) : '尚未分析';
+        const statusText = wikiState.graphAnalyzing ? '正在从章节正文分析关系...' : (graphData?.message || `最近分析：${generatedAt}`);
 
         content.innerHTML = `
-            <div style="display: grid; grid-template-columns: 292px minmax(0, 1fr); gap: 18px; min-height: 680px;">
-                <aside style="border: 1px solid var(--border-color, #333); border-radius: 14px; background: rgba(255,255,255,0.03); overflow: hidden;">
+            <div style="display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px; min-height: 680px;">
+                <aside style="border: 1px solid var(--border-color, #333); border-radius: 8px; background: var(--bg-panel, rgba(255,255,255,0.03)); overflow: hidden;">
                     <div style="padding: 16px; border-bottom: 1px solid var(--border-color, #333); display: flex; align-items: center; justify-content: space-between;">
-                        <strong style="color: var(--text-primary, #fff);">图谱文件</strong>
+                        <strong style="color: var(--text-primary, #fff);">关系图谱</strong>
                         <button onclick="WikiModule.showGraph()" title="刷新"
-                            style="width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border-color, #444); background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
+                            style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border-color, #444); background: transparent; color: var(--text-primary, #fff); cursor: pointer;">
                             <i class="ri-refresh-line"></i>
                         </button>
                     </div>
                     <div style="padding: 14px;">
-                        <button style="width: 100%; text-align: left; padding: 14px; border: 1px solid var(--accent-color, #4a9eff); border-radius: 10px; background: rgba(74,158,255,0.12); color: var(--text-primary, #fff); cursor: default;">
-                            <div style="font-weight: 700; margin-bottom: 8px;">当前项目图谱</div>
+                        <div style="width: 100%; text-align: left; padding: 14px; border: 1px solid var(--accent-color, #4a9eff); border-radius: 8px; background: color-mix(in srgb, var(--accent-color, #4a9eff) 13%, transparent); color: var(--text-primary, #fff);">
+                            <div style="font-weight: 700; margin-bottom: 8px;">当前项目关系网</div>
                             <div style="font-size: 12px; color: var(--text-secondary, #a5adbd);">${nodes.length} 实体 · ${edges.length} 关系</div>
-                            <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-top: 6px;">基于 Wiki 页面和双向链接生成</div>
-                        </button>
+                            <div id="wiki-graph-status" style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-top: 6px;">${escapeHtml(statusText)}</div>
+                        </div>
                         <div style="margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                             ${graphStatBox(statistics.nodes ?? nodes.length, '实体')}
                             ${graphStatBox(statistics.edges ?? edges.length, '关系')}
-                            ${graphStatBox(Number(statistics.avg_degree || 0).toFixed(1), '平均连接')}
-                            ${graphStatBox(statistics.isolated_count || 0, '孤立页')}
+                            ${graphStatBox(statistics.chapters || 0, '章节')}
+                            ${graphStatBox(statistics.events || 0, '事件')}
                         </div>
+                        <div style="margin-top: 16px;">
+                            <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 8px;">视图模式</div>
+                            <div style="display: grid; gap: 8px;">
+                                ${graphModeButton('character', '角色关系', 'ri-team-line')}
+                                ${graphModeButton('event', '事件线', 'ri-route-line')}
+                                ${graphModeButton('compass', '罗盘视图', 'ri-compass-3-line')}
+                            </div>
+                        </div>
+                        <div style="margin-top: 16px;">
+                            <label for="wiki-graph-range" style="display: block; font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 8px;">章节范围</label>
+                            <select id="wiki-graph-range" onchange="WikiModule.setGraphRange(this.value)" style="${graphSelectStyle()}">
+                                <option value="all" ${wikiState.graphRange === 'all' ? 'selected' : ''}>全部章节</option>
+                                <option value="current" ${wikiState.graphRange === 'current' ? 'selected' : ''}>当前章</option>
+                                <option value="first5" ${wikiState.graphRange === 'first5' ? 'selected' : ''}>前 5 章</option>
+                                <option value="first10" ${wikiState.graphRange === 'first10' ? 'selected' : ''}>前 10 章</option>
+                                <option value="first15" ${wikiState.graphRange === 'first15' ? 'selected' : ''}>前 15 章</option>
+                                <option value="range" ${wikiState.graphRange === 'range' ? 'selected' : ''}>指定章节</option>
+                            </select>
+                            <div style="display: ${wikiState.graphRange === 'range' ? 'grid' : 'none'}; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
+                                <input id="wiki-graph-chapter-start" type="number" min="1" value="1" aria-label="起始章节" style="${graphInputStyle()}">
+                                <input id="wiki-graph-chapter-end" type="number" min="1" value="10" aria-label="结束章节" style="${graphInputStyle()}">
+                            </div>
+                        </div>
+                        <button onclick="WikiModule.analyzeRelationshipGraph()" class="btn btn-primary" style="width: 100%; margin-top: 16px; justify-content: center;" ${wikiState.graphAnalyzing ? 'disabled' : ''}>
+                            <i class="${wikiState.graphAnalyzing ? 'ri-loader-4-line' : 'ri-node-tree'}"></i>
+                            ${wikiState.graphAnalyzing ? '分析中...' : '分析图谱'}
+                        </button>
                     </div>
                 </aside>
 
-                <section style="border: 1px solid var(--border-color, #333); border-radius: 14px; background: rgba(255,255,255,0.025); overflow: hidden;">
+                <section style="border: 1px solid var(--border-color, #333); border-radius: 8px; background: var(--bg-panel, rgba(255,255,255,0.025)); overflow: hidden;">
                     <div style="padding: 16px 18px; border-bottom: 1px solid var(--border-color, #333); display: flex; align-items: center; justify-content: space-between; gap: 12px;">
                         <div style="display: flex; align-items: center; gap: 12px;">
                             <button onclick="WikiModule.loadPages()" type="button" class="app-back-button" style="min-height: 36px; padding: 7px 12px;">
                                 <i class="ri-arrow-left-line"></i>
                                 <span>返回列表</span>
                             </button>
-                            <h3 style="margin: 0; color: var(--text-primary, #fff);">知识图谱</h3>
+                            <h3 style="margin: 0; color: var(--text-primary, #fff);">小说关系图谱</h3>
                         </div>
                         <button onclick="WikiModule.createPage()" class="btn btn-primary" style="padding: 8px 14px; border-radius: 8px;">
                             <i class="ri-add-line"></i> 新建页面
@@ -486,22 +638,22 @@
 
                     <div style="padding: 14px 18px; border-bottom: 1px solid var(--border-color, #333);">
                         <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;">
-                            <span style="font-size: 13px; color: var(--text-secondary, #a5adbd);">分析范围</span>
-                            ${graphScopeButton('all', '全部实体')}
-                            ${graphScopeButton('linked', '有关系')}
-                            ${graphScopeButton('isolated', '孤立页')}
+                            <span style="font-size: 13px; color: var(--text-secondary, #a5adbd);">显示范围</span>
+                            ${graphScopeButton('all', '全部节点')}
+                            ${graphScopeButton('linked', '有连接')}
+                            ${graphScopeButton('isolated', '孤立节点')}
                         </div>
                         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                             ${Object.entries(GRAPH_CATEGORIES).map(([key, meta]) => graphCategoryButton(key, meta)).join('')}
                         </div>
                     </div>
 
-                    <div style="display: grid; grid-template-columns: minmax(0, 1fr) 260px; min-height: 520px;">
+                    <div style="display: grid; grid-template-columns: minmax(0, 1fr) 280px; min-height: 520px;">
                         <div id="wiki-graph-canvas" style="position: relative; min-height: 560px; background:
-                            radial-gradient(circle at 45% 45%, rgba(74,158,255,0.10), transparent 34%),
-                            linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.04)); overflow: hidden;">
+                            radial-gradient(circle at 45% 45%, color-mix(in srgb, var(--accent-color, #4a9eff) 10%, transparent), transparent 34%),
+                            var(--bg-workspace, rgba(255,255,255,0.03)); overflow: hidden;">
                             ${visibleNodes.length ? renderGraphSvg(visibleEdges, layout) + renderGraphNodes(visibleNodes, layout) : renderGraphEmpty()}
-                            <div style="position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 999px; background: rgba(10,12,24,0.72); border: 1px solid var(--border-color, #333);">
+                            <div style="position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 999px; background: var(--bg-panel, rgba(10,12,24,0.72)); border: 1px solid var(--border-color, #333);">
                                 ${Object.entries(GRAPH_CATEGORIES).filter(([key]) => key !== 'all').map(([key, meta]) => `
                                     <span style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary, #a5adbd);">
                                         <span style="width: 12px; height: 12px; border-radius: 4px; background: ${meta.color};"></span>${meta.label}
@@ -509,8 +661,8 @@
                                 `).join('')}
                             </div>
                         </div>
-                        <aside style="border-left: 1px solid var(--border-color, #333); padding: 16px; background: rgba(0,0,0,0.08);">
-                            ${renderGraphInspector(selectedNode, visibleEdges)}
+                        <aside style="border-left: 1px solid var(--border-color, #333); padding: 16px; background: var(--bg-workspace, rgba(0,0,0,0.08));">
+                            ${renderGraphInspector(selectedNode, visibleEdges, visibleNodes)}
                         </aside>
                     </div>
                 </section>
@@ -520,19 +672,40 @@
 
     function graphStatBox(value, label) {
         return `
-            <div style="padding: 10px; border-radius: 10px; background: rgba(0,0,0,0.18); border: 1px solid var(--border-color, #333);">
-                <div style="font-size: 18px; font-weight: 800; color: #8ab4ff;">${escapeHtml(value)}</div>
+            <div style="padding: 10px; border-radius: 8px; background: var(--bg-workspace, rgba(0,0,0,0.18)); border: 1px solid var(--border-color, #333);">
+                <div style="font-size: 18px; font-weight: 800; color: var(--accent-color, #8ab4ff);">${escapeHtml(value)}</div>
                 <div style="font-size: 11px; color: var(--text-secondary, #a5adbd);">${label}</div>
             </div>
         `;
+    }
+
+    function graphModeButton(mode, label, icon) {
+        const active = (wikiState.graphMode || 'character') === mode;
+        return `
+            <button onclick="WikiModule.setGraphMode('${mode}')"
+                style="display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px; border-radius: 8px;
+                border: 1px solid ${active ? 'var(--accent-color, #4a9eff)' : 'var(--border-color, #444)'};
+                background: ${active ? 'color-mix(in srgb, var(--accent-color, #4a9eff) 16%, transparent)' : 'var(--bg-workspace, rgba(255,255,255,0.02))'};
+                color: ${active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #a5adbd)'}; cursor: pointer;">
+                <i class="${icon}"></i><span>${label}</span>
+            </button>
+        `;
+    }
+
+    function graphSelectStyle() {
+        return 'width: 100%; padding: 9px 10px; border: 1px solid var(--border-color, #333); border-radius: 8px; background: var(--bg-workspace, rgba(0,0,0,0.18)); color: var(--text-primary, #fff); outline: none;';
+    }
+
+    function graphInputStyle() {
+        return 'width: 100%; padding: 9px 10px; border: 1px solid var(--border-color, #333); border-radius: 8px; background: var(--bg-workspace, rgba(0,0,0,0.18)); color: var(--text-primary, #fff); outline: none;';
     }
 
     function graphScopeButton(scope, label) {
         const active = (wikiState.graphScope || 'all') === scope;
         return `
             <button onclick="WikiModule.setGraphScope('${scope}')"
-                style="padding: 8px 16px; border-radius: 999px; border: 1px solid ${active ? 'var(--accent-color, #4a9eff)' : 'var(--border-color, #444)'};
-                background: ${active ? 'rgba(74,158,255,0.18)' : 'transparent'}; color: ${active ? '#ffffff' : 'var(--text-secondary, #a5adbd)'};
+                style="padding: 8px 14px; border-radius: 8px; border: 1px solid ${active ? 'var(--accent-color, #4a9eff)' : 'var(--border-color, #444)'};
+                background: ${active ? 'color-mix(in srgb, var(--accent-color, #4a9eff) 18%, transparent)' : 'transparent'}; color: ${active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #a5adbd)'};
                 cursor: pointer;">${label}</button>
         `;
     }
@@ -541,9 +714,9 @@
         const active = wikiState.activeGraphType === key;
         return `
             <button onclick="WikiModule.filterGraphType('${key}')"
-                style="padding: 8px 14px; border-radius: 999px; border: 1px solid ${active ? meta.color : 'var(--border-color, #444)'};
-                background: ${active ? `${meta.color}33` : 'rgba(255,255,255,0.02)'};
-                color: ${active ? '#ffffff' : 'var(--text-primary, #fff)'}; cursor: pointer;">
+                style="padding: 8px 14px; border-radius: 8px; border: 1px solid ${active ? meta.color : 'var(--border-color, #444)'};
+                background: ${active ? `${meta.color}33` : 'var(--bg-workspace, rgba(255,255,255,0.02))'};
+                color: var(--text-primary, #fff); cursor: pointer;">
                 ${meta.label}
             </button>
         `;
@@ -600,45 +773,60 @@
         }).join('');
     }
 
-    function renderGraphInspector(node, edges) {
+    function renderGraphInspector(node, edges, nodes = []) {
         if (!node) {
             return `
                 <div style="color: var(--text-secondary, #a5adbd);">
                     <h4 style="margin: 0 0 10px; color: var(--text-primary, #fff);">节点详情</h4>
-                    <p style="font-size: 13px; line-height: 1.6;">点击任意节点查看关联，也可以右键节点打开操作菜单。</p>
+                    <p style="font-size: 13px; line-height: 1.6;">点击图谱中的节点查看详情。角色、事件、地点和线索之间的远近关系会按连接强度展开。</p>
                 </div>
             `;
         }
+        const nodeById = new Map(nodes.map(item => [item.id, item]));
         const related = edges
             .filter(edge => edge.source === node.id || edge.target === node.id)
             .slice(0, 8)
-            .map(edge => edge.source === node.id ? edge.target : edge.source);
+            .map(edge => {
+                const relatedId = edge.source === node.id ? edge.target : edge.source;
+                return { id: relatedId, edge, node: nodeById.get(relatedId) };
+            });
         const category = getGraphCategory(node);
         const meta = GRAPH_CATEGORIES[category] || GRAPH_CATEGORIES.clue;
+        const chapters = Array.isArray(node.chapters) ? node.chapters.slice(0, 6).join('、') : '';
+        const snippets = Array.isArray(node.snippets) ? node.snippets.slice(0, 3) : [];
         return `
             <div>
                 <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
                     <span style="width: 14px; height: 14px; border-radius: 5px; background: ${meta.color};"></span>
-                    <span style="font-size: 12px; color: var(--text-secondary, #a5adbd);">${meta.label}</span>
+                    <span style="font-size: 12px; color: var(--text-secondary, #a5adbd);">${escapeHtml(node.type_label || meta.label)}</span>
                 </div>
                 <h4 style="margin: 0 0 8px; color: var(--text-primary, #fff); line-height: 1.35;">${escapeHtml(node.label || node.id)}</h4>
-                <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 14px;">${getPageTypeLabel(node.type)} · ${node.degree || 0} 个连接</div>
+                <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 14px;">${escapeHtml(node.summary || '') || `${node.degree || 0} 个连接`}</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px;">
+                    ${graphStatBox(node.degree || 0, '连接')}
+                    ${graphStatBox(chapters || '-', '章节')}
+                </div>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px;">
-                    <button onclick="WikiModule.viewPage('${escapeJsString(node.id)}')" style="padding: 9px 12px; border-radius: 8px; border: 1px solid var(--accent-color, #4a9eff); background: rgba(74,158,255,0.14); color: var(--text-primary, #fff); cursor: pointer; text-align: left;">
-                        <i class="ri-file-text-line"></i> 打开页面
-                    </button>
-                    <button onclick="WikiModule.editPage('${escapeJsString(node.id)}')" style="padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color, #444); background: transparent; color: var(--text-primary, #fff); cursor: pointer; text-align: left;">
-                        <i class="ri-edit-line"></i> 编辑
-                    </button>
-                    <button onclick="WikiModule.addGraphNodeToWorldbook('${escapeJsString(node.id)}')" style="padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color, #444); background: transparent; color: var(--text-primary, #fff); cursor: pointer; text-align: left;">
+                    <button onclick="WikiModule.addGraphNodeToWorldbook('${escapeJsString(node.label || node.id)}')" style="padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color, #444); background: transparent; color: var(--text-primary, #fff); cursor: pointer; text-align: left;">
                         <i class="ri-add-line"></i> 添加到世界书
                     </button>
                 </div>
+                ${snippets.length ? `
+                    <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 8px;">出现片段</div>
+                    <div style="display: grid; gap: 8px; margin-bottom: 16px;">
+                        ${snippets.map(snippet => `
+                            <div style="padding: 9px; border-radius: 8px; border: 1px solid var(--border-color, #333); color: var(--text-secondary, #a5adbd); font-size: 12px; line-height: 1.5; background: var(--bg-workspace, rgba(255,255,255,0.03));">
+                                ${escapeHtml(snippet)}
+                            </div>
+                        `).join('')}
+                    </div>
+                ` : ''}
                 <div style="font-size: 12px; color: var(--text-secondary, #a5adbd); margin-bottom: 8px;">关联节点</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
-                    ${related.length ? related.map(title => `
-                        <button onclick="WikiModule.selectGraphNode('${escapeJsString(title)}')" style="padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border-color, #333); background: rgba(255,255,255,0.03); color: var(--text-primary, #fff); cursor: pointer; text-align: left; font-size: 12px;">
-                            ${escapeHtml(title)}
+                    ${related.length ? related.map(item => `
+                        <button onclick="WikiModule.selectGraphNode('${escapeJsString(item.id)}')" style="padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border-color, #333); background: var(--bg-workspace, rgba(255,255,255,0.03)); color: var(--text-primary, #fff); cursor: pointer; text-align: left; font-size: 12px;">
+                            <span style="display: block; color: var(--text-primary, #fff);">${escapeHtml(item.node?.label || item.id)}</span>
+                            <span style="display: block; color: var(--text-secondary, #a5adbd); margin-top: 3px;">${escapeHtml(getRelationLabel(item.edge))}</span>
                         </button>
                     `).join('') : '<span style="font-size: 12px; color: var(--text-secondary, #a5adbd);">暂无直接关联</span>'}
                 </div>
@@ -654,6 +842,17 @@
         wikiState.graphScope = scope;
         wikiState.selectedGraphNode = '';
         renderGraphView(wikiState.graphData);
+    }
+
+    function setGraphMode(mode) {
+        wikiState.graphMode = mode;
+        wikiState.selectedGraphNode = '';
+        renderGraphView(wikiState.graphData || { nodes: [], edges: [], statistics: {} });
+    }
+
+    function setGraphRange(range) {
+        wikiState.graphRange = range;
+        renderGraphView(wikiState.graphData || { nodes: [], edges: [], statistics: {} });
     }
 
     function filterGraphType(type) {
@@ -678,17 +877,12 @@
             background: var(--bg-panel, #171b2c); box-shadow: 0 18px 40px rgba(0,0,0,0.28);
         `;
         menu.innerHTML = `
-            <button data-action="open" style="${menuButtonStyle()}"><i class="ri-file-text-line"></i> 打开页面</button>
-            <button data-action="edit" style="${menuButtonStyle()}"><i class="ri-edit-line"></i> 编辑</button>
+            <button data-action="select" style="${menuButtonStyle()}"><i class="ri-focus-3-line"></i> 查看详情</button>
             <button data-action="worldbook" style="${menuButtonStyle()}"><i class="ri-add-line"></i> 添加到世界书</button>
         `;
-        menu.querySelector('[data-action="open"]')?.addEventListener('click', () => {
+        menu.querySelector('[data-action="select"]')?.addEventListener('click', () => {
             menu.remove();
-            viewPage(title);
-        });
-        menu.querySelector('[data-action="edit"]')?.addEventListener('click', () => {
-            menu.remove();
-            editPage(title);
+            selectGraphNode(title);
         });
         menu.querySelector('[data-action="worldbook"]')?.addEventListener('click', () => {
             menu.remove();
@@ -704,14 +898,14 @@
         return 'width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-primary, #fff); cursor: pointer; text-align: left;';
     }
 
-    function addGraphNodeToWorldbook(title) {
+    async function addGraphNodeToWorldbook(title) {
         const queue = JSON.parse(localStorage.getItem('wiki_worldbook_queue') || '[]');
         if (!queue.includes(title)) queue.push(title);
         localStorage.setItem('wiki_worldbook_queue', JSON.stringify(queue));
         if (typeof showToast === 'function') {
             showToast(`「${title}」已加入世界书待整理清单`);
         } else {
-            alert(`「${title}」已加入世界书待整理清单`);
+            await window.showAlertDialog(`「${title}」已加入世界书待整理清单`);
         }
     }
 
@@ -751,7 +945,7 @@
                         <div style="max-height: 440px; overflow-y: auto;">
                             ${d.issues.map(issue => `
                                 <div style="padding: 12px; border: 1px solid var(--border-color, #333);
-                                    border-radius: 8px; margin-bottom: 8px; background: rgba(255,255,255,0.03);">
+                                    border-radius: 8px; margin-bottom: 8px; background: var(--bg-panel, rgba(255,255,255,0.03));">
                                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px;">
                                         <span style="font-size: 11px; padding: 2px 8px; border-radius: 999px;
                                             background: ${getSeverityColor(issue.severity)}22;
@@ -760,7 +954,7 @@
                                         </span>
                                         <span style="font-size: 12px; color: var(--text-secondary, #888);">${escapeHtml(localizeIssueType(issue.type))}</span>
                                         <a href="javascript:void(0)" onclick="WikiModule.viewPage('${escapeJsString(issue.page || '')}')"
-                                            style="color: #8ab4ff; text-decoration: none; font-size: 13px;">${escapeHtml(issue.page || '未知页面')}</a>
+                                            style="color: var(--accent-color, #8ab4ff); text-decoration: none; font-size: 13px;">${escapeHtml(issue.page || '未知页面')}</a>
                                     </div>
                                     <div style="font-size: 13px;">${escapeHtml(issue.description || '')}</div>
                                     ${issue.suggestion ? `<div style="font-size: 12px; color: var(--text-secondary, #888); margin-top: 5px;">建议：${escapeHtml(issue.suggestion)}</div>` : ''}
@@ -838,7 +1032,7 @@
         const tags = document.getElementById('wiki-new-tags')?.value?.split(',').map(t => t.trim()).filter(Boolean);
         const body = document.getElementById('wiki-new-body')?.value;
 
-        if (!title) { alert('请输入标题'); return; }
+        if (!title) { await window.showAlertDialog('请输入标题'); return; }
 
         try {
             const resp = await fetch(`${WIKI_API}/pages`, {
@@ -851,32 +1045,37 @@
             if (data.success) {
                 viewPage(title);
             } else {
-                alert('创建失败: ' + (data.detail || '未知错误'));
+                await window.showAlertDialog('创建失败: ' + (data.detail || '未知错误'));
             }
         } catch (e) {
-            alert('创建失败: ' + e.message);
+            await window.showAlertDialog('创建失败: ' + e.message);
         }
     }
 
-    async function editPage(title) {
+    async function editPage(title, filePath = '') {
         try {
-            const resp = await fetch(`${WIKI_API}/pages/${encodeURIComponent(title)}`);
+            const endpoint = getPageEndpoint(title, filePath);
+            if (!endpoint) throw new Error('缺少页面标识');
+
+            const resp = await fetch(endpoint);
             const data = await resp.json();
             if (!data.success) throw new Error('获取失败');
 
             const page = data.data;
             const content = document.getElementById('wiki-content');
+            const displayTitle = getPageDisplayTitle(page);
+            const actionArgs = getPageActionArgs(page);
 
             content.innerHTML = `
                 <div style="max-width: 800px; padding: 20px;">
                     <div class="app-back-row">
-                        <button onclick="WikiModule.viewPage('${escapeJsString(title)}')" type="button" class="app-back-button">
+                        <button onclick="WikiModule.viewPage(${actionArgs})" type="button" class="app-back-button">
                             <i class="ri-arrow-left-line"></i>
                             <span>取消编辑</span>
                         </button>
                     </div>
 
-                    <h3>编辑: ${escapeHtml(title)}</h3>
+                    <h3>编辑: ${escapeHtml(displayTitle)}</h3>
 
                     <div style="margin-bottom: 12px;">
                         <label style="display: block; font-size: 12px; color: var(--text-secondary, #888); margin-bottom: 4px;">标签</label>
@@ -893,21 +1092,24 @@
                             font-family: monospace; resize: vertical;">${escapeHtml(page.body || '')}</textarea>
                     </div>
 
-                    <button onclick="WikiModule.submitEdit('${escapeJsString(title)}')" class="btn btn-primary"
+                    <button onclick="WikiModule.submitEdit(${actionArgs})" class="btn btn-primary"
                         style="padding: 10px 24px; border-radius: 6px;">保存</button>
                 </div>
             `;
         } catch (e) {
-            alert('加载失败: ' + e.message);
+            await window.showAlertDialog('加载失败: ' + e.message);
         }
     }
 
-    async function submitEdit(title) {
+    async function submitEdit(title, filePath = '') {
         const body = document.getElementById('wiki-edit-body')?.value;
         const tags = document.getElementById('wiki-edit-tags')?.value?.split(',').map(t => t.trim()).filter(Boolean);
 
         try {
-            const resp = await fetch(`${WIKI_API}/pages/${encodeURIComponent(title)}`, {
+            const endpoint = getPageEndpoint(title, filePath);
+            if (!endpoint) throw new Error('缺少页面标识');
+
+            const resp = await fetch(endpoint, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ body, tags }),
@@ -915,36 +1117,55 @@
             const data = await resp.json();
 
             if (data.success) {
-                viewPage(title);
+                viewPage(title, data.data?.file_path || filePath);
             } else {
-                alert('保存失败: ' + (data.detail || '未知错误'));
+                await window.showAlertDialog('保存失败: ' + (data.detail || '未知错误'));
             }
         } catch (e) {
-            alert('保存失败: ' + e.message);
+            await window.showAlertDialog('保存失败: ' + e.message);
         }
     }
 
-    async function deletePage(title) {
-        if (!confirm(`确定删除页面 "${title}" 吗？`)) return;
+    async function deletePage(title, filePath = '') {
+        const displayTitle = getPageDisplayTitle(title);
+        if (!(await confirmWikiAction(`确定删除页面 "${displayTitle}" 吗？`))) return;
 
         try {
-            const resp = await fetch(`${WIKI_API}/pages/${encodeURIComponent(title)}`, { method: 'DELETE' });
+            const endpoint = getPageEndpoint(title, filePath);
+            if (!endpoint) throw new Error('缺少页面标识');
+
+            const resp = await fetch(endpoint, { method: 'DELETE' });
             const data = await resp.json();
 
             if (data.success) {
                 loadPages();
             } else {
-                alert('删除失败');
+                await window.showAlertDialog('删除失败');
             }
         } catch (e) {
-            alert('删除失败: ' + e.message);
+            await window.showAlertDialog('删除失败: ' + e.message);
         }
     }
 
     function getVisiblePages(pages) {
+        const source = getSystemFilteredPages(pages);
+        if ((wikiState.sourceFilter || 'all') === 'all') return source;
+        return source.filter(page => getPageSourceMode(page) === wikiState.sourceFilter);
+    }
+
+    function getSystemFilteredPages(pages) {
         const source = Array.isArray(pages) ? pages : [];
         if (wikiState.showSystemPages) return source;
         return source.filter(page => !SYSTEM_PAGE_TYPES.has(page.page_type));
+    }
+
+    function getPageSourceMode(page) {
+        const direct = String(page?.source_mode || '').trim();
+        if (direct) return direct;
+        const tags = Array.isArray(page?.tags) ? page.tags : [];
+        const sourceTag = tags.find(tag => String(tag || '').toLowerCase().startsWith('source:'));
+        if (sourceTag) return String(sourceTag).slice('source:'.length).trim() || 'unknown';
+        return 'unknown';
     }
 
     function getPageTypeLabel(type) {
@@ -956,6 +1177,10 @@
     }
 
     function localizeTag(tag) {
+        const text = String(tag || '');
+        if (text.toLowerCase().startsWith('source:')) {
+            return SOURCE_LABELS[text.slice('source:'.length)] || text;
+        }
         return getPageTypeLabel(tag) !== tag ? getPageTypeLabel(tag) : String(tag || '');
     }
 
@@ -1044,7 +1269,7 @@
         return escapeHtml(text)
             .replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
                 const cleanTitle = title.trim();
-                return `<a href="javascript:void(0)" onclick="WikiModule.viewPage('${escapeJsString(cleanTitle)}')" style="color: #8ab4ff; text-decoration: none; border-bottom: 1px solid rgba(138,180,255,0.5);">${escapeHtml(cleanTitle)}</a>`;
+                return `<a href="javascript:void(0)" onclick="WikiModule.viewPage('${escapeJsString(cleanTitle)}')" style="color: var(--accent-color, #8ab4ff); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent-color, #8ab4ff) 50%, transparent);">${escapeHtml(cleanTitle)}</a>`;
             })
             .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     }
@@ -1099,6 +1324,7 @@
 
     function getGraphCategory(node) {
         const type = String(node?.type || '').toLowerCase();
+        if (GRAPH_CATEGORIES[type]) return type;
         const haystack = `${node?.label || ''} ${(node?.tags || []).join(' ')}`.toLowerCase();
         if (type === 'character') return 'character';
         if (haystack.match(/地点|location|城|宫|山|谷|地|门|宗$/)) return 'location';
@@ -1110,6 +1336,7 @@
     }
 
     function getRelationLabel(edge) {
+        if (edge?.label) return edge.label;
         const signals = edge?.signals || {};
         const firstKey = Object.keys(signals)[0];
         return RELATION_LABELS[firstKey] || RELATION_LABELS[edge?.type] || '相关';
@@ -1184,10 +1411,14 @@
         loadPages,
         search,
         filterType,
+        filterSource,
         toggleSystemPages,
         viewPage,
         showGraph,
+        analyzeRelationshipGraph,
         setGraphScope,
+        setGraphMode,
+        setGraphRange,
         filterGraphType,
         selectGraphNode,
         openGraphNodeMenu,
@@ -1201,6 +1432,7 @@
         __test: {
             cleanWikiBodyForReading,
             getPageTypeLabel,
+            getPageSourceMode,
             getGraphCategory,
         },
     };

@@ -257,8 +257,14 @@ class ChapterKnowledgeSyncService:
                 "title": title,
                 "content": "",
                 "chapter_number": chapter_number,
-                "metadata": {"empty_source": True},
+                "metadata": {
+                    "empty_source": True,
+                    "source_mode": str(row.get("source_mode") or "multi_agent").strip() or "multi_agent",
+                    "source_type": str(row.get("source_type") or "project_chapters").strip() or "project_chapters",
+                    "tags": row.get("tags") if isinstance(row.get("tags"), list) else ["source:multi_agent"],
+                },
             }
+        source_mode = str(row.get("source_mode") or "multi_agent").strip() or "multi_agent"
         return {
             "chapter_id": build_chapter_id(chapter_number),
             "title": title,
@@ -268,6 +274,9 @@ class ChapterKnowledgeSyncService:
                 "summary": str(row.get("summary") or "").strip(),
                 "created_at": str(row.get("created_at") or "").strip(),
                 "updated_at": str(row.get("updated_at") or "").strip(),
+                "source_mode": source_mode,
+                "source_type": str(row.get("source_type") or "project_chapters").strip() or "project_chapters",
+                "tags": row.get("tags") if isinstance(row.get("tags"), list) else [f"source:{source_mode}"],
             },
         }
 

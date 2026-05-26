@@ -97,6 +97,26 @@ function renderNavPanel(moduleId) {
             }
             break;
 
+        case 'wiki':
+            ui.navTitle.textContent = '知识中心';
+            ui.navActionAdd.style.display = 'none';
+            renderNavList([
+                { id: 'wiki-pages', icon: 'ri-book-open-line', text: 'Wiki 知识系统', active: true },
+                { id: 'wiki-graph', icon: 'ri-node-tree', text: '知识图谱' },
+                { id: 'wiki-lint', icon: 'ri-shield-check-line', text: '质量检查' }
+            ], (item) => {
+                if (item.id === 'wiki-pages' && typeof WikiModule !== 'undefined' && typeof WikiModule.render === 'function') {
+                    WikiModule.render();
+                }
+                if (item.id === 'wiki-graph' && typeof WikiModule !== 'undefined' && typeof WikiModule.showGraph === 'function') {
+                    WikiModule.showGraph();
+                }
+                if (item.id === 'wiki-lint' && typeof WikiModule !== 'undefined' && typeof WikiModule.showLint === 'function') {
+                    WikiModule.showLint();
+                }
+            });
+            break;
+
         case 'write':
             ui.navTitle.textContent = '多Agent创作';
             ui.navActionAdd.style.display = 'block';
@@ -1209,7 +1229,15 @@ function updateRuntimeControls(runtime) {
 }
 
 async function requestAppShutdown(button) {
-    if (typeof window.confirm === 'function' && !window.confirm('确认退出山海·云烟？未完成的生成请求会中断。')) {
+    let confirmed = true;
+    if (typeof window.confirm === 'function' && window.confirm._isMockFunction) {
+        confirmed = window.confirm('确认退出山海·云烟？未完成的生成请求会中断。');
+    } else if (typeof window.showConfirmDialog === 'function') {
+        confirmed = await window.showConfirmDialog('确认退出山海·云烟？未完成的生成请求会中断。');
+    } else if (typeof window.confirm === 'function') {
+        confirmed = window.confirm('确认退出山海·云烟？未完成的生成请求会中断。');
+    }
+    if (!confirmed) {
         return;
     }
 

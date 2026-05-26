@@ -155,21 +155,12 @@ class WorldbuilderAgent(BaseAgent):
 
         response = await self.call_llm(messages)
         
-        # 尝试解析JSON
-        try:
-            import json
-            # 提取JSON部分
-            if "```json" in response:
-                json_str = response.split("```json")[1].split("```")[0]
-            elif "```" in response:
-                json_str = response.split("```")[1].split("```")[0]
-            else:
-                json_str = response
-            
-            world_data = json.loads(json_str.strip())
-        except (json.JSONDecodeError, ValueError, IndexError):
-            # 解析失败则返回原始文本
-            world_data = {"raw_content": response}
+        from ..worldbuilding_persistence import normalize_worldbuilding_payload
+
+        normalized_world = normalize_worldbuilding_payload({"world": {"raw_content": response}})
+        world_data = normalized_world.get("world") if isinstance(normalized_world, dict) else {}
+        if not isinstance(world_data, dict) or not world_data:
+            world_data = {"raw_content": response, "needs_structuring": True}
 
         if isinstance(world_data, dict) and str(world_data.get("status") or "").strip().lower() == "missing_info":
             missing_items = world_data.get("missing_info")

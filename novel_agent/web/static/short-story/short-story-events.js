@@ -362,7 +362,7 @@ function bindShortStoryEvents() {
     });
 
     document.getElementById('short-story-reset')?.addEventListener('click', async () => {
-        if (!confirm('确定清空当前短篇流程吗？')) return;
+        if (!(await window.showConfirmDialog('确定清空当前短篇流程吗？'))) return;
         await resetShortStoryProjectState();
         await renderShortStoryInterface();
         showToast('当前流程已清空');

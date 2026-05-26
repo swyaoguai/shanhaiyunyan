@@ -67,6 +67,8 @@ class CoverPromptEnhancer:
             "fallback_fields": draft.get("fallback_fields", []),
             "project_context_empty": bool(draft.get("project_context_empty")),
             "custom_elements_empty": bool(draft.get("custom_elements_empty")),
+            "genre_design": draft.get("genre_design", {}),
+            "platform_rule": draft.get("platform_rule", ""),
             "font_template_rule": "字体模板只代表字形、材质、配色和光效，不代表题材、人物、背景或道具。",
         }
 
@@ -78,6 +80,7 @@ class CoverPromptEnhancer:
             "字体模板只代表文字字形、材质、配色和光效，不代表小说题材。"
             "禁止因为模板名、字体风格或颜色加入用户内容中没有出现的人物身份、背景、武器、门派、战甲或玄幻元素。"
             "如果项目资料为空，只能根据书名、创作想法和已有四项元素补全合理画面，不要假装知道不存在的剧情设定。"
+            "封面按番茄小说横版 800x600 设计，不要输出 3:4 或竖版比例要求。"
         )
         user_prompt = (
             "请把以下封面草稿补全为更适合生图模型理解的四个画面元素。\n"

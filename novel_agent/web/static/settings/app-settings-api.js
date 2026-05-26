@@ -37,8 +37,19 @@ async function saveActiveApiConfig(configId, model) {
     return response;
 }
 
+function notifyApiConfigsUpdated(detail = {}) {
+    window.dispatchEvent(new CustomEvent('api-configs-updated', { detail }));
+}
+window.notifyApiConfigsUpdated = notifyApiConfigsUpdated;
+
 function isBuiltinPresetApiConfig(config) {
     return Boolean(config && config.id === 'preset-tsc5' && !config.api_key_set && (!Array.isArray(config.models) || config.models.length === 0));
+}
+
+function getFirstConfiguredModel(config) {
+    return Array.isArray(config?.models)
+        ? String(config.models.find((item) => String(item || '').trim()) || '').trim()
+        : '';
 }
 
 async function testApiConnection(configId, model) {
@@ -51,10 +62,18 @@ async function testApiConnection(configId, model) {
         throw new Error('探索仓API不能直接测试。请先新建或选择一套已填写 Key 和模型的 API 配置');
     }
 
+    const textModels = typeof window.getTextModelsFromConfig === 'function'
+        ? window.getTextModelsFromConfig(selectedConfig)
+        : [];
+    const chosenModel = String(model || textModels[0] || '').trim();
+    if (!chosenModel) {
+        throw new Error('请先选择一个文本模型');
+    }
+
     return apiCall('/api/test-connection', 'POST', {
         api_base: selectedConfig.api_base,
         config_id: configId,
-        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        model: chosenModel,
         api_type: selectedConfig.api_type || 'openai_chat'
     });
 }
@@ -69,10 +88,21 @@ async function testImageApiConnection(configId, model) {
         throw new Error('探索仓API不能直接测试。请先新建或选择一套已填写 Key 和图片模型的 API 配置');
     }
 
+    const imageModels = typeof window.getImageModelsFromConfig === 'function'
+        ? window.getImageModelsFromConfig(selectedConfig)
+        : [];
+    const requestedModel = String(model || '').trim();
+    const chosenModel = imageModels.includes(requestedModel)
+        ? requestedModel
+        : (imageModels[0] || requestedModel || getFirstConfiguredModel(selectedConfig));
+    if (!chosenModel) {
+        throw new Error('请先为该配置添加图片模型');
+    }
+
     return apiCall('/api/test-image-connection', 'POST', {
         api_base: selectedConfig.api_base,
         config_id: configId,
-        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        model: chosenModel,
         api_type: selectedConfig.api_type || 'openai_chat',
         image_api_format: selectedConfig.image_api_format || 'auto'
     });
@@ -88,10 +118,18 @@ async function testAgentApiConnection(agentId, configId, model) {
         throw new Error('探索仓API不能直接测试。请先为这个Agent选择一套已填写 Key 和模型的 API 配置');
     }
 
+    const textModels = typeof window.getTextModelsFromConfig === 'function'
+        ? window.getTextModelsFromConfig(selectedConfig)
+        : [];
+    const chosenModel = String(model || textModels[0] || '').trim();
+    if (!chosenModel) {
+        throw new Error('请先为这个Agent选择文本模型');
+    }
+
     return apiCall('/api/test-connection', 'POST', {
         api_base: selectedConfig.api_base,
         config_id: configId,
-        model: model || (selectedConfig.models ? selectedConfig.models[0] : ''),
+        model: chosenModel,
         api_type: selectedConfig.api_type || 'openai_chat'
     });
 }

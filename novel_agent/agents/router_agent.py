@@ -527,6 +527,16 @@ class RouterAgent(BaseAgent):
         if isinstance(context.get("creation_requirements"), dict):
             return [self._build_intent_analysis(message, UserIntent.CREATE_NOVEL, confidence=1.0)]
 
+        routing_decision = context.get("routing_decision")
+        if isinstance(routing_decision, dict) and bool(routing_decision.get("execution_allowed")):
+            intent_name = str(routing_decision.get("intent") or context.get("intent") or "").strip()
+            try:
+                intent = UserIntent(intent_name)
+            except ValueError:
+                intent = None
+            if intent is not None:
+                return [self._build_intent_analysis(message, intent, confidence=1.0)]
+
         explicit_command = context.get("explicit_command")
         if not isinstance(explicit_command, dict):
             return []
@@ -3943,6 +3953,11 @@ class RouterAgent(BaseAgent):
         row["chapter_number"] = chapter_number
         row["title"] = chapter_title
         row["content"] = chapter_content
+        row["source_mode"] = "multi_agent"
+        row["source_type"] = "multi_agent_chapter"
+        row.setdefault("tags", [])
+        if isinstance(row["tags"], list) and "source:multi_agent" not in row["tags"]:
+            row["tags"].append("source:multi_agent")
         row["updated_at"] = timestamp
 
         pm.save_project_data("chapters", chapter_rows)
@@ -3961,6 +3976,11 @@ class RouterAgent(BaseAgent):
             legacy_row["chapter_number"] = chapter_number
             legacy_row["title"] = chapter_title
             legacy_row["content"] = chapter_content
+            legacy_row["source_mode"] = "multi_agent"
+            legacy_row["source_type"] = "multi_agent_chapter"
+            legacy_row.setdefault("tags", [])
+            if isinstance(legacy_row["tags"], list) and "source:multi_agent" not in legacy_row["tags"]:
+                legacy_row["tags"].append("source:multi_agent")
             legacy_row["updated_at"] = timestamp
             pm.save_project_data("outline", legacy_rows)
 
@@ -4000,7 +4020,12 @@ class RouterAgent(BaseAgent):
                     title=chapter_title,
                     content=chapter_content,
                 )
-                save_chapter_summary_to_library(chapter_number, summary, project_dir=pm.get_project_data_path("outline").parent)
+                save_chapter_summary_to_library(
+                    chapter_number,
+                    summary,
+                    project_dir=pm.get_project_data_path("outline").parent,
+                    source_mode="multi_agent",
+                )
                 try:
                     await index_chapter_summary_vector(pm.get_project_data_path("outline").parent, summary)
                 except Exception as vector_exc:
@@ -4016,6 +4041,180 @@ class RouterAgent(BaseAgent):
             "chapter_path": str(chapter_file),
             "chapter_status": "updated" if chapter_existed_before else "created",
         }
+
+    @classmethod
+    def _normalize_chapter_seed_rows(cls, rows: Any) -> List[Dict[str, Any]]:
+        if isinstance(rows, dict):
+            rows = rows.get("chapters")
+        if not isinstance(rows, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            content = strip_internal_author_markers(row.get("content"))
+            if not content:
+                continue
+            number = cls._normalize_positive_int(
+                row.get("chapter_number") or row.get("chapter") or row.get("number"),
+                index,
+            )
+            title = str(row.get("title") or row.get("name") or f"第{number}章").strip() or f"第{number}章"
+            word_count = cls._normalize_positive_int(row.get("word_count"), 0) or len(re.sub(r"\s+", "", content))
+            normalized.append({
+                "chapter_number": number,
+                "title": title,
+                "content": content,
+                "word_count": word_count,
+            })
+        by_number: Dict[int, Dict[str, Any]] = {}
+        for row in sorted(normalized, key=lambda item: int(item.get("chapter_number") or 0)):
+            number = int(row.get("chapter_number") or len(by_number) + 1)
+            if number not in by_number or len(str(row.get("content") or "")) > len(str(by_number[number].get("content") or "")):
+                by_number[number] = row
+        return [by_number[number] for number in sorted(by_number)]
+
+    @staticmethod
+    def _continuous_writer_has_chapters(writer: Any) -> bool:
+        try:
+            chapters = getattr(writer, "_written_chapters", None)
+            if isinstance(chapters, list) and chapters:
+                return True
+        except Exception:
+            pass
+        try:
+            state = getattr(writer, "_session_state", None)
+            chapters = getattr(state, "chapters", None)
+            return isinstance(chapters, list) and bool(chapters)
+        except Exception:
+            return False
+
+    def _load_continuous_chapters_from_project(self) -> tuple[List[Dict[str, Any]], str]:
+        from ..project_manager import get_project_manager
+
+        pm = get_project_manager()
+        if not pm.current_project_id:
+            return [], ""
+        try:
+            chapters = self._normalize_chapter_seed_rows(pm.load_project_data("chapters"))
+            if chapters:
+                return chapters, "project_chapters"
+        except Exception as exc:
+            logger.debug(f"[{self.name}] 从项目正文章节恢复续写上下文失败: {exc}")
+
+        try:
+            outline_rows = pm.load_project_data("outline")
+            chapters = self._normalize_chapter_seed_rows([
+                row for row in outline_rows
+                if isinstance(row, dict) and not self._is_global_outline_overview_row(row)
+            ])
+            if chapters:
+                return chapters, "project_outline"
+        except Exception as exc:
+            logger.debug(f"[{self.name}] 从项目大纲正文恢复续写上下文失败: {exc}")
+
+        return [], ""
+
+    def _load_continuous_chapters_from_knowledge_base(self) -> tuple[List[Dict[str, Any]], str]:
+        kb = self.knowledge_base
+        if not kb:
+            return [], ""
+        try:
+            chapter_infos = kb.list_chapters(order_by="chapter_number", ascending=True)
+        except Exception as exc:
+            logger.debug(f"[{self.name}] 列出知识库章节失败: {exc}")
+            return [], ""
+
+        rows: List[Dict[str, Any]] = []
+        for index, chapter in enumerate(chapter_infos or [], start=1):
+            try:
+                chapter_id = str(getattr(chapter, "chapter_id", "") or "").strip()
+                if not chapter_id:
+                    continue
+                content = strip_internal_author_markers(kb.get_chapter_content(chapter_id))
+                if not content:
+                    continue
+                number = self._normalize_positive_int(getattr(chapter, "chapter_number", None), index)
+                title = str(getattr(chapter, "title", "") or f"第{number}章").strip() or f"第{number}章"
+                rows.append({
+                    "chapter_number": number,
+                    "title": title,
+                    "content": content,
+                    "word_count": self._normalize_positive_int(getattr(chapter, "word_count", None), 0) or len(re.sub(r"\s+", "", content)),
+                })
+            except Exception as exc:
+                logger.debug(f"[{self.name}] 读取知识库章节内容失败: {exc}")
+        chapters = self._normalize_chapter_seed_rows(rows)
+        return (chapters, "knowledge_base") if chapters else ([], "")
+
+    def _load_latest_continuous_write_session_chapters(self, *, session_id: str, project_id: str) -> tuple[List[Dict[str, Any]], str]:
+        try:
+            from .session_store import get_session_store
+
+            session_store = get_session_store()
+            for info in session_store.list_sessions(project_id):
+                candidate_id = str(info.get("session_id") or "").strip()
+                if not candidate_id or candidate_id == session_id:
+                    continue
+                if int(info.get("chapter_count") or 0) <= 0:
+                    continue
+                state = session_store.load(candidate_id, project_id)
+                chapters = self._normalize_chapter_seed_rows(getattr(state, "chapters", None))
+                if chapters:
+                    return chapters, f"session:{candidate_id}"
+        except Exception as exc:
+            logger.debug(f"[{self.name}] 从其他续写会话恢复上下文失败: {exc}")
+        return [], ""
+
+    def _bootstrap_continuous_writer_from_existing_chapters(
+        self,
+        writer: Any,
+        *,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[str, Any]:
+        if self._continuous_writer_has_chapters(writer):
+            return {"restored": False, "reason": "writer_has_chapters"}
+
+        loaders = (
+            lambda: self._load_latest_continuous_write_session_chapters(session_id=session_id, project_id=project_id),
+            self._load_continuous_chapters_from_project,
+            self._load_continuous_chapters_from_knowledge_base,
+        )
+        chapters: List[Dict[str, Any]] = []
+        source = ""
+        for loader in loaders:
+            chapters, source = loader()
+            if chapters:
+                break
+        if not chapters:
+            return {"restored": False, "reason": "no_existing_chapters"}
+
+        current_chapter = max(int(ch.get("chapter_number") or 0) for ch in chapters)
+        try:
+            if getattr(writer, "_session_state", None) is None and hasattr(writer, "_load_or_create_session"):
+                writer._session_state = writer._load_or_create_session()
+            if hasattr(writer, "_apply_client_sync"):
+                result = writer._apply_client_sync(chapters, current_chapter, [])
+            else:
+                writer._written_chapters = chapters
+                writer._current_chapter = current_chapter
+                result = {"success": True, "current_chapter": current_chapter, "total_chapters": len(chapters)}
+            logger.info(
+                f"[{self.name}] 已从{source}恢复续写上下文: "
+                f"session={session_id}, project={project_id}, chapters={len(chapters)}, current={current_chapter}"
+            )
+            return {
+                "restored": True,
+                "source": source,
+                "chapter_count": len(chapters),
+                "current_chapter": current_chapter,
+                "sync_result": result,
+            }
+        except Exception as exc:
+            logger.warning(f"[{self.name}] 恢复续写上下文失败: {exc}")
+            return {"restored": False, "reason": "restore_failed", "error": str(exc)}
 
     def _ensure_project_metadata(
         self,
@@ -4381,6 +4580,11 @@ class RouterAgent(BaseAgent):
                 writer._session_state = writer._load_or_create_session()
             except Exception:
                 writer._session_state = None
+        bootstrap_result = self._bootstrap_continuous_writer_from_existing_chapters(
+            writer,
+            session_id=session_id,
+            project_id=project_id,
+        )
 
         await self._emit_progress(context, {
             "current_agent": "ContinuousWriter",
@@ -4404,8 +4608,11 @@ class RouterAgent(BaseAgent):
                 "is_complete": True,
                 "run_id": self._get_run_id(context),
                 "focus_chapter": int(chapter_number or 0),
-                "params": {"chapter_number": int(chapter_number or 0)},
-                "collected_info": {},
+                "params": {
+                    "chapter_number": int(chapter_number or 0),
+                    "bootstrap": bootstrap_result,
+                },
+                "collected_info": {"continuous_write_bootstrap": bootstrap_result} if bootstrap_result.get("restored") else {},
             }
 
         error = str(result.get("error") or "").strip()
@@ -4417,6 +4624,8 @@ class RouterAgent(BaseAgent):
             "error": error or "continue_failed",
             "is_complete": False,
             "run_id": self._get_run_id(context),
+            "params": {"bootstrap": bootstrap_result},
+            "collected_info": {"continuous_write_bootstrap": bootstrap_result} if bootstrap_result.get("restored") else {},
         }
 
     @staticmethod

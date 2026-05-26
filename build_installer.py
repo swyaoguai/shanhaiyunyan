@@ -34,6 +34,7 @@ from build_portable import (
     calculate_file_hash,
     check_requirements,
     prepare_release_data,
+    pyinstaller_knowledge_dependency_args,
     pyinstaller_optional_exclude_args,
     pyinstaller_skill_dependency_args,
 )
@@ -363,6 +364,7 @@ def _pyinstaller_common_args() -> list[str]:
         "pydantic",
     ]
     args.extend(pyinstaller_skill_dependency_args())
+    args.extend(pyinstaller_knowledge_dependency_args())
     args.extend(pyinstaller_optional_exclude_args())
 
     ico_path = ROOT_DIR / "logo.ico"

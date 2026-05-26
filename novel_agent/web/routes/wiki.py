@@ -6,13 +6,18 @@ Wiki 系统 API 路由
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from ...utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,29 @@ class WikiIngestRequest(BaseModel):
     source_name: str = "manual_input"
 
 
+class RelationshipGraphRequest(BaseModel):
+    mode: str = "character"
+    scope: str = "all"
+    chapter_start: Optional[int] = None
+    chapter_end: Optional[int] = None
+    center_id: Optional[str] = None
+
+
 # ===== 辅助函数 =====
+
+def _source_mode_from_tags(tags: Any) -> str:
+    from ...source_modes import source_mode_from_tags
+
+    return source_mode_from_tags(tags) or "unknown"
+
+
+def _ensure_page_source_tags(tags: Any, default_source_mode: str = "manual") -> list[str]:
+    from ...source_modes import ensure_source_tag, source_mode_from_tags
+
+    tag_list = list(tags or []) if isinstance(tags, list) else []
+    if source_mode_from_tags(tag_list):
+        return tag_list
+    return ensure_source_tag(tag_list, default_source_mode)
 
 def _get_wiki_compat():
     """获取 Wiki 兼容层实例"""
@@ -66,6 +93,347 @@ def _get_wiki_store():
     pm = get_project_manager()
     project_dir = pm.get_project_data_path("outline").parent
     return WikiStore(project_dir / "wiki")
+
+
+def _get_project_manager_and_dir():
+    from novel_agent.project_manager import get_project_manager
+    pm = get_project_manager()
+    if not pm.current_project_id:
+        raise HTTPException(status_code=400, detail="当前没有项目")
+    return pm, pm.get_current_project_dir()
+
+
+def _relationship_graph_path(project_dir: Path) -> Path:
+    graph_dir = project_dir / "wiki"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    return graph_dir / "relationship_graph.json"
+
+
+def _load_relationship_graph(project_dir: Path) -> dict[str, Any]:
+    path = _relationship_graph_path(project_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        logger.warning(f"[Wiki API] 读取关系图谱缓存失败: {exc}")
+        return {}
+
+
+def _save_relationship_graph(project_dir: Path, payload: dict[str, Any]) -> None:
+    path = _relationship_graph_path(project_dir)
+    old_content = path.read_text(encoding="utf-8") if path.exists() else None
+    atomic_write_json(path, payload, old_content=old_content, ensure_ascii=False, indent=2)
+
+
+def _positive_int(value: Any, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _chapter_number(chapter: dict[str, Any], fallback: int) -> int:
+    return _positive_int(chapter.get("chapter_number") or chapter.get("number"), fallback)
+
+
+def _select_graph_chapters(chapters: list[dict[str, Any]], req: RelationshipGraphRequest) -> list[dict[str, Any]]:
+    ordered = sorted(
+        [row for row in chapters if str(row.get("content") or "").strip()],
+        key=lambda row: _chapter_number(row, 999999),
+    )
+    if not ordered:
+        return []
+
+    scope = str(req.scope or "all").strip().lower()
+    if scope == "current":
+        return ordered[-1:]
+    if scope == "first5":
+        return ordered[:5]
+    if scope == "first10":
+        return ordered[:10]
+    if scope == "first15":
+        return ordered[:15]
+    if scope == "range":
+        start = _positive_int(req.chapter_start, 1)
+        end = _positive_int(req.chapter_end, start)
+        if end < start:
+            start, end = end, start
+        return [
+            row for row in ordered
+            if start <= _chapter_number(row, 0) <= end
+        ]
+    return ordered
+
+
+GRAPH_STOP_NAMES = {
+    "一个", "一种", "一下", "一声", "一眼", "一切", "所有", "这里", "那里", "这个", "那个",
+    "他们", "她们", "我们", "你们", "自己", "众人", "少年", "少女", "男人", "女人", "老人",
+    "时候", "地方", "东西", "事情", "声音", "目光", "脸色", "心中", "身后", "前方", "旁边",
+    "第一", "第二", "第三", "小说", "章节", "主角", "角色", "人物", "没有", "不是", "只是",
+}
+
+GRAPH_ENTITY_TYPES = {
+    "character": "角色",
+    "location": "地点",
+    "item": "物件",
+    "faction": "势力",
+    "event": "事件",
+    "power": "功法",
+    "clue": "线索",
+}
+
+GRAPH_CATEGORY_KEYWORDS = {
+    "location": ("城", "村", "镇", "山", "谷", "湖", "海", "河", "宫", "殿", "楼", "阁", "院", "站", "车站", "旅馆", "矿上", "家里", "旧城"),
+    "item": ("剑", "刀", "令", "灯", "符", "药", "书", "信", "照片", "报纸", "夹子", "纸板", "钥匙", "玉佩", "面包"),
+    "faction": ("宗", "门", "派", "族", "会", "盟", "公司", "王朝", "军", "队", "集团"),
+    "power": ("诀", "法", "术", "功", "心法", "神通", "灵力", "命运"),
+}
+
+GRAPH_RELATION_KEYWORDS = [
+    ("救", "救助"),
+    ("杀", "杀害"),
+    ("打", "冲突"),
+    ("追", "追逐"),
+    ("找", "寻找"),
+    ("偷", "盗取"),
+    ("骗", "欺骗"),
+    ("告诉", "告知"),
+    ("遇见", "相遇"),
+    ("看见", "目击"),
+    ("带", "同行"),
+    ("给", "交付"),
+    ("失踪", "失踪"),
+    ("死亡", "死亡"),
+    ("坠毁", "事故"),
+    ("逃", "逃离"),
+    ("回", "返回"),
+    ("离开", "离开"),
+    ("加入", "加入"),
+]
+
+GRAPH_EVENT_KEYWORDS = ("失踪", "死亡", "坠毁", "相遇", "战斗", "冲突", "救", "杀", "追", "逃", "发现", "离开", "返回", "出现", "消失", "告知", "背叛")
+
+
+def _normalize_entity_name(value: Any) -> str:
+    text = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9·_-]", "", str(value or "").strip())
+    return text[:18]
+
+
+def _iter_character_seed_names(raw: Any) -> list[str]:
+    names: list[str] = []
+    if isinstance(raw, dict):
+        iterable = raw.values()
+    elif isinstance(raw, list):
+        iterable = raw
+    else:
+        iterable = []
+    for item in iterable:
+        if isinstance(item, dict):
+            for key in ("name", "姓名", "title"):
+                name = _normalize_entity_name(item.get(key))
+                if name:
+                    names.append(name)
+                    break
+        else:
+            name = _normalize_entity_name(item)
+            if name:
+                names.append(name)
+    return names
+
+
+def _guess_entity_type(name: str, character_names: set[str]) -> str:
+    if name in character_names:
+        return "character"
+    for entity_type, keywords in GRAPH_CATEGORY_KEYWORDS.items():
+        if any(keyword in name for keyword in keywords):
+            return entity_type
+    if len(name) in (2, 3) and name not in GRAPH_STOP_NAMES:
+        return "character"
+    return "clue"
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [
+        item.strip()
+        for item in re.split(r"(?<=[。！？；;.!?])", text)
+        if item.strip()
+    ]
+
+
+def _extract_candidate_names(text: str, character_names: set[str]) -> list[str]:
+    candidates = set(character_names)
+    for match in re.finditer(r"[\u4e00-\u9fa5·]{2,8}", text):
+        name = _normalize_entity_name(match.group(0))
+        if not name or name in GRAPH_STOP_NAMES:
+            continue
+        if len(name) > 4 and not any(keyword in name for keywords in GRAPH_CATEGORY_KEYWORDS.values() for keyword in keywords):
+            continue
+        if any(stop in name for stop in GRAPH_STOP_NAMES):
+            continue
+        candidates.add(name)
+    return sorted(candidates, key=lambda value: (-len(value), value))
+
+
+def _relation_label(sentence: str) -> str:
+    for keyword, label in GRAPH_RELATION_KEYWORDS:
+        if keyword in sentence:
+            return label
+    return "共现"
+
+
+def _event_title(chapter_number: int, sentence: str, index: int) -> str:
+    clean = re.sub(r"\s+", "", sentence)
+    clean = re.sub(r"[“”\"'‘’]", "", clean)
+    if len(clean) > 18:
+        clean = clean[:18]
+    return clean or f"第{chapter_number}章事件{index}"
+
+
+def _build_relationship_graph_payload(chapters: list[dict[str, Any]], req: RelationshipGraphRequest, character_seed_names: list[str]) -> dict[str, Any]:
+    mode = str(req.mode or "character").strip().lower()
+    if mode not in {"character", "event", "compass"}:
+        mode = "character"
+
+    character_names = {name for name in character_seed_names if name}
+    full_text = "\n".join(str(row.get("content") or "") for row in chapters)
+    candidates = _extract_candidate_names(full_text, character_names)
+    character_names.update(name for name in candidates if len(name) in (2, 3))
+
+    node_map: dict[str, dict[str, Any]] = {}
+    edge_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def ensure_node(name: str, entity_type: str, chapter_number: int, snippet: str = "") -> dict[str, Any]:
+        name = _normalize_entity_name(name)
+        if not name:
+            raise ValueError("empty node name")
+        node_id = f"{entity_type}:{name}"
+        node = node_map.setdefault(node_id, {
+            "id": node_id,
+            "label": name,
+            "type": entity_type,
+            "type_label": GRAPH_ENTITY_TYPES.get(entity_type, entity_type),
+            "degree": 0,
+            "chapters": [],
+            "snippets": [],
+            "summary": "",
+        })
+        if chapter_number and chapter_number not in node["chapters"]:
+            node["chapters"].append(chapter_number)
+        if snippet and len(node["snippets"]) < 3:
+            node["snippets"].append(snippet[:90])
+        return node
+
+    def add_edge(source: str, target: str, label: str, chapter_number: int, snippet: str = "", edge_type: str = "co_occurrence") -> None:
+        if not source or not target or source == target:
+            return
+        left, right = sorted([source, target])
+        key = (left, right, label)
+        edge = edge_map.setdefault(key, {
+            "source": left,
+            "target": right,
+            "label": label,
+            "type": edge_type,
+            "weight": 0,
+            "chapters": [],
+            "snippets": [],
+        })
+        edge["weight"] += 1
+        if chapter_number and chapter_number not in edge["chapters"]:
+            edge["chapters"].append(chapter_number)
+        if snippet and len(edge["snippets"]) < 2:
+            edge["snippets"].append(snippet[:100])
+
+    for chapter_index, chapter in enumerate(chapters, start=1):
+        chapter_number = _chapter_number(chapter, chapter_index)
+        title = str(chapter.get("title") or f"第{chapter_number}章").strip()
+        content = str(chapter.get("content") or "")
+        sentences = _split_sentences(content)
+        chapter_entities: set[str] = set()
+
+        for sentence in sentences[:260]:
+            present_names = []
+            for name in candidates[:160]:
+                if name and name in sentence:
+                    entity_type = _guess_entity_type(name, character_names)
+                    try:
+                        node = ensure_node(name, entity_type, chapter_number, sentence)
+                        present_names.append(node["id"])
+                        chapter_entities.add(node["id"])
+                    except ValueError:
+                        continue
+            present_names = list(dict.fromkeys(present_names))[:8]
+            if len(present_names) >= 2:
+                label = _relation_label(sentence)
+                for i, source in enumerate(present_names):
+                    for target in present_names[i + 1:]:
+                        add_edge(source, target, label, chapter_number, sentence)
+
+        event_sentences = [sentence for sentence in sentences if any(keyword in sentence for keyword in GRAPH_EVENT_KEYWORDS)]
+        for event_index, sentence in enumerate(event_sentences[:4], start=1):
+            event_name = _event_title(chapter_number, sentence, event_index)
+            event_node = ensure_node(f"第{chapter_number}章·{event_name}", "event", chapter_number, sentence)
+            for entity_id in list(chapter_entities)[:10]:
+                add_edge(event_node["id"], entity_id, _relation_label(sentence), chapter_number, sentence, "event_link")
+
+        if not event_sentences and title:
+            event_node = ensure_node(f"第{chapter_number}章·{title[:12]}", "event", chapter_number, title)
+            for entity_id in list(chapter_entities)[:8]:
+                add_edge(event_node["id"], entity_id, "出现", chapter_number, title, "event_link")
+
+    event_nodes = sorted(
+        [node for node in node_map.values() if node["type"] == "event"],
+        key=lambda node: (min(node["chapters"] or [999999]), node["label"]),
+    )
+    for left, right in zip(event_nodes, event_nodes[1:]):
+        add_edge(left["id"], right["id"], "推进", min(right["chapters"] or [0]), "", "timeline")
+
+    nodes = list(node_map.values())
+    edges = list(edge_map.values())
+    degree_count: dict[str, int] = {}
+    for edge in edges:
+        degree_count[edge["source"]] = degree_count.get(edge["source"], 0) + 1
+        degree_count[edge["target"]] = degree_count.get(edge["target"], 0) + 1
+    for node in nodes:
+        node["degree"] = degree_count.get(node["id"], 0)
+        node["chapters"] = sorted(node["chapters"])
+        node["summary"] = f"{node['type_label']}，出现于第{', '.join(map(str, node['chapters'][:5]))}章" if node["chapters"] else node["type_label"]
+
+    if mode == "character":
+        allowed = {"character", "faction", "location", "item", "power"}
+    elif mode == "event":
+        allowed = {"event", "character", "location", "clue"}
+    else:
+        allowed = {"character", "event", "location", "item", "faction", "power", "clue"}
+    filtered_ids = {node["id"] for node in nodes if node["type"] in allowed}
+    nodes = [node for node in nodes if node["id"] in filtered_ids]
+    edges = [edge for edge in edges if edge["source"] in filtered_ids and edge["target"] in filtered_ids]
+
+    nodes.sort(key=lambda node: (-int(node.get("degree") or 0), min(node.get("chapters") or [999999]), node["label"]))
+    nodes = nodes[:80]
+    kept_ids = {node["id"] for node in nodes}
+    edges = [edge for edge in edges if edge["source"] in kept_ids and edge["target"] in kept_ids]
+    edges.sort(key=lambda edge: (-int(edge.get("weight") or 0), edge["label"]))
+    edges = edges[:160]
+
+    statistics = {
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "chapters": len(chapters),
+        "characters": sum(1 for node in nodes if node["type"] == "character"),
+        "events": sum(1 for node in nodes if node["type"] == "event"),
+    }
+    return {
+        "mode": mode,
+        "scope": req.scope,
+        "center_id": req.center_id or "",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "nodes": nodes,
+        "edges": edges,
+        "statistics": statistics,
+    }
 
 
 # ===== 页面 CRUD =====
@@ -89,10 +457,12 @@ async def list_pages(
                     "title": p.title,
                     "page_type": p.page_type.value,
                     "tags": p.tags,
+                    "source_mode": _source_mode_from_tags(p.tags),
                     "sources": p.sources,
                     "word_count": len(p.body.replace(" ", "").replace("\n", "")),
                     "links_out": p.extract_wikilinks(),
                     "updated_at": p.frontmatter.updated_at,
+                    "file_path": str(p.file_path) if p.file_path else None,
                 }
                 for p in pages
             ],
@@ -100,6 +470,42 @@ async def list_pages(
         })
     except Exception as e:
         logger.error(f"[Wiki API] 列出页面失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pages/by-file")
+async def get_page_by_file(file_path: str):
+    """按文件路径获取 wiki 页面，用于空标题页面。"""
+    try:
+        store = _get_wiki_store()
+        page = store.load_page_by_path(Path(file_path))
+        if not page:
+            raise HTTPException(status_code=404, detail=f"页面不存在: {file_path}")
+
+        backlinks = store.get_backlinks(page.title) if page.title else []
+
+        return JSONResponse({
+            "success": True,
+            "data": {
+                "title": page.title,
+                "page_type": page.page_type.value,
+                "body": page.body,
+                "tags": page.tags,
+                "source_mode": _source_mode_from_tags(page.tags),
+                "sources": page.sources,
+                "entities": page.entities,
+                "links_out": page.extract_wikilinks(),
+                "links_in": [p.title for p in backlinks],
+                "word_count": len(page.body.replace(" ", "").replace("\n", "")),
+                "created_at": page.frontmatter.created_at,
+                "updated_at": page.frontmatter.updated_at,
+                "file_path": str(page.file_path) if page.file_path else None,
+            },
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wiki API] 按文件路径获取页面失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -122,6 +528,7 @@ async def get_page(title: str):
                 "page_type": page.page_type.value,
                 "body": page.body,
                 "tags": page.tags,
+                "source_mode": _source_mode_from_tags(page.tags),
                 "sources": page.sources,
                 "entities": page.entities,
                 "links_out": page.extract_wikilinks(),
@@ -152,7 +559,7 @@ async def create_page(data: WikiPageCreate):
             frontmatter=Frontmatter(
                 page_type=pt,
                 title=data.title,
-                tags=data.tags,
+                tags=_ensure_page_source_tags(data.tags, "manual"),
                 sources=data.sources,
                 created_at=now_iso(),
                 updated_at=now_iso(),
@@ -174,19 +581,19 @@ async def create_page(data: WikiPageCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/pages/{title}")
-async def update_page(title: str, data: WikiPageUpdate):
-    """更新 wiki 页面"""
+@router.put("/pages/by-file")
+async def update_page_by_file(file_path: str, data: WikiPageUpdate):
+    """按文件路径更新 wiki 页面，用于空标题页面。"""
     try:
         store = _get_wiki_store()
-        page = store.load_page(title)
+        page = store.load_page_by_path(Path(file_path))
         if not page:
-            raise HTTPException(status_code=404, detail=f"页面不存在: {title}")
-        
+            raise HTTPException(status_code=404, detail=f"页面不存在: {file_path}")
+
         if data.body is not None:
             page.body = data.body
         if data.tags is not None:
-            page.frontmatter.tags = data.tags
+            page.frontmatter.tags = _ensure_page_source_tags(data.tags, "manual")
         if data.sources is not None:
             page.frontmatter.sources = data.sources
         
@@ -202,7 +609,55 @@ async def update_page(title: str, data: WikiPageUpdate):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[Wiki API] 按文件路径更新页面失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/pages/{title}")
+async def update_page(title: str, data: WikiPageUpdate):
+    """更新 wiki 页面"""
+    try:
+        store = _get_wiki_store()
+        page = store.load_page(title)
+        if not page:
+            raise HTTPException(status_code=404, detail=f"页面不存在: {title}")
+        
+        if data.body is not None:
+            page.body = data.body
+        if data.tags is not None:
+            page.frontmatter.tags = _ensure_page_source_tags(data.tags, "manual")
+        if data.sources is not None:
+            page.frontmatter.sources = data.sources
+
+        file_path = store.save_page(page)
+        
+        return JSONResponse({
+            "success": True,
+            "data": {
+                "title": page.title,
+                "file_path": str(file_path),
+            },
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
         logger.error(f"[Wiki API] 更新页面失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/pages/by-file")
+async def delete_page_by_file(file_path: str):
+    """按文件路径删除 wiki 页面，用于空标题页面。"""
+    try:
+        store = _get_wiki_store()
+        result = store.delete_page_by_path(Path(file_path))
+        if not result:
+            raise HTTPException(status_code=404, detail=f"页面不存在: {file_path}")
+        return JSONResponse({"success": True})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wiki API] 按文件路径删除页面失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -259,6 +714,7 @@ async def text_search(q: str, top_k: int = 10):
                     "page_type": p.page_type.value,
                     "summary": p.body[:200],
                     "tags": p.tags,
+                    "source_mode": _source_mode_from_tags(p.tags),
                 }
                 for p in pages
             ],
@@ -349,6 +805,63 @@ async def get_graph_insights():
         })
     except Exception as e:
         logger.error(f"[Wiki API] 获取图谱洞察失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/relationship-graph")
+async def get_relationship_graph():
+    """获取当前项目已缓存的小说关系图谱。"""
+    try:
+        _, project_dir = _get_project_manager_and_dir()
+        payload = _load_relationship_graph(project_dir)
+        return JSONResponse({
+            "success": True,
+            "data": payload or {
+                "nodes": [],
+                "edges": [],
+                "statistics": {"nodes": 0, "edges": 0, "chapters": 0, "characters": 0, "events": 0},
+                "generated_at": "",
+                "mode": "character",
+                "scope": "all",
+            },
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wiki API] 获取小说关系图谱失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/relationship-graph/analyze")
+async def analyze_relationship_graph(data: RelationshipGraphRequest):
+    """从当前项目章节正文生成小说关系图谱。"""
+    try:
+        pm, project_dir = _get_project_manager_and_dir()
+        chapters = pm.load_project_data("chapters")
+        if not isinstance(chapters, list) or not chapters:
+            return JSONResponse({
+                "success": True,
+                "data": {
+                    "nodes": [],
+                    "edges": [],
+                    "statistics": {"nodes": 0, "edges": 0, "chapters": 0, "characters": 0, "events": 0},
+                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                    "mode": data.mode,
+                    "scope": data.scope,
+                    "message": "当前项目还没有可分析的章节正文。",
+                },
+            })
+
+        selected_chapters = _select_graph_chapters(chapters, data)
+        character_seed_names = _iter_character_seed_names(pm.load_project_data("characters"))
+        payload = _build_relationship_graph_payload(selected_chapters, data, character_seed_names)
+        _save_relationship_graph(project_dir, payload)
+
+        return JSONResponse({"success": True, "data": payload})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wiki API] 分析小说关系图谱失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

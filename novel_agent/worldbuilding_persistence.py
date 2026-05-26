@@ -19,17 +19,59 @@ def _extract_fenced_json_text(raw_content: str) -> str:
     return (fenced_match.group(1) if fenced_match else text).strip()
 
 
+def _extract_json_object_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    start = value.find("{")
+    if start < 0:
+        return value
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(value[start:], start):
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return value[start:index + 1].strip()
+    return value[start:].strip()
+
+
+def _normalize_json_like_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    normalized = normalized.replace("\ufeff", "")
+    normalized = normalized.replace("“", '"').replace("”", '"')
+    normalized = normalized.replace("‘", "'").replace("’", "'")
+    normalized = re.sub(r'(?<=")\s*，\s*(?=")', ", ", normalized)
+    normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+    return normalized
+
+
 def _parse_raw_worldbuilding_content(raw_content: str) -> Dict[str, Any]:
     text = _extract_fenced_json_text(raw_content)
     if not text:
         return {}
-    normalized_text = re.sub(r'(?<=")\s*，\s*(?=")', ", ", text)
+    normalized_text = _normalize_json_like_text(_extract_json_object_text(text))
     try:
         parsed = json.loads(normalized_text)
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         logger.warning("[WorldbuildingPersistence] raw_content JSON parse failed; keeping text summary")
-        return {"raw_content": text}
+        return {"raw_content": text, "needs_structuring": True}
 
 
 def _looks_like_embedded_world_json(value: Any) -> bool:
@@ -89,7 +131,7 @@ def merge_worldbuilding_payload(existing_payload: Any, incoming_payload: Any) ->
     incoming_world = incoming["world"]
     next_world.update(incoming_world)
     if "raw_content" in next_world and any(
-        key != "raw_content" and value not in (None, "", [], {})
+        key not in {"raw_content", "needs_structuring"} and value not in (None, "", [], {})
         for key, value in incoming_world.items()
     ):
         next_world.pop("raw_content", None)
@@ -113,6 +155,8 @@ def persist_worldbuilding_project_data(
     payload: Any,
     *,
     project_manager: Any = None,
+    source_mode: str = "",
+    source_type: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Persist generated worldbuilding to the active project's canonical data file."""
     if project_manager is None:
@@ -126,6 +170,15 @@ def persist_worldbuilding_project_data(
     normalized = normalize_worldbuilding_payload(payload)
     if not normalized:
         return None
+
+    if source_mode:
+        from .source_modes import annotate_payload_source
+
+        normalized = annotate_payload_source(
+            normalized,
+            source_mode,
+            source_type=source_type or None,
+        )
 
     existing_payload = project_manager.load_project_data("worldbuilding")
     merged_payload = merge_worldbuilding_payload(existing_payload, normalized)

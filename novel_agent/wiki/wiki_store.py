@@ -163,17 +163,53 @@ class WikiStore:
         Returns:
             WikiPage 或 None
         """
-        full_path = self._wiki_dir / file_path
+        safe_path = self._safe_relative_path(file_path)
+        if safe_path is None:
+            return None
+
+        full_path = self._wiki_dir / safe_path
         if not full_path.exists():
             return None
         
         try:
             content = full_path.read_text(encoding="utf-8")
-            page = WikiPage.from_markdown(content, file_path=file_path)
+            page = WikiPage.from_markdown(content, file_path=safe_path)
             return page
         except Exception as e:
-            logger.warning(f"[WikiStore] 加载页面失败 {file_path}: {e}")
+            logger.warning(f"[WikiStore] 加载页面失败 {safe_path}: {e}")
             return None
+
+    def delete_page_by_path(self, file_path: Path) -> bool:
+        """
+        按文件路径删除页面，用于处理空标题或重名标题页面。
+
+        Args:
+            file_path: 相对于 wiki_dir 的路径
+
+        Returns:
+            是否删除成功
+        """
+        with self._lock:
+            safe_path = self._safe_relative_path(file_path)
+            if safe_path is None:
+                return False
+
+            page = self.load_page_by_path(safe_path)
+            full_path = self._wiki_dir / safe_path
+            if not full_path.exists():
+                return False
+
+            full_path.unlink()
+
+            if page:
+                cached = self._page_cache.get(page.title)
+                if cached and cached.file_path == safe_path:
+                    self._page_cache.pop(page.title, None)
+            self._hash_cache.pop(str(safe_path), None)
+            self._save_hash_cache()
+
+            logger.info(f"[WikiStore] 删除页面: {safe_path}")
+            return True
 
     def delete_page(self, title: str) -> bool:
         """
@@ -373,6 +409,21 @@ class WikiStore:
         if subdir:
             return Path(subdir) / filename
         return Path(filename)
+
+    def _safe_relative_path(self, file_path: Path) -> Optional[Path]:
+        """校验 wiki 内部相对路径，避免越权访问。"""
+        try:
+            raw_path = Path(file_path)
+            if raw_path.is_absolute():
+                return None
+            full_path = (self._wiki_dir / raw_path).resolve()
+            wiki_root = self._wiki_dir.resolve()
+            full_path.relative_to(wiki_root)
+            if full_path.suffix.lower() != ".md":
+                return None
+            return full_path.relative_to(wiki_root)
+        except Exception:
+            return None
 
     def _scan_all_pages(self) -> None:
         """扫描 wiki 目录，加载所有页面到缓存"""

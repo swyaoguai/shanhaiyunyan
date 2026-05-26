@@ -225,7 +225,14 @@ def recover_project_data(data_type: str, project_manager: Any, existing_payload:
     return None
 
 
-def persist_project_data(data_type: str, data: Any, *, project_manager: Any = None) -> Any:
+def persist_project_data(
+    data_type: str,
+    data: Any,
+    *,
+    project_manager: Any = None,
+    source_mode: str = "",
+    source_type: str = "",
+) -> Any:
     if project_manager is None:
         from .project_manager import get_project_manager
 
@@ -233,12 +240,18 @@ def persist_project_data(data_type: str, data: Any, *, project_manager: Any = No
     if not getattr(project_manager, "current_project_id", None):
         return data
 
-    project_manager.save_project_data(data_type, data)
+    payload = data
+    if source_mode:
+        from .source_modes import annotate_payload_source
+
+        payload = annotate_payload_source(data, source_mode, source_type=source_type or None)
+
+    project_manager.save_project_data(data_type, payload)
     try:
         from .library_service import get_library_service
 
         svc = get_library_service(project_manager.get_current_project_dir())
-        svc.upsert_from_legacy(data_type, data)
+        svc.upsert_from_legacy(data_type, payload)
     except Exception as exc:
         logger.debug(f"[ProjectDataRecovery] Library sync failed for {data_type}: {exc}")
-    return data
+    return payload

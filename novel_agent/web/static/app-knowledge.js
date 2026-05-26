@@ -23,10 +23,10 @@ function renderKnowledgeNavPanel(options = {}) {
         title.textContent = '资料库';
         ui.navList.appendChild(title);
     }
-    
+
     // 内置资料库分类
     const builtinCategories = store.knowledgeCategories.filter(c => c.builtin);
-    
+
     builtinCategories.forEach(cat => {
         const count = getKnowledgeCategoryCount(cat);
         const div = document.createElement('div');
@@ -43,22 +43,22 @@ function renderKnowledgeNavPanel(options = {}) {
         });
         ui.navList.appendChild(div);
     });
-    
+
     // 自定义资料库分类
     const customCategories = store.knowledgeCategories.filter(c => !c.builtin);
-    
+
     if (customCategories.length > 0) {
         // 分隔线
         const separator = document.createElement('div');
         separator.style.cssText = 'height: 1px; background: var(--border-color); margin: 12px 8px;';
         ui.navList.appendChild(separator);
-        
+
         // 自定义分类标题
         const customTitle = document.createElement('div');
         customTitle.style.cssText = 'font-size: 11px; color: var(--text-secondary); padding: 8px 12px; opacity: 0.7;';
         customTitle.textContent = '自定义资料库';
         ui.navList.appendChild(customTitle);
-        
+
         customCategories.forEach(cat => {
             const count = (store.projectData[cat.key] || []).length;
             const div = document.createElement('div');
@@ -72,19 +72,19 @@ function renderKnowledgeNavPanel(options = {}) {
                     <i class="ri-delete-bin-line" style="font-size: 12px;"></i>
                 </button>
             `;
-            
+
             div.addEventListener('mouseenter', () => {
                 div.querySelector('.delete-category-btn').style.opacity = '1';
             });
             div.addEventListener('mouseleave', () => {
                 div.querySelector('.delete-category-btn').style.opacity = '0';
             });
-            
+
             div.querySelector('.delete-category-btn').addEventListener('click', (e) => {
                 e.stopPropagation();
                 deleteKnowledgeCategory(cat.id);
             });
-            
+
             window.makeElementActivatable(div, (e) => {
                 if (!e.target.closest('.delete-category-btn')) {
                     ui.navList.querySelectorAll('.list-item').forEach(el => el.classList.remove('active'));
@@ -97,7 +97,7 @@ function renderKnowledgeNavPanel(options = {}) {
             ui.navList.appendChild(div);
         });
     }
-    
+
     // 添加新资料库按钮
     const addBtn = document.createElement('div');
     addBtn.className = 'list-item';
@@ -120,13 +120,13 @@ function showAddKnowledgeCategoryDialog() {
                     <i class="ri-folder-add-line" style="margin-right: 8px;"></i>
                     添加新资料库
                 </h3>
-                
+
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">资料库名称</label>
                     <input type="text" id="new-category-name" placeholder="例如：势力阵营、技能体系..."
                         style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 8px; font-size: 14px;">
                 </div>
-                
+
                 <div style="margin-bottom: 24px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">选择图标</label>
                     <div id="icon-picker" style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px;">
@@ -140,7 +140,7 @@ function showAddKnowledgeCategoryDialog() {
                             `).join('')}
                     </div>
                 </div>
-                
+
                 <div style="display: flex; gap: 12px;">
                     <button id="cancel-add-category" style="flex: 1; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">取消</button>
                     <button id="confirm-add-category" style="flex: 1; padding: 12px; background: var(--accent-color); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">创建</button>
@@ -148,9 +148,9 @@ function showAddKnowledgeCategoryDialog() {
             </div>
         </div>
     `;
-    
+
     let selectedIcon = 'ri-folder-line';
-    
+
     // 图标选择
     modal.querySelectorAll('.icon-option').forEach(opt => {
         opt.addEventListener('click', () => {
@@ -163,13 +163,13 @@ function showAddKnowledgeCategoryDialog() {
             selectedIcon = opt.dataset.icon;
         });
     });
-    
+
     // 取消
     document.getElementById('cancel-add-category').addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
+
     // 确认
     document.getElementById('confirm-add-category').addEventListener('click', () => {
         const name = document.getElementById('new-category-name').value.trim();
@@ -177,7 +177,7 @@ function showAddKnowledgeCategoryDialog() {
             showToast('请输入资料库名称', 'error');
             return;
         }
-        
+
         addKnowledgeCategory(name, selectedIcon);
         modal.classList.add('hidden');
         modal.innerHTML = '';
@@ -188,7 +188,7 @@ function addKnowledgeCategory(name, icon) {
     // 生成唯一ID和key
     const id = `db-custom-${Date.now()}`;
     const key = `custom_${Date.now()}`;
-    
+
     // 添加到分类列表
     store.knowledgeCategories.push({
         id: id,
@@ -197,39 +197,39 @@ function addKnowledgeCategory(name, icon) {
         icon: icon,
         builtin: false
     });
-    
+
     // 初始化数据
     store.projectData[key] = [];
-    
+
     // 保存到本地存储
     saveKnowledgeCategories();
-    
+
     // 刷新导航
     renderKnowledgeNavPanel();
-    
+
     showToast(`资料库「${name}」创建成功`);
 }
 
-function deleteKnowledgeCategory(categoryId) {
+async function deleteKnowledgeCategory(categoryId) {
     const category = store.knowledgeCategories.find(c => c.id === categoryId);
     if (!category) return;
-    
+
     const count = (store.projectData[category.key] || []).length;
-    
-    if (confirm(`确定要删除资料库「${category.name}」吗？\n\n该分类下有 ${count} 条内容将被一并删除，此操作不可恢复！`)) {
+
+    if (await window.showConfirmDialog(`确定要删除资料库「${category.name}」吗？\n\n该分类下有 ${count} 条内容将被一并删除，此操作不可恢复！`)) {
         // 删除分类
         store.knowledgeCategories = store.knowledgeCategories.filter(c => c.id !== categoryId);
-        
+
         // 删除数据
         delete store.projectData[category.key];
-        
+
         // 保存
         saveKnowledgeCategories();
-        
+
         // 刷新导航
         renderKnowledgeNavPanel();
         showEmptyWorld();
-        
+
         showToast(`资料库「${category.name}」已删除`);
     }
 }
@@ -302,6 +302,16 @@ function isServerBackedKnowledgeKey(key) {
 // ===== 设定管理功能 =====
 
 let currentSettingType = null;
+let knowledgeSourceFilter = 'all';
+const KNOWLEDGE_SOURCE_FILTERS = [
+    { key: 'all', label: '全部来源' },
+    { key: 'multi_agent', label: '多Agent' },
+    { key: 'infinite_write', label: '无限续写' },
+    { key: 'manual_import', label: '手动导入' },
+    { key: 'manual', label: '手动创建' },
+    { key: 'unknown', label: '未标记' },
+];
+const KNOWLEDGE_SOURCE_LABELS = Object.fromEntries(KNOWLEDGE_SOURCE_FILTERS.map(item => [item.key, item.label]));
 let knowledgeWorkbenchState = {
     activeNodeId: '',
     searchQuery: '',
@@ -505,6 +515,9 @@ function buildFreeformKnowledgeItem(category, values) {
         details: content,
         notes,
         manual_mode: 'freeform',
+        source_mode: 'manual',
+        source_type: 'manual_knowledge',
+        tags: ['source:manual'],
     };
 
     if (category?.key === 'outline') {
@@ -628,6 +641,86 @@ function getKnowledgeCategoryData(category) {
         return overview ? [overview] : [];
     }
     return data;
+}
+
+function normalizeKnowledgeSourceMode(value) {
+    const raw = String(value || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_');
+    const aliases = {
+        copilot: 'multi_agent',
+        copilot_chat: 'multi_agent',
+        multiagent: 'multi_agent',
+        continuous_write: 'infinite_write',
+        file_import: 'manual_import',
+        import: 'manual_import',
+    };
+    return aliases[raw] || raw;
+}
+
+function getKnowledgeItemSourceMode(item) {
+    if (!item || typeof item !== 'object') return 'unknown';
+    const direct = normalizeKnowledgeSourceMode(item.source_mode || item.mode_source);
+    if (direct) return direct;
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    const sourceTag = tags.find(tag => String(tag || '').toLowerCase().startsWith('source:'));
+    if (sourceTag) return normalizeKnowledgeSourceMode(String(sourceTag).slice('source:'.length)) || 'unknown';
+    const sourceText = normalizeKnowledgeSourceMode(item.source || item.source_type);
+    if (['copilot_auto_save', 'copilot_chat', 'contract_confirmation'].includes(sourceText)) return 'multi_agent';
+    if (sourceText === 'infinite_write') return 'infinite_write';
+    if (item.source_file) return 'manual_import';
+    return 'unknown';
+}
+
+function ensureKnowledgeSourceTag(item, sourceMode = 'manual') {
+    const mode = normalizeKnowledgeSourceMode(sourceMode) || 'manual';
+    const next = { ...(item || {}) };
+    next.source_mode = next.source_mode || mode;
+    next.source_type = next.source_type || (mode === 'manual' ? 'manual_knowledge' : mode);
+    const tags = Array.isArray(next.tags) ? next.tags.slice() : [];
+    if (!tags.some(tag => String(tag || '').toLowerCase().startsWith('source:'))) {
+        tags.push(`source:${mode}`);
+    }
+    next.tags = tags;
+    return next;
+}
+
+function getKnowledgeFilteredItems(items) {
+    const source = Array.isArray(items) ? items : [];
+    if (knowledgeSourceFilter === 'all') return source;
+    return source.filter(item => getKnowledgeItemSourceMode(item) === knowledgeSourceFilter);
+}
+
+function renderKnowledgeSourceFilters(items) {
+    const source = Array.isArray(items) ? items : [];
+    const counts = {};
+    source.forEach(item => {
+        const mode = getKnowledgeItemSourceMode(item);
+        counts[mode] = (counts[mode] || 0) + 1;
+    });
+    return `
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px;">
+            ${KNOWLEDGE_SOURCE_FILTERS.map(item => {
+                const active = knowledgeSourceFilter === item.key;
+                const count = item.key === 'all' ? source.length : (counts[item.key] || 0);
+                return `
+                    <button type="button" class="knowledge-source-filter" data-source="${item.key}"
+                        style="padding:5px 10px;border-radius:999px;border:1px solid ${active ? 'var(--accent-color)' : 'var(--border-color)'};
+                        background:${active ? 'color-mix(in srgb, var(--accent-color) 14%, transparent)' : 'rgba(255,255,255,0.03)'};
+                        color:${active ? 'var(--accent-color)' : 'var(--text-secondary)'};cursor:pointer;font-size:12px;">
+                        ${item.label} (${count})
+                    </button>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function bindKnowledgeSourceFilters(typeId) {
+    document.querySelectorAll('.knowledge-source-filter').forEach(btn => {
+        btn.addEventListener('click', () => {
+            knowledgeSourceFilter = btn.dataset.source || 'all';
+            loadDatabase(typeId);
+        });
+    });
 }
 
 function getKnowledgeCategoryCount(category) {
@@ -1130,13 +1223,13 @@ function showAddSettingDialog(category) {
         input.addEventListener('change', syncModeSections);
     });
     syncModeSections();
-    
+
     // 取消
     document.getElementById('cancel-add-setting').addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
+
     // 确认
     document.getElementById('confirm-add-setting').addEventListener('click', async () => {
         const mode = document.querySelector('input[name="new-setting-mode"]:checked')?.value || 'freeform';
@@ -1151,8 +1244,8 @@ function showAddSettingDialog(category) {
             return;
         }
         const newItem = mode === 'template'
-            ? { ...rawValues, manual_mode: 'template' }
-            : buildFreeformKnowledgeItem(category, rawValues);
+            ? ensureKnowledgeSourceTag({ ...rawValues, manual_mode: 'template' }, 'manual')
+            : ensureKnowledgeSourceTag(buildFreeformKnowledgeItem(category, rawValues), 'manual');
         const name = validation.displayName || getKnowledgeItemDisplayName(newItem, category);
 
         newItem.id = Date.now().toString();
@@ -1211,6 +1304,7 @@ async function loadDatabase(typeId) {
     updateBreadcrumbs(['资料库', category.name]);
 
     const data = getKnowledgeCategoryData(category);
+    const visibleData = getKnowledgeFilteredItems(data);
     const isReadOnlyOutline = category.key === 'outline';
 
     if (data.length === 0) {
@@ -1231,7 +1325,7 @@ async function loadDatabase(typeId) {
         <div style="padding: 24px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <h2 style="color: var(--text-primary); font-size: 18px;">${category.name} (${data.length})</h2>
+                    <h2 style="color: var(--text-primary); font-size: 18px;">${category.name} (${visibleData.length}/${data.length})</h2>
                     <label style="display: ${isReadOnlyOutline ? 'none' : 'flex'}; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: var(--text-secondary);">
                         <input type="checkbox" id="select-all-items" style="cursor: pointer; accent-color: var(--accent-color);">
                         全选
@@ -1246,15 +1340,21 @@ async function loadDatabase(typeId) {
                     </button>
                 </div>
             </div>
+            ${renderKnowledgeSourceFilters(data)}
             <div class="card-grid" id="setting-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">
             </div>
         </div>
     `;
 
     document.getElementById('add-new-item-btn')?.addEventListener('click', addNewSetting);
+    bindKnowledgeSourceFilters(typeId);
 
     const grid = document.getElementById('setting-grid');
     const selectedIndices = new Set();
+    if (!visibleData.length) {
+        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:36px;color:var(--text-secondary);">当前来源筛选下暂无内容</div>';
+        return;
+    }
 
     function updateBatchUI() {
         const count = selectedIndices.size;
@@ -1263,13 +1363,13 @@ async function loadDatabase(typeId) {
         if (batchBtn) batchBtn.style.display = count > 0 ? 'inline-flex' : 'none';
         if (countSpan) countSpan.textContent = count;
         const selectAllCb = document.getElementById('select-all-items');
-        if (selectAllCb) selectAllCb.checked = count === data.length && data.length > 0;
+        if (selectAllCb) selectAllCb.checked = count === visibleData.length && visibleData.length > 0;
     }
 
     document.getElementById('select-all-items')?.addEventListener('change', (e) => {
         const checked = e.target.checked;
         selectedIndices.clear();
-        if (checked) data.forEach((_, i) => selectedIndices.add(i));
+        if (checked) visibleData.forEach(item => selectedIndices.add(data.indexOf(item)));
         grid.querySelectorAll('.item-checkbox').forEach(cb => { cb.checked = checked; });
         grid.querySelectorAll('.meta-card').forEach((card, i) => {
             card.style.outline = checked ? '2px solid var(--accent-color)' : 'none';
@@ -1282,7 +1382,7 @@ async function loadDatabase(typeId) {
         if (count === 0) return;
         const names = [...selectedIndices].map(i => getKnowledgeItemName(store.projectData[category.key][i], '')).filter(Boolean);
         const preview = names.length <= 5 ? names.map(n => `「${n}」`).join('、') : names.slice(0, 5).map(n => `「${n}」`).join('、') + ` 等${names.length}条`;
-        if (!confirm(`确定要删除 ${preview} 吗？共 ${count} 条`)) return;
+        if (!(await window.showConfirmDialog(`确定要删除 ${preview} 吗？共 ${count} 条`))) return;
         const sorted = [...selectedIndices].sort((a, b) => b - a);
         sorted.forEach(i => store.projectData[category.key].splice(i, 1));
         await saveSettingData(category.key);
@@ -1294,7 +1394,8 @@ async function loadDatabase(typeId) {
         showToast(`已删除 ${count} 条`);
     });
 
-    data.forEach((item, index) => {
+    visibleData.forEach((item) => {
+        const index = data.indexOf(item);
         const card = document.createElement('div');
         card.className = 'meta-card';
         card.style.cssText = 'padding: 20px; cursor: pointer; position: relative;';
@@ -1315,6 +1416,9 @@ async function loadDatabase(typeId) {
             </div>
             <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6; max-height: 60px; overflow: hidden;">
                 ${buildKnowledgeItemSummary(item, category)}
+            </div>
+            <div style="margin-top:10px;font-size:11px;color:var(--text-secondary);">
+                ${KNOWLEDGE_SOURCE_LABELS[getKnowledgeItemSourceMode(item)] || '未标记'}
             </div>
         `;
 
@@ -1434,8 +1538,8 @@ function openSettingEditor(typeId, index) {
             return;
         }
         const nextValues = mode === 'template'
-            ? { ...rawValues, manual_mode: 'template' }
-            : buildFreeformKnowledgeItem(category, rawValues);
+            ? ensureKnowledgeSourceTag({ ...rawValues, manual_mode: 'template' }, 'manual')
+            : ensureKnowledgeSourceTag(buildFreeformKnowledgeItem(category, rawValues), 'manual');
         const name = validation.displayName || getKnowledgeItemDisplayName(nextValues, category);
 
         store.projectData[category.key][index] = {
@@ -1443,6 +1547,7 @@ function openSettingEditor(typeId, index) {
             ...nextValues,
             description: nextValues.description || buildKnowledgeItemSummary(nextValues, category),
         };
+        store.projectData[category.key][index] = ensureKnowledgeSourceTag(store.projectData[category.key][index], 'manual');
         store.projectData[category.key][index].updated_at = new Date().toISOString();
 
         await saveSettingData(category.key);
@@ -1467,7 +1572,7 @@ async function deleteSetting(typeId, index) {
     const item = store.projectData[category.key][index];
     if (!item) return;
 
-    if (confirm(`确定要删除「${getKnowledgeItemName(item)}」吗？`)) {
+    if (await window.showConfirmDialog(`确定要删除「${getKnowledgeItemName(item)}」吗？`)) {
         store.projectData[category.key].splice(index, 1);
         await saveSettingData(category.key);
         loadDatabase(typeId);
@@ -1480,6 +1585,14 @@ async function deleteSetting(typeId, index) {
 }
 
 async function saveSettingData(dataKey) {
+    if (Array.isArray(store.projectData[dataKey])) {
+        store.projectData[dataKey] = store.projectData[dataKey].map(item => {
+            if (!item || typeof item !== 'object') return item;
+            if (getKnowledgeItemSourceMode(item) !== 'unknown') return item;
+            return ensureKnowledgeSourceTag(item, item.source_file ? 'manual_import' : 'manual');
+        });
+    }
+
     if (isServerBackedKnowledgeKey(dataKey)) {
         // 服务器存储
         try {
@@ -1556,10 +1669,10 @@ function saveExtendedKnowledgeData(key) {
 function showImportFileDialog() {
     const modal = document.getElementById('modal-container');
     modal.classList.remove('hidden');
-    
+
     // 获取所有分类用于选择
     const categories = store.knowledgeCategories || [];
-    
+
     modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000;">
             <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 16px; padding: 30px; width: 600px; max-width: 95%; max-height: 90vh; overflow-y: auto;">
@@ -1567,7 +1680,7 @@ function showImportFileDialog() {
                     <i class="ri-file-upload-line" style="margin-right: 8px; color: var(--accent-color);"></i>
                     导入文件到资料库
                 </h3>
-                
+
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         选择文件 <span style="color: #ef4444;">*</span>
@@ -1580,7 +1693,7 @@ function showImportFileDialog() {
                         <p id="selected-files-info" style="color: var(--accent-color); margin-top: 8px; font-size: 13px;"></p>
                     </div>
                 </div>
-                
+
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         导入到分类 <span style="color: #ef4444;">*</span>
@@ -1613,7 +1726,7 @@ function showImportFileDialog() {
                         </div>
                     </div>
                 </div>
-                
+
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         分割模式
@@ -1636,7 +1749,7 @@ function showImportFileDialog() {
                         <i class="ri-information-line"></i> 整文件：一个文件作为一条资料；按章节：识别#标题或第X章自动分割；按段落：每个段落作为单独条目
                     </p>
                 </div>
-                
+
                 <div style="display: flex; gap: 12px;">
                     <button id="cancel-import" style="flex: 1; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer;">取消</button>
                     <button id="confirm-import" style="flex: 1; padding: 12px; background: var(--accent-color); border: none; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">
@@ -1646,41 +1759,41 @@ function showImportFileDialog() {
             </div>
         </div>
     `;
-    
+
     let selectedFiles = [];
     let selectedIcon = 'ri-folder-line';
     let newCategoryCreated = null;
-    
+
     const fileInput = document.getElementById('import-file-input');
     const dropZone = document.getElementById('file-drop-zone');
     const filesInfo = document.getElementById('selected-files-info');
     const categorySelect = document.getElementById('import-target-category');
-    
+
     // 文件选择
     dropZone.addEventListener('click', () => fileInput.click());
-    
+
     fileInput.addEventListener('change', (e) => {
         selectedFiles = Array.from(e.target.files);
         updateFilesInfo();
     });
-    
+
     // 拖拽支持
     dropZone.addEventListener('dragover', (e) => {
         e.preventDefault();
         dropZone.style.borderColor = 'var(--accent-color)';
         dropZone.style.background = 'rgba(59,130,246,0.1)';
     });
-    
+
     dropZone.addEventListener('dragleave', () => {
         dropZone.style.borderColor = 'var(--border-color)';
         dropZone.style.background = 'transparent';
     });
-    
+
     dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropZone.style.borderColor = 'var(--border-color)';
         dropZone.style.background = 'transparent';
-        
+
         const files = Array.from(e.dataTransfer.files).filter(f =>
             f.name.endsWith('.txt') || f.name.endsWith('.md')
         );
@@ -1691,7 +1804,7 @@ function showImportFileDialog() {
             showToast('请选择 .txt 或 .md 文件', 'error');
         }
     });
-    
+
     function updateFilesInfo() {
         if (selectedFiles.length > 0) {
             filesInfo.innerHTML = `已选择 ${selectedFiles.length} 个文件: ${selectedFiles.map(f => f.name).join(', ')}`;
@@ -1699,15 +1812,15 @@ function showImportFileDialog() {
             filesInfo.innerHTML = '';
         }
     }
-    
+
     // 新建分类
     const newCategoryBtn = document.getElementById('create-new-category-btn');
     const newCategoryForm = document.getElementById('new-category-form');
-    
+
     newCategoryBtn.addEventListener('click', () => {
         newCategoryForm.style.display = newCategoryForm.style.display === 'none' ? 'block' : 'none';
     });
-    
+
     // 图标选择
     document.querySelectorAll('.icon-option-small').forEach(opt => {
         opt.addEventListener('click', () => {
@@ -1720,7 +1833,7 @@ function showImportFileDialog() {
             selectedIcon = opt.dataset.icon;
         });
     });
-    
+
     // 确认新建分类
     document.getElementById('confirm-new-category').addEventListener('click', async () => {
         const name = document.getElementById('new-category-name-input').value.trim();
@@ -1728,63 +1841,63 @@ function showImportFileDialog() {
             showToast('请输入分类名称', 'error');
             return;
         }
-        
+
         // 创建分类
         newCategoryCreated = addKnowledgeCategory(name, selectedIcon);
-        
+
         // 刷新下拉框
         const updatedCategories = store.knowledgeCategories || [];
         categorySelect.innerHTML = '<option value="">-- 选择现有分类 --</option>' +
             updatedCategories.map(cat => `<option value="${cat.id}" data-key="${cat.key}">${cat.name}</option>`).join('');
-        
+
         // 选中新建的分类
         const newCat = updatedCategories.find(c => c.name === name);
         if (newCat) {
             categorySelect.value = newCat.id;
         }
-        
+
         newCategoryForm.style.display = 'none';
         showToast(`分类「${name}」已创建`);
     });
-    
+
     // 取消
     document.getElementById('cancel-import').addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.innerHTML = '';
     });
-    
+
     // 确认导入
     document.getElementById('confirm-import').addEventListener('click', async () => {
         if (selectedFiles.length === 0) {
             showToast('请选择要导入的文件', 'error');
             return;
         }
-        
+
         const categoryId = categorySelect.value;
         if (!categoryId) {
             showToast('请选择目标分类', 'error');
             return;
         }
-        
+
         const category = store.knowledgeCategories.find(c => c.id === categoryId);
         if (!category) {
             showToast('分类不存在', 'error');
             return;
         }
-        
+
         const splitMode = document.querySelector('input[name="split-mode"]:checked').value;
-        
+
         const btn = document.getElementById('confirm-import');
         btn.disabled = true;
         btn.innerHTML = '<i class="ri-loader-4-line"></i> 导入中...';
-        
+
         try {
             let totalImported = 0;
-            
+
             for (const file of selectedFiles) {
                 // 读取文件内容
                 const content = await readFileAsText(file);
-                
+
                 // 调用后端API解析
                 const result = await apiCall('/api/knowledge-base/import-file', 'POST', {
                     content: content,
@@ -1793,25 +1906,25 @@ function showImportFileDialog() {
                     category_key: category.key,
                     split_mode: splitMode
                 });
-                
+
                 if (result.success && result.items && result.items.length > 0) {
                     // 添加到本地数据
                     if (!store.projectData[category.key]) {
                         store.projectData[category.key] = [];
                     }
-                    store.projectData[category.key].push(...result.items);
+                    store.projectData[category.key].push(...(result.items || []).map(item => ensureKnowledgeSourceTag(item, 'manual_import')));
                     totalImported += result.items.length;
                 }
             }
-            
+
             // 保存数据
             saveSettingData(category.key);
-            
+
             modal.classList.add('hidden');
             modal.innerHTML = '';
-            
+
             showToast(`成功导入 ${totalImported} 条资料`, 'success');
-            
+
             // 刷新显示
             renderKnowledgeNavPanel();
             if (currentSettingType === categoryId) {
@@ -1820,7 +1933,7 @@ function showImportFileDialog() {
             if (store.currentModule === 'write' && window.renderMultiAgentWriteNavPanel) {
                 window.renderMultiAgentWriteNavPanel();
             }
-            
+
         } catch (e) {
             showToast('导入失败: ' + e.message, 'error');
         } finally {
@@ -1844,7 +1957,7 @@ function readFileAsText(file) {
 const originalRenderKnowledgeNavPanel = renderKnowledgeNavPanel;
 renderKnowledgeNavPanel = function(options = {}) {
     originalRenderKnowledgeNavPanel(options);
-    
+
     // 在添加新资料库按钮之前插入导入按钮
     const addBtn = ui.navList.querySelector('.list-item:last-child');
     const hasImportBtn = ui.navList.querySelector('.knowledge-import-entry');
@@ -1882,6 +1995,8 @@ window.saveExtendedKnowledgeData = saveExtendedKnowledgeData;
 window.showImportFileDialog = showImportFileDialog;
 window.renderKnowledgeGraphView = renderKnowledgeGraphView;
 window.renderKnowledgeWorkbench = renderKnowledgeWorkbench;
+window.getKnowledgeItemSourceMode = getKnowledgeItemSourceMode;
+window.getKnowledgeFilteredItems = getKnowledgeFilteredItems;
 
 console.log('[app-knowledge.js] 资料库模块已加载');
 

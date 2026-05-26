@@ -701,7 +701,18 @@ class BaseAgent(ABC):
                     f"[{self.name}] LLM call failed (attempt {attempt + 1}/{self.retry_config.max_retries + 1}): {e}. "
                     f"Retrying in {wait_time:.2f}s..."
                 )
-                
+                try:
+                    await self._emit_callback_event({
+                        "type": "progress_update",
+                        "agent": self.name,
+                        "message": "模型响应不稳定，正在自动重试...",
+                        "progress": None,
+                        "retry_attempt": attempt + 1,
+                        "max_attempts": self.retry_config.max_retries + 1,
+                    })
+                except Exception:
+                    pass
+
                 await asyncio.sleep(wait_time)
                 current_delay *= self.retry_config.backoff
         

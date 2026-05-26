@@ -50,7 +50,13 @@ let mentionData = {
     characters: [],
     settings: [],
     chapters: [],
-    worlds: []
+    worlds: [],
+    outlines: [],
+    detailSettings: [],
+    chapterSettings: [],
+    chapterSummaries: [],
+    eventlines: [],
+    items: []
 };
 
 const COPILOT_AUTO_SAVE_STATE_KEY = 'copilot_chat_auto_save';
@@ -294,6 +300,78 @@ function summarizeEventlineRows(rows, limit = 3) {
         });
 }
 
+function compactMentionRowText(row, keys = []) {
+    if (!row || typeof row !== 'object') return '';
+    const fallbackKeys = [
+        'content',
+        'summary',
+        'description',
+        'details',
+        'chapter_goal',
+        'key_event',
+        'conflict',
+        'status',
+        'notes',
+        'text'
+    ];
+    return [...keys, ...fallbackKeys]
+        .map((key) => String(row[key] || '').trim())
+        .filter(Boolean)
+        .join('｜');
+}
+
+function buildMentionRows(rows, options = {}) {
+    if (!Array.isArray(rows)) return [];
+    const {
+        type = 'setting',
+        label = '设定',
+        icon = 'ri-file-text-line',
+        limit = 30,
+        nameBuilder = null,
+        textKeys = []
+    } = options;
+    return rows
+        .filter((row) => row && typeof row === 'object')
+        .slice(0, limit)
+        .map((row, index) => {
+            const name = typeof nameBuilder === 'function'
+                ? nameBuilder(row, index)
+                : String(row.title || row.name || `${label}${index + 1}`).trim();
+            return {
+                id: row.id || `${type}-${index}`,
+                type,
+                icon,
+                name: name || `${label}${index + 1}`,
+                title: String(row.title || row.name || name || '').trim(),
+                summary: compactMentionRowText(row, textKeys),
+                raw: row
+            };
+        });
+}
+
+function findMentionRowByName(type, name) {
+    const pools = {
+        outline: mentionData.outlines,
+        detail_outline: mentionData.detailSettings,
+        chapter_setting: mentionData.chapterSettings,
+        chapter_summary: mentionData.chapterSummaries,
+        eventline: mentionData.eventlines,
+        item: mentionData.items,
+        setting: mentionData.settings,
+        world: mentionData.worlds,
+        chapter: mentionData.chapters,
+        character: mentionData.characters
+    };
+    const rows = pools[type] || [];
+    return rows.find((item) => item?.name === name || item?.title === name) || null;
+}
+
+function appendMentionContextBlock(context, label, name, text) {
+    const body = String(text || '').trim();
+    if (!body) return context;
+    return `${context}\n【${label}：${name}】\n${body.substring(0, 1200)}\n`;
+}
+
 const COPILOT_COMMANDS = [];
 
 // 当前提及状态
@@ -306,6 +384,7 @@ let mentionState = {
     endPos: 0,
     items: []
 };
+let mentionRefreshPromise = null;
 
 // 智能搜索 - 支持拼音首字母、模糊匹配
 function smartMentionMatch(query, items) {
@@ -331,20 +410,62 @@ function searchMentions(query) {
     // 搜索角色
     const characters = smartMentionMatch(query, mentionData.characters);
     characters.forEach(c => results.push({ type: 'character', icon: 'ri-user-line', ...c }));
-    
-    // 搜索设定
-    const settings = smartMentionMatch(query, mentionData.settings);
-    settings.forEach(s => results.push({ type: 'setting', icon: 'ri-file-text-line', ...s }));
-    
+
     // 搜索章节
     const chapters = smartMentionMatch(query, mentionData.chapters);
     chapters.forEach(ch => results.push({ type: 'chapter', icon: 'ri-book-line', ...ch }));
+
+    // 搜索大纲、细纲、章纲
+    smartMentionMatch(query, mentionData.outlines).forEach(item => results.push({ icon: 'ri-route-line', ...item }));
+    smartMentionMatch(query, mentionData.detailSettings).forEach(item => results.push({ icon: 'ri-list-check-3', ...item }));
+    smartMentionMatch(query, mentionData.chapterSettings).forEach(item => results.push({ icon: 'ri-book-open-line', ...item }));
     
     // 搜索世界观
     const worlds = smartMentionMatch(query, mentionData.worlds);
     worlds.forEach(w => results.push({ type: 'world', icon: 'ri-earth-line', ...w }));
+
+    // 搜索其他资料
+    smartMentionMatch(query, mentionData.eventlines).forEach(item => results.push({ icon: 'ri-node-tree', ...item }));
+    smartMentionMatch(query, mentionData.items).forEach(item => results.push({ icon: 'ri-archive-line', ...item }));
+    smartMentionMatch(query, mentionData.chapterSummaries).forEach(item => results.push({ icon: 'ri-article-line', ...item }));
+    const settings = smartMentionMatch(query, mentionData.settings);
+    settings.forEach(s => results.push({ type: 'setting', icon: 'ri-file-text-line', ...s }));
     
     return results.slice(0, 10);
+}
+
+function hasMentionCandidates() {
+    return [
+        mentionData.characters,
+        mentionData.chapters,
+        mentionData.worlds,
+        mentionData.outlines,
+        mentionData.detailSettings,
+        mentionData.chapterSettings,
+        mentionData.chapterSummaries,
+        mentionData.eventlines,
+        mentionData.items,
+        mentionData.settings
+    ].some((items) => Array.isArray(items) && items.length > 0);
+}
+
+async function refreshMentionDataFromProject() {
+    if (mentionRefreshPromise) return mentionRefreshPromise;
+    mentionRefreshPromise = (async () => {
+        try {
+            if (typeof window.loadCurrentProjectData === 'function') {
+                await window.loadCurrentProjectData();
+            } else {
+                await updateMentionData();
+            }
+        } catch (error) {
+            console.warn('[Copilot] 刷新@引用资料失败:', error);
+            await updateMentionData();
+        } finally {
+            mentionRefreshPromise = null;
+        }
+    })();
+    return mentionRefreshPromise;
 }
 
 function getCommandChapters() {
@@ -549,6 +670,33 @@ function handleMentionInput(e) {
                 showMentionPopup(results, input);
                 return;
             }
+            if (!hasMentionCandidates()) {
+                const requestValue = input.value;
+                const requestCursor = input.selectionStart;
+                void refreshMentionDataFromProject().then(() => {
+                    if (!document.body.contains(input)) return;
+                    const currentCursor = input.selectionStart ?? requestCursor;
+                    const currentBeforeCursor = String(input.value || '').substring(0, currentCursor);
+                    const currentAtIndex = currentBeforeCursor.lastIndexOf('@');
+                    if (currentAtIndex < 0) return;
+                    const currentQuery = currentBeforeCursor.substring(currentAtIndex + 1);
+                    if (currentQuery.includes(' ') || !String(requestValue || '').includes('@')) return;
+                    const retryResults = searchMentions(currentQuery);
+                    if (retryResults.length <= 0) return;
+                    setAutocompleteState({
+                        active: true,
+                        mode: 'mention',
+                        startPos: currentAtIndex,
+                        query: currentQuery,
+                        selectedIndex: 0,
+                        endPos: currentCursor,
+                        items: retryResults
+                    });
+                    renderCommandHelper();
+                    showMentionPopup(retryResults, input);
+                });
+                return;
+            }
         }
     }
     
@@ -595,19 +743,16 @@ function showMentionPopup(results, input) {
     if (!popup) {
         popup = document.createElement('div');
         popup.id = 'mention-popup';
-        popup.style.cssText = `
-            position: absolute;
-            background: var(--bg-panel);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            max-height: 300px;
-            overflow-y: auto;
-            z-index: 1000;
-            min-width: 250px;
-        `;
+    }
+    if (popup.parentNode !== document.body) {
         document.body.appendChild(popup);
     }
+    popup.className = 'mention-popup';
+    popup.style.position = 'fixed';
+    popup.style.right = 'auto';
+    popup.style.maxHeight = '300px';
+    popup.style.minWidth = '250px';
+    popup.style.zIndex = '10000';
     
     popup.innerHTML = results.map((item, index) => {
         const itemName = item.type === 'command'
@@ -617,11 +762,23 @@ function showMentionPopup(results, input) {
             ? escapeHtml(item.description || '')
             : (item.type === 'character'
                 ? '角色'
-                : item.type === 'setting'
-                    ? '设定'
-                    : item.type === 'chapter'
-                        ? '章节'
-                        : '世界观');
+                : item.type === 'chapter'
+                    ? '章节正文'
+                    : item.type === 'world'
+                        ? '世界观'
+                        : item.type === 'outline'
+                            ? '大纲'
+                            : item.type === 'detail_outline'
+                                ? '细纲'
+                                : item.type === 'chapter_setting'
+                                    ? '章纲'
+                                    : item.type === 'chapter_summary'
+                                        ? '章节摘要'
+                                        : item.type === 'eventline'
+                                            ? '事件线'
+                                            : item.type === 'item'
+                                                ? '物品/资料'
+                                                : '设定');
         const kindLabel = item.type === 'command'
             ? `<span class="mention-kind-badge">命令</span>`
             : '';
@@ -670,6 +827,7 @@ function showMentionPopup(results, input) {
     const inputRect = input.getBoundingClientRect();
     popup.style.left = inputRect.left + 'px';
     popup.style.bottom = (window.innerHeight - inputRect.top + 8) + 'px';
+    popup.style.width = Math.max(280, inputRect.width) + 'px';
     popup.classList.remove('hidden');
 }
 
@@ -775,13 +933,24 @@ function ensureCommandPromptBar() {
 async function updateMentionData() {
     try {
         const store = getCoreStore();
+        mentionData.characters = [];
+        mentionData.settings = [];
+        mentionData.chapters = [];
+        mentionData.worlds = [];
+        mentionData.outlines = [];
+        mentionData.detailSettings = [];
+        mentionData.chapterSettings = [];
+        mentionData.chapterSummaries = [];
+        mentionData.eventlines = [];
+        mentionData.items = [];
 
         // 获取角色
         if (store.projectData?.characters) {
             mentionData.characters = store.projectData.characters.map((c, i) => ({
                 id: i,
                 name: c.name,
-                description: c.description
+                description: c.description,
+                summary: compactMentionRowText(c, ['role', 'identity', 'background'])
             }));
         }
         
@@ -792,23 +961,79 @@ async function updateMentionData() {
         if (Array.isArray(chapters)) {
             mentionData.chapters = chapters.map((ch, i) => ({
                 id: i,
-                name: `第${i + 1}章 ${ch.title}`,
-                title: ch.title
+                name: `第${Number(ch.chapter_number || ch.number || i + 1)}章 ${ch.title || ''}`.trim(),
+                title: ch.title || '',
+                chapter_number: Number(ch.chapter_number || ch.number || i + 1),
+                summary: compactMentionRowText(ch)
             }));
         }
         
         // 获取世界观设定
         if (Array.isArray(store.projectData?.worldbuilding)) {
-            mentionData.worlds = store.projectData.worldbuilding.slice(0, 6).map((item, index) => ({
+            mentionData.worlds = store.projectData.worldbuilding.slice(0, 30).map((item, index) => ({
                 id: item.name || `world-${index}`,
                 name: item.name || `世界观设定${index + 1}`,
                 summary: String(item.description || item.details || '').trim(),
                 type: 'world'
             }));
         }
+
+        mentionData.outlines = buildMentionRows(store.projectData?.outline, {
+            type: 'outline',
+            label: '大纲',
+            icon: 'ri-route-line',
+            nameBuilder: (item, index) => {
+                const number = Number(item.chapter_number || item.number || index + 1);
+                const title = String(item.title || item.name || '').trim();
+                return Number.isFinite(number) && number > 0
+                    ? `第${number}章大纲 ${title}`.trim()
+                    : (title || `大纲${index + 1}`);
+            }
+        });
+        mentionData.detailSettings = buildMentionRows(store.projectData?.detail_settings, {
+            type: 'detail_outline',
+            label: '细纲',
+            icon: 'ri-list-check-3'
+        });
+        mentionData.chapterSettings = buildMentionRows(store.projectData?.chapter_settings, {
+            type: 'chapter_setting',
+            label: '章纲',
+            icon: 'ri-book-open-line',
+            nameBuilder: (item, index) => {
+                const number = Number(item.chapter_number || item.chapter || index + 1);
+                const title = String(item.name || item.title || '').trim();
+                return Number.isFinite(number) && number > 0
+                    ? `第${number}章章纲 ${title}`.trim()
+                    : (title || `章纲${index + 1}`);
+            },
+            textKeys: ['chapter_goal', 'key_event', 'ending_hook']
+        });
+        mentionData.chapterSummaries = buildMentionRows(store.projectData?.chapter_summary, {
+            type: 'chapter_summary',
+            label: '章节摘要',
+            icon: 'ri-article-line',
+            nameBuilder: (item, index) => {
+                const number = Number(item.chapter_number || item.chapter || index + 1);
+                const title = String(item.title || item.name || '').trim();
+                return Number.isFinite(number) && number > 0
+                    ? `第${number}章摘要 ${title}`.trim()
+                    : (title || `章节摘要${index + 1}`);
+            },
+            textKeys: ['summary_text', 'summary']
+        });
         
         // 获取资料库设定
-        mentionData.settings = [];
+        mentionData.eventlines = buildMentionRows(store.projectData?.eventlines, {
+            type: 'eventline',
+            label: '事件线',
+            icon: 'ri-node-tree',
+            textKeys: ['conflict', 'status']
+        });
+        mentionData.items = buildMentionRows(store.projectData?.items, {
+            type: 'item',
+            label: '资料',
+            icon: 'ri-archive-line'
+        });
         if (Array.isArray(store.projectData?.eventlines)) {
             store.projectData.eventlines.slice(0, 6).forEach((item, i) => {
                 mentionData.settings.push({
@@ -907,10 +1132,11 @@ async function sendCopilotMessageWithMentions(message) {
             case 'chapter':
                 const chapterMatch = mention.name.match(/第(\d+)章/);
                 if (chapterMatch) {
-                    const chapterIndex = parseInt(chapterMatch[1]) - 1;
-                    const chapter = store.projectData?.outline?.[chapterIndex];
+                    const chapterNumber = parseInt(chapterMatch[1], 10);
+                    const chapters = Array.isArray(store.projectData?.chapters) ? store.projectData.chapters : [];
+                    const chapter = chapters.find((item, index) => Number(item?.chapter_number || item?.number || index + 1) === chapterNumber);
                     if (chapter) {
-                        context += `\n【${mention.name}】\n${chapter.content?.substring(0, 500) || chapter.summary || ''}\n`;
+                        context += `\n【${mention.name}】\n${chapter.content?.substring(0, 1200) || chapter.summary || ''}\n`;
                     }
                 }
                 break;
@@ -923,6 +1149,42 @@ async function sendCopilotMessageWithMentions(message) {
                     if (worldSummary) {
                         context += `\n【世界观设定】\n${worldItem ? `${mention.name}：${worldSummary}` : worldSummary}\n`;
                     }
+                }
+                break;
+            case 'outline':
+                {
+                    const item = findMentionRowByName('outline', mention.name);
+                    context = appendMentionContextBlock(context, '大纲', mention.name, item?.summary);
+                }
+                break;
+            case 'detail_outline':
+                {
+                    const item = findMentionRowByName('detail_outline', mention.name);
+                    context = appendMentionContextBlock(context, '细纲', mention.name, item?.summary);
+                }
+                break;
+            case 'chapter_setting':
+                {
+                    const item = findMentionRowByName('chapter_setting', mention.name);
+                    context = appendMentionContextBlock(context, '章纲', mention.name, item?.summary);
+                }
+                break;
+            case 'chapter_summary':
+                {
+                    const item = findMentionRowByName('chapter_summary', mention.name);
+                    context = appendMentionContextBlock(context, '章节摘要', mention.name, item?.summary);
+                }
+                break;
+            case 'eventline':
+                {
+                    const item = findMentionRowByName('eventline', mention.name);
+                    context = appendMentionContextBlock(context, '事件线', mention.name, item?.summary);
+                }
+                break;
+            case 'item':
+                {
+                    const item = findMentionRowByName('item', mention.name);
+                    context = appendMentionContextBlock(context, '资料', mention.name, item?.summary);
                 }
                 break;
             case 'setting':
@@ -947,6 +1209,10 @@ async function sendCopilotMessageWithMentions(message) {
                             }
                         }
                     }
+                }
+                if (!context.includes(`【设定：${mention.name}】`)) {
+                    const item = findMentionRowByName('setting', mention.name);
+                    context = appendMentionContextBlock(context, '设定', mention.name, item?.summary);
                 }
                 break;
         }
@@ -1172,10 +1438,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // 全局暴露Copilot增强函数
 window.mentionData = mentionData;
+window.mentionState = mentionState;
 window.initCopilotEnhancements = initCopilotEnhancements;
 window.searchMentions = searchMentions;
 window.searchCommands = searchCommands;
 window.updateMentionData = updateMentionData;
+window.refreshMentionDataFromProject = refreshMentionDataFromProject;
 window.sendCopilotMessageWithMentions = sendCopilotMessageWithMentions;
 window.initInputResizer = initInputResizer;
 window.initPanelWidthResizer = initPanelWidthResizer;

@@ -6225,3 +6225,159 @@ a.app-back-button:focus-visible {
     flex: 1;
     min-width: 120px;
 }
+
+/* ===== 统一玻璃拟物UI (Glassmorphism UI) ===== */
+
+/* 1. 统一滚动条 (Global Scrollbar) */
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+/* 2. 统一按钮样式 (Global Buttons) */
+/* 添加毛玻璃与动态效果，排除特殊按钮避免样式破坏 */
+button:not(.nav-tab-btn, .nav-panel-section-header *, .chapter-actions button, .custom-dialog-btn, .res-item), 
+.settings-button, 
+.app-btn {
+    transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+}
+
+/* 为本身带有半透明背景的按钮增加毛玻璃 */
+.settings-button, .app-btn {
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+button:not(:disabled):not(.nav-tab-btn, .custom-dialog-btn, .res-item, .chapter-actions button):hover,
+.settings-button:not(:disabled):hover, 
+.app-btn:not(:disabled):hover {
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+
+button:not(:disabled):not(.nav-tab-btn, .custom-dialog-btn, .res-item, .chapter-actions button):active,
+.settings-button:not(:disabled):active, 
+.app-btn:not(:disabled):active {
+    transform: translateY(1px) scale(0.98);
+}
+
+/* 3. 自定义弹窗 (Custom Dialog) */
+.custom-dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
+}
+
+.custom-dialog-overlay.show {
+    opacity: 1;
+    visibility: visible;
+}
+
+.custom-dialog-box {
+    background: rgba(30, 32, 40, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+    border-radius: 16px;
+    width: 400px;
+    max-width: 90%;
+    padding: 24px;
+    transform: scale(0.9) translateY(20px);
+    opacity: 0;
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+}
+
+.custom-dialog-overlay.show .custom-dialog-box {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+}
+
+.custom-dialog-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+}
+
+.custom-dialog-header i {
+    color: var(--accent-color);
+    font-size: 22px;
+}
+
+.custom-dialog-body {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 24px;
+}
+
+.custom-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+}
+
+.custom-dialog-btn {
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: none;
+    outline: none;
+}
+
+.custom-dialog-btn.btn-cancel {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.custom-dialog-btn.btn-cancel:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.custom-dialog-btn.btn-confirm {
+    background: var(--accent-color);
+    color: white;
+    box-shadow: 0 4px 12px var(--accent-glow);
+}
+
+.custom-dialog-btn.btn-confirm:hover {
+    background: var(--accent-hover);
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 6px 16px var(--accent-glow);
+}
+.custom-dialog-btn.btn-confirm:active {
+    transform: translateY(1px) scale(0.98);
+}

@@ -316,6 +316,8 @@ class ProjectReadyTaskExecutor:
         persisted_world = persist_worldbuilding_project_data(
             {"world": world_data},
             project_manager=self.coordinator.project_manager,
+            source_mode="multi_agent",
+            source_type="multi_agent_worldbuilding",
         )
         if not persisted_world:
             raise RuntimeError("世界观生成结果未成功写入 worldbuilding.json")
@@ -397,6 +399,8 @@ class ProjectReadyTaskExecutor:
             "characters",
             exported,
             project_manager=self.coordinator.project_manager,
+            source_mode="multi_agent",
+            source_type="multi_agent_characters",
         )
         result_ref = "characters.json"
 
@@ -523,6 +527,12 @@ class ProjectReadyTaskExecutor:
 
         result_ref = ""
         if rows:
+            from ..source_modes import ensure_record_source_mode
+
+            rows = [
+                ensure_record_source_mode(row, "multi_agent", source_type="multi_agent_chapter_settings")
+                for row in rows
+            ]
             self.coordinator.project_manager.save_project_data("chapter_settings", rows)
             self.coordinator._sync_chapter_settings_to_library(rows)
             result_ref = "chapter_settings.json"

@@ -233,7 +233,7 @@ function bindBackupEvents() {
         btn.addEventListener('click', async () => {
             const filename = btn.dataset.filename;
             
-            if (!confirm(`确定要恢复备份 "${filename}" 吗？\n\n当前项目数据将被覆盖！`)) {
+            if (!(await window.showConfirmDialog(`确定要恢复备份 "${filename}" 吗？\n\n当前项目数据将被覆盖！`))) {
                 return;
             }
             
@@ -273,7 +273,7 @@ function bindBackupEvents() {
         btn.addEventListener('click', async () => {
             const filename = btn.dataset.filename;
             
-            if (!confirm(`确定要删除备份 "${filename}" 吗？`)) {
+            if (!(await window.showConfirmDialog(`确定要删除备份 "${filename}" 吗？`))) {
                 return;
             }
             
@@ -516,7 +516,7 @@ function bindResourcesEvents() {
         btn.addEventListener('click', async () => {
             const id = btn.dataset.id;
             
-            if (!confirm('确定要删除这个资料吗？')) {
+            if (!(await window.showConfirmDialog('确定要删除这个资料吗？'))) {
                 return;
             }
             

@@ -247,7 +247,7 @@ async function renderTokenStats() {
     });
 
     document.getElementById('reset-token-stats').addEventListener('click', async () => {
-        if (!confirm('确定要清空全部Token统计数据吗？此操作不可恢复。')) {
+        if (!(await window.showConfirmDialog('确定要清空全部Token统计数据吗？此操作不可恢复。'))) {
             return;
         }
 

@@ -42,6 +42,28 @@ from ..models.requests import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+DEFAULT_EMBEDDING_BASE_URL = "https://api.siliconflow.cn/v1"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_EMBEDDING_DIM = 1024
+
+
+def _first_env(*keys: str, default: str = "") -> str:
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            return value
+    return default
+
+
+def _first_env_int(*keys: str, default: int) -> int:
+    raw = _first_env(*keys)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
 
 def _knowledge_base_config_path() -> Path:
     return get_data_dir() / "knowledge_base_config.json"
@@ -68,6 +90,18 @@ def _build_summary_title(summary: str, start_chapter: int, end_chapter: int) -> 
         first_line = first_line[:40]
     range_part = f"第{start_chapter}-{end_chapter}章"
     return f"剧情总结 {range_part}" + (f" - {first_line}" if first_line else "")
+
+
+def _with_import_source(item: Dict[str, Any]) -> Dict[str, Any]:
+    from ...source_modes import ensure_record_source_mode
+
+    return ensure_record_source_mode(
+        item,
+        "manual_import",
+        source_type="knowledge_file_import",
+        source_file=str(item.get("source_file") or "").strip(),
+        overwrite=True,
+    )
 
 
 def _atomic_write_text(path: Path, content: str, old_content: str = None) -> None:
@@ -209,13 +243,13 @@ def _safe_extract_zip_bytes(content: bytes, target_dir: Path) -> Dict[str, Any]:
 async def get_knowledge_base_config():
     """获取知识库配置"""
     config_path = _knowledge_base_config_path()
-    
+
     default_config = {
         "embedding_provider": os.getenv("KB_EMBEDDING_PROVIDER", os.getenv("EMBEDDING_PROVIDER", "api")),
-        "siliconflow_api_key": os.getenv("SILICONFLOW_API_KEY", ""),
-        "siliconflow_base_url": os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
-        "siliconflow_model": os.getenv("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3"),
-        "siliconflow_embedding_dim": int(os.getenv("SILICONFLOW_EMBEDDING_DIM", "1024")),
+        "siliconflow_api_key": _first_env("KB_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY"),
+        "siliconflow_base_url": _first_env("KB_EMBEDDING_BASE_URL", "SILICONFLOW_BASE_URL", default=DEFAULT_EMBEDDING_BASE_URL),
+        "siliconflow_model": _first_env("KB_EMBEDDING_MODEL", "SILICONFLOW_EMBEDDING_MODEL", default=DEFAULT_EMBEDDING_MODEL),
+        "siliconflow_embedding_dim": _first_env_int("KB_EMBEDDING_DIM", "SILICONFLOW_EMBEDDING_DIM", default=DEFAULT_EMBEDDING_DIM),
         "onnx_model_dir": os.getenv("KB_ONNX_MODEL_DIR", ""),
         "onnx_model_file": os.getenv("KB_ONNX_MODEL_FILE", "model.onnx"),
         "onnx_tokenizer_dir": os.getenv("KB_ONNX_TOKENIZER_DIR", ""),
@@ -231,26 +265,46 @@ async def get_knowledge_base_config():
         "summary_search_enabled": False,  # 摘要索引检索（无向量RAG）
         "chapter_search_mode": "hybrid"   # 章节检索模式
     }
-    
+
+    saved_config: Dict[str, Any] = {}
     if config_path.exists():
         try:
             saved_config = json.loads(config_path.read_text(encoding="utf-8"))
             default_config.update(saved_config)
         except Exception as e:
             logger.warning(f"[Knowledge] 读取知识库配置失败，使用默认值: {e}")
-    else:
-        default_config.update(apply_bundled_local_onnx_defaults({}))
-    
-    api_key = default_config.get("siliconflow_api_key", "")
+
+    if saved_config.get("embedding_api_key") and not saved_config.get("siliconflow_api_key"):
+        default_config["siliconflow_api_key"] = saved_config["embedding_api_key"]
+    if saved_config.get("embedding_base_url") and not saved_config.get("siliconflow_base_url"):
+        default_config["siliconflow_base_url"] = saved_config["embedding_base_url"]
+    if saved_config.get("embedding_model") and not saved_config.get("siliconflow_model"):
+        default_config["siliconflow_model"] = saved_config["embedding_model"]
+    if "embedding_dim" in saved_config and "siliconflow_embedding_dim" not in saved_config:
+        default_config["siliconflow_embedding_dim"] = saved_config["embedding_dim"]
+
+    default_config = apply_bundled_local_onnx_defaults(default_config)
+
+    api_key = default_config.get("siliconflow_api_key") or default_config.get("embedding_api_key", "")
+    embedding_base_url = default_config.get("siliconflow_base_url") or default_config.get("embedding_base_url", "")
+    embedding_model = default_config.get("siliconflow_model") or default_config.get("embedding_model", "")
+    embedding_dim = (
+        default_config.get("siliconflow_embedding_dim")
+        if default_config.get("siliconflow_embedding_dim") is not None
+        else default_config.get("embedding_dim", 1024)
+    )
     onnx_status = _inspect_local_onnx_model(default_config)
     provider = str(default_config.get("embedding_provider", "api") or "api").lower()
     return JSONResponse({
         "embedding_provider": provider,
         "siliconflow_api_key": api_key[:8] + "****" if len(api_key) > 8 else "",
         "siliconflow_api_key_set": bool(api_key),
-        "siliconflow_base_url": default_config.get("siliconflow_base_url", ""),
-        "siliconflow_model": default_config.get("siliconflow_model", ""),
-        "siliconflow_embedding_dim": default_config.get("siliconflow_embedding_dim", 1024),
+        "siliconflow_base_url": embedding_base_url,
+        "embedding_base_url": embedding_base_url,
+        "siliconflow_model": embedding_model,
+        "embedding_model": embedding_model,
+        "siliconflow_embedding_dim": embedding_dim,
+        "embedding_dim": embedding_dim,
         "onnx_model_dir": default_config.get("onnx_model_dir", ""),
         "onnx_model_file": default_config.get("onnx_model_file", "model.onnx"),
         "onnx_tokenizer_dir": default_config.get("onnx_tokenizer_dir", ""),
@@ -277,24 +331,38 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
     """保存知识库配置"""
     config_path = _knowledge_base_config_path()
     env_path = get_app_root() / ".env"
-    
+
     existing_config = {}
     if config_path.exists():
         try:
             existing_config = json.loads(config_path.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning(f"[Knowledge] 读取现有知识库配置失败: {e}")
-    
-    api_key = request.siliconflow_api_key
+
+    api_key = request.siliconflow_api_key or request.embedding_api_key
     if api_key.endswith("****"):
-        api_key = existing_config.get("siliconflow_api_key", "")
-    
+        api_key = existing_config.get("siliconflow_api_key") or existing_config.get("embedding_api_key", "")
+    elif not api_key:
+        api_key = existing_config.get("siliconflow_api_key") or existing_config.get("embedding_api_key", "")
+
+    embedding_base_url = (request.embedding_base_url or request.siliconflow_base_url or DEFAULT_EMBEDDING_BASE_URL).strip()
+    embedding_model = (request.embedding_model or request.siliconflow_model or DEFAULT_EMBEDDING_MODEL).strip()
+    embedding_dim = request.embedding_dim if request.embedding_dim is not None else request.siliconflow_embedding_dim
+    try:
+        embedding_dim = int(embedding_dim)
+    except (TypeError, ValueError):
+        embedding_dim = DEFAULT_EMBEDDING_DIM
+
     new_config = {
         "embedding_provider": request.embedding_provider,
         "siliconflow_api_key": api_key,
-        "siliconflow_base_url": request.siliconflow_base_url,
-        "siliconflow_model": request.siliconflow_model,
-        "siliconflow_embedding_dim": request.siliconflow_embedding_dim,
+        "embedding_api_key": api_key,
+        "siliconflow_base_url": embedding_base_url,
+        "embedding_base_url": embedding_base_url,
+        "siliconflow_model": embedding_model,
+        "embedding_model": embedding_model,
+        "siliconflow_embedding_dim": embedding_dim,
+        "embedding_dim": embedding_dim,
         "onnx_model_dir": request.onnx_model_dir,
         "onnx_model_file": request.onnx_model_file,
         "onnx_tokenizer_dir": request.onnx_tokenizer_dir,
@@ -310,7 +378,7 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         "summary_search_enabled": request.summary_search_enabled,
         "chapter_search_mode": request.chapter_search_mode
     }
-    
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     old_config_content = config_path.read_text(encoding="utf-8") if config_path.exists() else None
@@ -333,11 +401,15 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
                     env_content[key.strip()] = value.strip()
 
         if api_key:
+            env_content["KB_EMBEDDING_API_KEY"] = api_key
             env_content["SILICONFLOW_API_KEY"] = api_key
         env_content["KB_EMBEDDING_PROVIDER"] = request.embedding_provider
-        env_content["SILICONFLOW_BASE_URL"] = request.siliconflow_base_url
-        env_content["SILICONFLOW_EMBEDDING_MODEL"] = request.siliconflow_model
-        env_content["SILICONFLOW_EMBEDDING_DIM"] = str(request.siliconflow_embedding_dim)
+        env_content["KB_EMBEDDING_BASE_URL"] = embedding_base_url
+        env_content["KB_EMBEDDING_MODEL"] = embedding_model
+        env_content["KB_EMBEDDING_DIM"] = str(embedding_dim)
+        env_content["SILICONFLOW_BASE_URL"] = embedding_base_url
+        env_content["SILICONFLOW_EMBEDDING_MODEL"] = embedding_model
+        env_content["SILICONFLOW_EMBEDDING_DIM"] = str(embedding_dim)
         env_content["KB_ONNX_MODEL_DIR"] = request.onnx_model_dir
         env_content["KB_ONNX_MODEL_FILE"] = request.onnx_model_file
         env_content["KB_ONNX_TOKENIZER_DIR"] = request.onnx_tokenizer_dir
@@ -349,11 +421,15 @@ async def save_knowledge_base_config(request: KnowledgeBaseConfigRequest):
         env_content.setdefault("OPENAI_API_KEY", "")
         env_content.setdefault("OPENAI_API_BASE", "")
         env_content.setdefault("OPENAI_MODEL", "gpt-4")
+        env_content.setdefault("KB_EMBEDDING_API_KEY", "")
+        env_content.setdefault("KB_EMBEDDING_BASE_URL", DEFAULT_EMBEDDING_BASE_URL)
+        env_content.setdefault("KB_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        env_content.setdefault("KB_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))
         env_content.setdefault("SILICONFLOW_API_KEY", "")
         env_content.setdefault("KB_EMBEDDING_PROVIDER", "api")
-        env_content.setdefault("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-        env_content.setdefault("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3")
-        env_content.setdefault("SILICONFLOW_EMBEDDING_DIM", "1024")
+        env_content.setdefault("SILICONFLOW_BASE_URL", DEFAULT_EMBEDDING_BASE_URL)
+        env_content.setdefault("SILICONFLOW_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        env_content.setdefault("SILICONFLOW_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))
         env_content.setdefault("KB_ONNX_MODEL_DIR", "")
         env_content.setdefault("KB_ONNX_MODEL_FILE", "model.onnx")
         env_content.setdefault("KB_ONNX_TOKENIZER_DIR", "")
@@ -430,55 +506,70 @@ async def install_local_onnx_model(model_package: UploadFile = File(...)):
 async def test_embedding_connection(request: TestEmbeddingRequest = None):
     """测试向量化服务连接"""
     config_path = _knowledge_base_config_path()
-    
+
+    saved_config = {}
+    if config_path.exists():
+        try:
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"[Knowledge] 加载知识库配置失败: {e}")
+
     is_masked = False
     if request and request.api_key:
         masked_patterns = ["••••••••", "********", "****"]
         is_masked = any(request.api_key.endswith(p) or request.api_key == p for p in masked_patterns)
-    
-    if request and request.api_key and not is_masked:
-        api_key = request.api_key
-        base_url = request.api_base or "https://api.siliconflow.cn/v1"
-        model = request.model or "BAAI/bge-m3"
-    else:
-        api_key = os.getenv("SILICONFLOW_API_KEY", "")
-        base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-        model = os.getenv("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3")
-        
-        if config_path.exists():
-            try:
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                api_key = config.get("siliconflow_api_key", api_key)
-                base_url = config.get("siliconflow_base_url", base_url)
-                model = config.get("siliconflow_model", model)
-            except Exception as e:
-                logger.warning(f"[Knowledge] 加载知识库配置失败: {e}")
-    
+
+    api_key = _first_env("KB_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY")
+    base_url = _first_env("KB_EMBEDDING_BASE_URL", "SILICONFLOW_BASE_URL", default=DEFAULT_EMBEDDING_BASE_URL)
+    model = _first_env("KB_EMBEDDING_MODEL", "SILICONFLOW_EMBEDDING_MODEL", default=DEFAULT_EMBEDDING_MODEL)
+    dimensions = _first_env_int("KB_EMBEDDING_DIM", "SILICONFLOW_EMBEDDING_DIM", default=DEFAULT_EMBEDDING_DIM)
+
+    api_key = saved_config.get("siliconflow_api_key") or saved_config.get("embedding_api_key") or api_key
+    base_url = saved_config.get("siliconflow_base_url") or saved_config.get("embedding_base_url") or base_url
+    model = saved_config.get("siliconflow_model") or saved_config.get("embedding_model") or model
+    dimensions = saved_config.get("siliconflow_embedding_dim") or saved_config.get("embedding_dim") or dimensions
+
+    if request:
+        if request.api_key and not is_masked:
+            api_key = request.api_key
+        base_url = request.api_base or base_url
+        model = request.model or model
+        if request.dimensions is not None:
+            dimensions = request.dimensions
+
     if not api_key:
         return JSONResponse({
             "success": False,
-            "error": "未配置硅基流动API密钥"
+            "error": "未配置向量API密钥"
         })
-    
+
     try:
         start_time = time.time()
-        
+
         async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "model": model,
+                "input": ["测试文本"],
+                "encoding_format": "float"
+            }
+            try:
+                dimensions = int(dimensions)
+            except (TypeError, ValueError):
+                dimensions = 0
+            if dimensions > 0:
+                payload["dimensions"] = dimensions
+
             response = await client.post(
                 f"{base_url.rstrip('/')}/embeddings",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "model": model,
-                    "input": ["测试文本"],
-                    "encoding_format": "float"
-                }
+                json=payload
             )
-            
+
             response_time = int((time.time() - start_time) * 1000)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 embedding_dim = len(data.get("data", [{}])[0].get("embedding", []))
@@ -499,7 +590,7 @@ async def test_embedding_connection(request: TestEmbeddingRequest = None):
                     "success": False,
                     "error": f"请求失败 (HTTP {response.status_code}): {response.text[:200]}"
                 })
-                
+
     except httpx.TimeoutException:
         return JSONResponse({
             "success": False,
@@ -516,12 +607,12 @@ async def test_embedding_connection(request: TestEmbeddingRequest = None):
 async def import_file_to_knowledge(request: ImportFileRequest):
     """导入文件到资料库"""
     import re
-    
+
     try:
         filename = request.filename
         title = request.title or filename.rsplit('.', 1)[0] if '.' in filename else filename
         content = request.content
-        
+
         if request.split_mode == "paragraph":
             paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
             items = []
@@ -535,6 +626,7 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                         "source_file": filename,
                         "created_at": datetime.datetime.now().isoformat()
                     })
+            items = [_with_import_source(item) for item in items]
             return JSONResponse({
                 "success": True,
                 "items": items,
@@ -560,6 +652,7 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                         "created_at": datetime.datetime.now().isoformat()
                     })
 
+                items = [_with_import_source(item) for item in items]
                 return JSONResponse({
                     "success": True,
                     "items": items,
@@ -569,16 +662,16 @@ async def import_file_to_knowledge(request: ImportFileRequest):
 
             chapter_pattern = r'(?:^|\n)(#{1,3}\s+.+|第[一二三四五六七八九十百千万\d]+章(?:[\s\.:：].*|$))(?:\n|$)'
             parts = re.split(chapter_pattern, content)
-            
+
             items = []
             current_title = title
             current_content = ""
-            
+
             for i, part in enumerate(parts):
                 part = part.strip()
                 if not part:
                     continue
-                
+
                 if re.match(r'^#{1,3}\s+', part) or re.match(r'^第[一二三四五六七八九十百千万\d]+章', part):
                     if current_content:
                         items.append({
@@ -593,7 +686,7 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                     current_content = ""
                 else:
                     current_content += part + "\n"
-            
+
             if current_content:
                 items.append({
                     "id": f"{int(time.time() * 1000)}_{len(items)}",
@@ -603,7 +696,8 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                     "source_file": filename,
                     "created_at": datetime.datetime.now().isoformat()
                 })
-            
+
+            items = [_with_import_source(item) for item in items]
             return JSONResponse({
                 "success": True,
                 "items": items,
@@ -619,13 +713,14 @@ async def import_file_to_knowledge(request: ImportFileRequest):
                 "source_file": filename,
                 "created_at": datetime.datetime.now().isoformat()
             }
+            item = _with_import_source(item)
             return JSONResponse({
                 "success": True,
                 "items": [item],
                 "count": 1,
                 "message": f"已导入文件: {filename}"
             })
-            
+
     except Exception as e:
         return JSONResponse({
             "success": False,
@@ -669,6 +764,9 @@ async def save_infinite_summary(request: dict):
     metadata = {
         "type": "infinite_summary",
         "source": "infinite_write",
+        "source_mode": "infinite_write",
+        "source_type": "infinite_summary",
+        "tags": ["source:infinite_write"],
         "start_chapter": start_chapter,
         "end_chapter": end_chapter,
         "created_at": datetime.datetime.now().isoformat(),
@@ -715,7 +813,7 @@ async def create_knowledge_category(request: CreateCategoryRequest):
     """创建新的资料分类"""
     category_id = f"db-custom-{int(time.time() * 1000)}"
     category_key = f"custom_{int(time.time() * 1000)}"
-    
+
     return JSONResponse({
         "success": True,
         "category": {
@@ -806,15 +904,15 @@ async def get_knowledge_base_stats():
     """获取知识库统计信息"""
     from ...project_manager import get_project_manager
     pm = get_project_manager()
-    
+
     if not pm.current_project_id:
         return JSONResponse({
             "configured": False,
             "message": "请先选择一个项目"
         })
-    
+
     data_dir = _project_knowledge_base_dir(pm.current_project_id)
-    
+
     stats = {
         "configured": False,
         "project_id": pm.current_project_id,
@@ -824,42 +922,42 @@ async def get_knowledge_base_stats():
         "storage_size_mb": 0,
         "chapters": []
     }
-    
+
     if data_dir.exists():
         stats["configured"] = True
-        
+
         total_size = 0
         for f in data_dir.rglob("*"):
             if f.is_file():
                 total_size += f.stat().st_size
         stats["storage_size_mb"] = round(total_size / (1024 * 1024), 2)
-        
+
         db_path = data_dir / "knowledge.db"
         if db_path.exists():
             try:
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                
+
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chapters'")
                 if cursor.fetchone():
                     cursor.execute("SELECT COUNT(*) FROM chapters")
                     stats["chapter_count"] = cursor.fetchone()[0]
-                    
+
                     cursor.execute("SELECT chapter_id, title, chapter_number FROM chapters ORDER BY chapter_number")
                     stats["chapters"] = [
                         {"chapter_id": row[0], "title": row[1], "chapter_number": row[2]}
                         for row in cursor.fetchall()
                     ]
-                
+
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'")
                 if cursor.fetchone():
                     cursor.execute("SELECT COUNT(*) FROM chunks")
                     stats["chunk_count"] = cursor.fetchone()[0]
-                
+
                 conn.close()
             except Exception as e:
                 logger.warning(f"[Knowledge] 获取知识库统计信息失败: {e}")
-        
+
         chroma_dir = data_dir / "chroma"
         if chroma_dir.exists():
             try:
@@ -869,7 +967,7 @@ async def get_knowledge_base_stats():
                 stats["vector_count"] = collection.count()
             except Exception as e:
                 logger.warning(f"[Knowledge] 统计向量数量失败(可忽略): {e}")
-    
+
     return JSONResponse(stats)
 
 
@@ -879,79 +977,79 @@ async def clear_knowledge_base(request: ClearKnowledgeBaseRequest):
     from ...project_manager import get_project_manager
     import logging
     logger = logging.getLogger(__name__)
-    
+
     pm = get_project_manager()
-    
+
     if not pm.current_project_id:
         return JSONResponse({
             "success": False,
             "error": "请先选择一个项目"
         })
-    
+
     data_dir = _project_knowledge_base_dir(pm.current_project_id)
-    
+
     if not data_dir.exists():
         return JSONResponse({
             "success": True,
             "message": "知识库为空，无需清除"
         })
-    
+
     try:
         if request.clear_all:
             shutil.rmtree(data_dir)
             data_dir.mkdir(parents=True, exist_ok=True)
-            
+
             return JSONResponse({
                 "success": True,
                 "message": f"已清除项目 {pm.current_project_id} 的所有知识库数据"
             })
-        
+
         elif request.chapter_ids:
             deleted_count = 0
             db_path = data_dir / "knowledge.db"
             chroma_dir = data_dir / "chroma"
-            
+
             if db_path.exists():
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                
+
                 for chapter_id in request.chapter_ids:
                     cursor.execute("DELETE FROM chapters WHERE chapter_id = ?", (chapter_id,))
                     cursor.execute("DELETE FROM chunks WHERE chapter_id = ?", (chapter_id,))
-                    
+
                     try:
                         cursor.execute("DELETE FROM chunks_fts WHERE chapter_id = ?", (chapter_id,))
                     except sqlite3.Error as e:
                         logger.debug(f"[Knowledge] 删除FTS数据失败(可忽略): {e}")
-                    
+
                     deleted_count += cursor.rowcount
-                
+
                 conn.commit()
                 conn.close()
-            
+
             if chroma_dir.exists():
                 try:
                     import chromadb
                     client = chromadb.PersistentClient(path=str(chroma_dir))
                     collection = client.get_or_create_collection("novel_knowledge")
-                    
+
                     for chapter_id in request.chapter_ids:
                         collection.delete(where={"chapter_id": chapter_id})
                 except Exception as e:
                     logger.warning(f"从向量库删除失败: {e}")
-            
+
             return JSONResponse({
                 "success": True,
                 "message": f"已清除 {len(request.chapter_ids)} 个章节的知识库数据",
                 "deleted_chapters": request.chapter_ids
             })
-        
+
         else:
             return JSONResponse({
                 "success": False,
                 "error": "请指定清除全部（clear_all=True）或提供章节ID列表（chapter_ids）"
             })
-            
+
     except Exception as e:
         return JSONResponse({
             "success": False,
@@ -963,18 +1061,18 @@ async def clear_knowledge_base(request: ClearKnowledgeBaseRequest):
 async def delete_knowledge_chapter(chapter_id: str):
     """删除知识库中的单个章节"""
     from ...project_manager import get_project_manager
-    
+
     pm = get_project_manager()
-    
+
     if not pm.current_project_id:
         raise HTTPException(status_code=400, detail="请先选择一个项目")
-    
+
     data_dir = _project_knowledge_base_dir(pm.current_project_id)
     db_path = data_dir / "knowledge.db"
     chroma_dir = data_dir / "chroma"
-    
+
     deleted = False
-    
+
     try:
         if db_path.exists():
             conn = sqlite3.connect(str(db_path))
@@ -985,7 +1083,7 @@ async def delete_knowledge_chapter(chapter_id: str):
             deleted = chapter_deleted
             conn.commit()
             conn.close()
-        
+
         if chroma_dir.exists():
             try:
                 import chromadb
@@ -994,7 +1092,7 @@ async def delete_knowledge_chapter(chapter_id: str):
                 collection.delete(where={"chapter_id": chapter_id})
             except Exception as e:
                 logger.warning(f"[Knowledge] 删除向量库章节失败(可忽略): {e}")
-        
+
         if deleted:
             return JSONResponse({
                 "success": True,
@@ -1005,6 +1103,6 @@ async def delete_knowledge_chapter(chapter_id: str):
                 "success": False,
                 "error": "章节不存在"
             })
-            
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")

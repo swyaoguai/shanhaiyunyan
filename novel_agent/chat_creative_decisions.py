@@ -440,9 +440,15 @@ def apply_creative_decision(pm: Any, decision: CreativeDecision, mode: str = "au
 
     status = "applied" if updated_files else "recorded"
     record = decision.to_record(mode=effective_mode, status=status, updated_files=updated_files)
+    project_content_updated = any(
+        str(item.get("kind") or "").strip() not in {"creation_contract", "task_pool"}
+        for item in updated_files
+        if isinstance(item, dict)
+    )
     _append_decision_record(pm, record)
     return {
         "applied": bool(updated_files),
+        "project_content_updated": project_content_updated,
         "decision": record,
         "updated_files": updated_files,
     }

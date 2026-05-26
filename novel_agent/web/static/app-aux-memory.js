@@ -778,7 +778,7 @@ async function auxToggleCategory(categoryId) {
 async function auxDeleteCategory(categoryId) {
     const cat = auxMemoryState.categories.find((c) => c.id === categoryId);
     if (!cat) return showToast('分类不存在', 'warning');
-    if (!confirm(`确定删除分类「${cat.name || '未命名'}」吗？\n该分类下条目会一起删除，不可恢复。`)) return;
+    if (!(await window.showConfirmDialog(`确定删除分类「${cat.name || '未命名'}」吗？\n该分类下条目会一起删除，不可恢复。`))) return;
     try {
         await apiCall(`/api/aux-memory/categories/${cat.id}`, 'DELETE');
         if (auxMemoryState.currentCategoryId === cat.id) auxMemoryState.currentCategoryId = '';
@@ -862,7 +862,7 @@ async function auxSaveItem() {
 async function auxDeleteItem() {
     const cur = auxCurrentItem();
     if (!cur) return showToast('请先选择条目', 'warning');
-    if (!confirm('确定删除该条目吗？删除后不可恢复。')) return;
+    if (!(await window.showConfirmDialog('确定删除该条目吗？删除后不可恢复。'))) return;
     try {
         await apiCall(`/api/aux-memory/items/${cur.id}`, 'DELETE');
         auxMemoryState.selectedItemId = '';
@@ -897,7 +897,7 @@ async function auxBatchSetEnabled(enabled) {
 async function auxBatchDelete() {
     const ids = auxSelectedVisibleIds();
     if (ids.length === 0) return showToast('请先勾选要删除的条目', 'warning');
-    if (!confirm(`确定删除已选 ${ids.length} 条记忆吗？该操作不可恢复。`)) return;
+    if (!(await window.showConfirmDialog(`确定删除已选 ${ids.length} 条记忆吗？该操作不可恢复。`))) return;
     try {
         const res = await apiCall('/api/aux-memory/items/batch-delete', 'POST', { item_ids: ids });
         auxMemoryState.selectedItemIds = [];
@@ -924,8 +924,8 @@ async function auxClearFiltered() {
     const matched = auxMemoryState.items.length;
     if (matched <= 0) return showToast('当前筛选下没有可清空条目', 'warning');
     const scope = auxClearScopeText();
-    if (!confirm(`将清空当前筛选下 ${matched} 条记忆。\n范围：${scope}\n\n删除后不可恢复，是否继续？`)) return;
-    if (!confirm('请再次确认：本次将执行永久删除。')) return;
+    if (!(await window.showConfirmDialog(`将清空当前筛选下 ${matched} 条记忆。\n范围：${scope}\n\n删除后不可恢复，是否继续？`))) return;
+    if (!(await window.showConfirmDialog('请再次确认：本次将执行永久删除。'))) return;
     try {
         const res = await apiCall('/api/aux-memory/items/clear', 'POST', {
             category_id: auxMemoryState.currentCategoryId || '',

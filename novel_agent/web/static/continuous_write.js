@@ -33,6 +33,11 @@ function createInfiniteWriteProjectState() {
 
 const INFINITE_WRITE_LEGACY_STORAGE_KEY = 'infinite_write_data';
 const INFINITE_WRITE_LEGACY_MODEL_KEY = 'infinite_write_model';
+const IW_CHAPTER_MARK_PATTERN = '第\\s*[\\d一二三四五六七八九十百千万零〇两]+\\s*[章节回]';
+const IW_MARKDOWN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}#{1,6}\\s*(?:${IW_CHAPTER_MARK_PATTERN})\\s*[-—:：、.．\\s]*([^\\n\\r]*)\\s*(?:\\r?\\n|$)`);
+const IW_PLAIN_CHAPTER_HEADING_RE = new RegExp(`^\\s{0,3}(?:${IW_CHAPTER_MARK_PATTERN})(?:(?:\\s*[-—:：、.．]\\s*|\\s+)([^\\n\\r]*))?\\s*(?:\\r?\\n|$)`);
+const IW_CHAPTER_TITLE_PREFIX_RE = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:${IW_CHAPTER_MARK_PATTERN})(?:\\s*[-—:：、.．]\\s*|\\s+)?`);
+const IW_BARE_CHAPTER_TITLE_RE = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:${IW_CHAPTER_MARK_PATTERN})\\s*$`);
 
 const infiniteWriteState = {
     isRunning: false,
@@ -42,6 +47,49 @@ const infiniteWriteState = {
     showTrends: true,
     ...createInfiniteWriteProjectState()
 };
+
+function normalizeInfiniteWriteChapterTitle(title, chapterNumber) {
+    let cleanTitle = String(title || '').trim()
+        .replace(/^\s{0,3}#{1,6}\s*/, '')
+        .replace(/[*_`~]+/g, '')
+        .trim();
+    cleanTitle = cleanTitle.replace(IW_CHAPTER_TITLE_PREFIX_RE, '').replace(/^[\-—:：、.．\s]+/, '').trim();
+    if (IW_BARE_CHAPTER_TITLE_RE.test(cleanTitle)) {
+        cleanTitle = '';
+    }
+    return cleanTitle || `第${chapterNumber || 1}章`;
+}
+
+function normalizeInfiniteWriteChapterContent(content) {
+    const text = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    if (!text) return '';
+    const match = text.match(IW_MARKDOWN_CHAPTER_HEADING_RE) || text.match(IW_PLAIN_CHAPTER_HEADING_RE);
+    return match ? text.slice(match[0].length).trim() : text;
+}
+
+function normalizeInfiniteWriteChapter(chapter, fallbackNumber = 1) {
+    const source = chapter && typeof chapter === 'object' ? chapter : {};
+    const parsedNumber = Number(source.chapter_number || source.chapter || fallbackNumber || 1);
+    const chapterNumber = Number.isFinite(parsedNumber) && parsedNumber > 0 ? parsedNumber : (fallbackNumber || 1);
+    const contentText = String(source.content || '');
+    const headingMatch = contentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+        .match(IW_MARKDOWN_CHAPTER_HEADING_RE) || contentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+        .match(IW_PLAIN_CHAPTER_HEADING_RE);
+    const headingTitle = headingMatch ? (headingMatch[1] || '') : '';
+    const rawTitle = String(source.title || source.name || '').trim();
+    const title = normalizeInfiniteWriteChapterTitle(
+        headingTitle && (!rawTitle || IW_BARE_CHAPTER_TITLE_RE.test(rawTitle)) ? headingTitle : rawTitle,
+        chapterNumber
+    );
+    const content = normalizeInfiniteWriteChapterContent(contentText);
+    return {
+        ...source,
+        chapter_number: chapterNumber,
+        title,
+        content,
+        word_count: Number(source.word_count || 0) > 0 ? Number(source.word_count || 0) : content.replace(/\s/g, '').length
+    };
+}
 
 function getInfiniteWriteStorageKey(projectId = store?.currentProjectId || '') {
     return projectId ? `infinite_write_data_${projectId}` : INFINITE_WRITE_LEGACY_STORAGE_KEY;
@@ -54,7 +102,9 @@ function getInfiniteWriteModelStorageKey(projectId = store?.currentProjectId || 
 function applyInfiniteWriteProjectState(data = {}) {
     const defaults = createInfiniteWriteProjectState();
     infiniteWriteState.sessionId = data.sessionId || defaults.sessionId;
-    infiniteWriteState.chapters = Array.isArray(data.chapters) ? data.chapters : defaults.chapters;
+    infiniteWriteState.chapters = Array.isArray(data.chapters)
+        ? data.chapters.map((chapter, index) => normalizeInfiniteWriteChapter(chapter, index + 1))
+        : defaults.chapters;
     infiniteWriteState.currentChapter = data.currentChapter || defaults.currentChapter;
     infiniteWriteState.totalWords = data.totalWords || defaults.totalWords;
     infiniteWriteState.selectedModel = data.selectedModel || defaults.selectedModel;
@@ -286,10 +336,10 @@ const IW_TREND_PLATFORMS = [
     { id: 'smzdm', name: 'SMZDM' }
 ];
 function formatChapterNavDisplay(chapterNumber, title) {
+    const cleanTitle = normalizeInfiniteWriteChapterTitle(title, chapterNumber);
     if (typeof window.formatChapterDisplay === 'function') {
-        return window.formatChapterDisplay(chapterNumber, title);
+        return window.formatChapterDisplay(chapterNumber, cleanTitle);
     }
-    const cleanTitle = String(title || '').replace(/^第?\s*\d+\s*[章节回]?\s*[:：、.\-\s]*/i, '').trim();
     return cleanTitle ? `第${chapterNumber}章 ${cleanTitle}` : `第${chapterNumber}章`;
 }
 
@@ -323,7 +373,7 @@ function getChapterNavEntries(chapters, options = {}) {
     const entries = (Array.isArray(chapters) ? chapters : [])
         .map((chapter, index) => {
             const chapterNumber = getChapterNavNumber(chapter, index + 1);
-            const title = String(chapter?.title || chapter?.name || '').trim();
+            const title = normalizeInfiniteWriteChapterTitle(chapter?.title || chapter?.name || '', chapterNumber);
             const displayText = formatChapterNavDisplay(chapterNumber, title);
             const searchableText = normalizeChapterSearchText([
                 title,
@@ -428,10 +478,14 @@ function renderInfiniteWriteNavPanel() {
     window.makeElementActivatable(startEntry, () => {
         startEntry.click();
     }, { bindClick: false });
-    startEntry.addEventListener('click', () => {
-        if (typeof window.confirmLeaveInfiniteWriteEditor === 'function' &&
-            !window.confirmLeaveInfiniteWriteEditor('切换到创作面板')) {
-            return;
+    startEntry.addEventListener('click', async () => {
+        if (typeof window.confirmLeaveInfiniteWriteEditor === 'function') {
+            const canLeave = window.confirmLeaveInfiniteWriteEditor('切换到创作面板');
+            if (canLeave && typeof canLeave.then === 'function') {
+                if (!(await canLeave)) return;
+            } else if (!canLeave) {
+                return;
+            }
         }
         setInfiniteWriteActiveView('panel');
         saveInfiniteWriteData();
@@ -580,13 +634,17 @@ function loadInfiniteWriteNavChapterList() {
             if (wordCount) wordCount.style.display = '';
         });
 
-        item.addEventListener('click', (e) => {
+        item.addEventListener('click', async (e) => {
             if (e.target.closest('.item-actions')) {
                 return;
             }
-            if (typeof window.confirmLeaveInfiniteWriteEditor === 'function' &&
-                !window.confirmLeaveInfiniteWriteEditor('切换章节')) {
-                return;
+            if (typeof window.confirmLeaveInfiniteWriteEditor === 'function') {
+                const canLeave = window.confirmLeaveInfiniteWriteEditor('切换章节');
+                if (canLeave && typeof canLeave.then === 'function') {
+                    if (!(await canLeave)) return;
+                } else if (!canLeave) {
+                    return;
+                }
             }
             const index = parseInt(item.dataset.chapter);
             const chapter = infiniteWriteState.chapters[index];
@@ -611,7 +669,7 @@ function loadInfiniteWriteNavChapterList() {
             const index = parseInt(item.dataset.chapter);
             const chapter = infiniteWriteState.chapters[index];
             if (!chapter) return;
-            const confirmed = confirm(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`);
+            const confirmed = await window.showConfirmDialog(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`);
             if (!confirmed) return;
             if (typeof window.deleteIWChapterByNumber === 'function') {
                 await window.deleteIWChapterByNumber(chapter.chapter_number, { confirmed: true });
@@ -3687,26 +3745,26 @@ function editSummary(summary) {
 
 // ===== 重置无限续写 =====
 function resetInfiniteWrite() {
-    if (!confirm('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销。')) {
-        return;
-    }
+    window.showConfirmDialog('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销。').then(confirmed => {
+        if (!confirmed) return;
 
-    // 重置状态
-    infiniteWriteState.sessionId = 'infinite_' + Date.now();
-    infiniteWriteState.chapters = [];
-    infiniteWriteState.currentChapter = 0;
-    infiniteWriteState.totalWords = 0;
-    infiniteWriteState.pendingSummaries = [];
+        // 重置状态
+        infiniteWriteState.sessionId = 'infinite_' + Date.now();
+        infiniteWriteState.chapters = [];
+        infiniteWriteState.currentChapter = 0;
+        infiniteWriteState.totalWords = 0;
+        infiniteWriteState.pendingSummaries = [];
 
-    // 清除本地存储
-    clearInfiniteWriteDataForProject();
-    setInfiniteWriteActiveView('panel');
+        // 清除本地存储
+        clearInfiniteWriteDataForProject();
+        setInfiniteWriteActiveView('panel');
 
-    showToast('已重置，可以开始新故事');
+        showToast('已重置，可以开始新故事');
 
-    // 刷新界面
-    renderInfiniteWriteInterface();
-    loadInfiniteWriteChapterList();
+        // 刷新界面
+        renderInfiniteWriteInterface();
+        loadInfiniteWriteChapterList();
+    });
 }
 
 // ===== 更新界面状态 =====
@@ -4001,8 +4059,8 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
     });
 
     // 放弃本章
-    document.getElementById('iw-discard-btn')?.addEventListener('click', () => {
-        if (confirm('确定要放弃这一章吗？内容将不会被保存。')) {
+    document.getElementById('iw-discard-btn')?.addEventListener('click', async () => {
+        if (await window.showConfirmDialog('确定要放弃这一章吗？内容将不会被保存。')) {
             modal.classList.add('hidden');
             modal.innerHTML = '';
             showToast('已放弃本章，可以重新创作');
@@ -4102,7 +4160,7 @@ function showInfiniteWriteChapterPreview(chapter) {
 
     // 删除本章及之后章节
     document.getElementById('iw-delete-chapter-btn')?.addEventListener('click', async () => {
-        const confirmed = confirm(`确定要删除第${chapter.chapter_number}章及之后章节吗？\n\n此操作不可撤销。`);
+        const confirmed = await window.showConfirmDialog(`确定要删除第${chapter.chapter_number}章及之后章节吗？\n\n此操作不可撤销。`);
         if (!confirmed) return;
         modal.classList.add('hidden');
         modal.innerHTML = '';
@@ -4111,7 +4169,7 @@ function showInfiniteWriteChapterPreview(chapter) {
 
     // 重新生成本章
     document.getElementById('iw-regenerate-chapter-btn')?.addEventListener('click', async () => {
-        const confirmed = confirm(`确定要重新生成第${chapter.chapter_number}章吗？\n\n将删除本章及之后章节并重新生成。`);
+        const confirmed = await window.showConfirmDialog(`确定要重新生成第${chapter.chapter_number}章吗？\n\n将删除本章及之后章节并重新生成。`);
         if (!confirmed) return;
         modal.classList.add('hidden');
         modal.innerHTML = '';
@@ -4152,6 +4210,10 @@ async function saveChapterToProject(chapter) {
             content: chapter.content || '',
             word_count: chapter.word_count || 0,
             created_from: 'infinite_write',
+            source_mode: 'infinite_write',
+            source_type: 'continuous_write',
+            source_session_id: infiniteWriteState.sessionId || '',
+            tags: ['source:infinite_write'],
             created_at: new Date().toISOString()
         };
 
@@ -4159,7 +4221,7 @@ async function saveChapterToProject(chapter) {
         if (outline[chapterIndex]) {
             console.log('[InfiniteWrite] saveToProject: chapter exists, ask overwrite');
             // 章节已存在，询问是否覆盖
-            const overwrite = confirm(`第${chapterNum}章已存在，是否覆盖？\n\n现有标题：${outline[chapterIndex].title}\n新标题：${chapterData.title}`);
+            const overwrite = await window.showConfirmDialog(`第${chapterNum}章已存在，是否覆盖？\n\n现有标题：${outline[chapterIndex].title}\n新标题：${chapterData.title}`);
             if (!overwrite) {
                 showToast('已取消保存');
                 return;
@@ -4174,7 +4236,10 @@ async function saveChapterToProject(chapter) {
                     summary: '',
                     content: '',
                     word_count: 0,
-                    placeholder: true
+                    placeholder: true,
+                    source_mode: 'infinite_write',
+                    source_type: 'continuous_write',
+                    tags: ['source:infinite_write']
                 });
             }
             outline.push(chapterData);
@@ -4605,6 +4670,10 @@ async function executeFinishStory() {
                 content: ch.content || '',
                 word_count: ch.word_count || 0,
                 created_from: 'infinite_write',
+                source_mode: 'infinite_write',
+                source_type: 'continuous_write',
+                source_session_id: infiniteWriteState.sessionId || '',
+                tags: ['source:infinite_write'],
                 created_at: ch.created_at || new Date().toISOString()
             });
         }

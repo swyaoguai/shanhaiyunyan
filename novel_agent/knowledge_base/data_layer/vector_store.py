@@ -8,6 +8,7 @@
 - 持久化存储
 """
 
+import json
 import logging
 import sys
 import traceback
@@ -15,6 +16,34 @@ from typing import Optional, Any
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_chroma_metadata_value(value: Any) -> Any:
+    """Convert metadata values to scalar types accepted by Chroma."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return json.dumps(list(value), ensure_ascii=False, default=str)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return str(value)
+
+
+def _sanitize_chroma_metadatas(metadatas: Optional[list[dict]]) -> list[dict]:
+    if metadatas is None:
+        return []
+    sanitized: list[dict] = []
+    for metadata in metadatas:
+        if not isinstance(metadata, dict):
+            sanitized.append({})
+            continue
+        sanitized.append({
+            str(key): _sanitize_chroma_metadata_value(value)
+            for key, value in metadata.items()
+        })
+    return sanitized
 
 # ChromaDB导入与状态检测
 CHROMA_AVAILABLE = False
@@ -138,6 +167,7 @@ class VectorStore:
         # 确保元数据列表长度匹配
         if metadatas is None:
             metadatas = [{}] * len(ids)
+        metadatas = _sanitize_chroma_metadatas(metadatas)
         
         try:
             self._collection.add(
@@ -172,6 +202,7 @@ class VectorStore:
         
         if metadatas is None:
             metadatas = [{}] * len(ids)
+        metadatas = _sanitize_chroma_metadatas(metadatas)
         
         try:
             self._collection.upsert(
@@ -354,7 +385,8 @@ class MockVectorStore:
         
         if metadatas is None:
             metadatas = [{}] * len(ids)
-        
+        metadatas = _sanitize_chroma_metadatas(metadatas)
+
         for i, doc_id in enumerate(ids):
             self._data[doc_id] = {
                 "embedding": embeddings[i],

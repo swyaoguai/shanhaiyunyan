@@ -21,6 +21,10 @@ from ..constants import AGENT_TEMPERATURE, WRITING_CONFIG, TIMEOUTS
 
 logger = logging.getLogger(__name__)
 
+CHAT_CONTEXT_CHAR_BUDGET = 9000
+CHAT_CONTEXT_RECENT_CHAR_BUDGET = 4500
+CHAT_CONTEXT_SUMMARY_SOURCE_LIMIT = 12000
+
 # 热点平台映射（只保留能正常工作的平台）
 # 热点平台映射（只保留抖音和头条）
 TRENDS_PLATFORMS = {
@@ -85,6 +89,19 @@ def _localize_user_visible_agent_names(text: str) -> str:
 def _strip_technical_markers(text: str) -> str:
     """移除技术标记，并从JSON格式中提取reply字段"""
     return strip_visible_technical_markers(text, _localize_user_visible_agent_names)
+
+
+def _message_content_chars(messages: List[Dict[str, Any]]) -> int:
+    return sum(len(str(message.get("content") or "")) for message in messages)
+
+
+def _truncate_middle(text: str, limit: int) -> str:
+    value = str(text or "")
+    if limit <= 0 or len(value) <= limit:
+        return value
+    head = max(1, limit // 2)
+    tail = max(1, limit - head - 24)
+    return f"{value[:head]}\n...[中间内容已压缩]...\n{value[-tail:]}"
 
 
 class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
@@ -346,6 +363,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             
             messages = self.conversation_history.copy()
             messages.append({"role": "user", "content": analysis_prompt})
+            messages = await self._prepare_messages_for_llm(messages, user_message)
             
             response = await self.call_llm(messages, temperature=AGENT_TEMPERATURE.CREATIVE_HIGH)
             
@@ -395,9 +413,10 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             
         except Exception as e:
             logger.error(f"Chat error: {e}", exc_info=True)
+            reply = self._format_chat_error_reply(e)
             # 确保有响应（响应保证机制）
             return {
-                "reply": "抱歉，我遇到了一些问题。能重新告诉我你的想法吗？",
+                "reply": reply,
                 "is_complete": False,
                 "collected_info": self.collected_info,
                 "error": str(e)
@@ -444,6 +463,7 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 
             messages = self.conversation_history.copy()
             messages.append({"role": "user", "content": analysis_prompt})
+            messages = await self._prepare_messages_for_llm(messages, user_message)
 
             # === 流式LLM调用 ===
             logger.info(f"[{self.name}] 开始流式LLM调用...")
@@ -846,6 +866,132 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
 }}""")
         
         return "\n".join(parts)
+
+    async def _prepare_messages_for_llm(
+        self,
+        messages: List[Dict[str, str]],
+        user_message: str,
+    ) -> List[Dict[str, str]]:
+        """Keep current user input exact while summarizing older chat history when needed."""
+        total_chars = _message_content_chars(messages)
+        if total_chars <= CHAT_CONTEXT_CHAR_BUDGET or len(messages) <= 3:
+            return messages
+
+        await self._emit_callback_event({
+            "type": "progress_update",
+            "agent": self.name,
+            "message": "上下文较长，正在整理早期对话...",
+            "progress": None,
+        })
+
+        analysis_message = messages[-1]
+        history = messages[:-1]
+        recent: List[Dict[str, str]] = []
+        recent_chars = 0
+        for message in reversed(history):
+            content_len = len(str(message.get("content") or ""))
+            if recent and recent_chars + content_len > CHAT_CONTEXT_RECENT_CHAR_BUDGET:
+                break
+            recent.append(dict(message))
+            recent_chars += content_len
+        recent.reverse()
+
+        older_count = max(0, len(history) - len(recent))
+        if older_count <= 0:
+            return recent + [analysis_message]
+
+        older = history[:older_count]
+        summary = await self._summarize_history_for_context(older, user_message)
+        summary_message = {
+            "role": "system",
+            "content": (
+                "【较早对话忠实摘要】\n"
+                "以下摘要只用于延续上下文；如果与用户当前输入或显式引用冲突，以当前输入和引用内容为准。\n"
+                f"{summary}"
+            ),
+        }
+        prepared = [summary_message] + recent + [analysis_message]
+        logger.info(
+            "[%s] Compacted chat context from %s to %s chars (%s older messages summarized)",
+            self.name,
+            total_chars,
+            _message_content_chars(prepared),
+            older_count,
+        )
+        await self._emit_callback_event({
+            "type": "progress_update",
+            "agent": self.name,
+            "message": "上下文整理完成，正在生成回复...",
+            "progress": None,
+        })
+        return prepared
+
+    async def _summarize_history_for_context(
+        self,
+        older_messages: List[Dict[str, str]],
+        user_message: str,
+    ) -> str:
+        transcript_lines = []
+        source_chars = 0
+        for message in older_messages:
+            role = "用户" if message.get("role") == "user" else "AI"
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            remaining = CHAT_CONTEXT_SUMMARY_SOURCE_LIMIT - source_chars
+            if remaining <= 0:
+                break
+            content = _truncate_middle(content, min(len(content), remaining))
+            transcript_lines.append(f"{role}: {content}")
+            source_chars += len(content)
+
+        transcript = "\n\n".join(transcript_lines)
+        if not transcript:
+            return "较早对话为空。"
+
+        prompt = f"""请把以下较早聊天记录整理成忠实、可追溯的上下文摘要，用于小说创作助手继续对话。
+
+要求：
+- 只总结记录中明确出现的信息，不要补写新设定。
+- 保留用户确认过的人名、章节、世界观规则、大纲、细纲、章纲、禁忌和待办。
+- 标明未确认或有冲突的信息。
+- 不要覆盖用户当前这句话：{user_message}
+- 输出中文要点，不要输出 JSON。
+
+较早聊天记录：
+{transcript}
+"""
+
+        previous_handler = self.callback_handler
+        self.callback_handler = None
+        try:
+            response = await self.call_llm(
+                [{"role": "user", "content": prompt}],
+                temperature=AGENT_TEMPERATURE.SUMMARY_STABLE,
+                max_tokens=900,
+                enable_retry=True,
+            )
+            summary = str(response or "").strip()
+            if summary:
+                return summary[:2500]
+        except Exception as exc:
+            logger.warning(f"[{self.name}] Context summary failed, using chronological fallback: {exc}")
+        finally:
+            self.callback_handler = previous_handler
+
+        return _truncate_middle(transcript, 2500)
+
+    @staticmethod
+    def _format_chat_error_reply(error: Exception) -> str:
+        text = str(error or "")
+        lower = text.lower()
+        if "返回空" in text or "空白" in text or "empty" in lower or "blank" in lower:
+            return "模型这次返回了空内容，系统已经自动重试但仍未拿到有效回复。请稍后重试，或在模型设置里切换到更稳定的聊天模型。"
+        if "timeout" in lower or "timed out" in lower or "超时" in text:
+            return "模型响应超时了，可能是上下文太长或服务商当前较慢。系统已尽量整理上下文，你可以稍后重试或切换响应更快的模型。"
+        if "模型服务拒绝" in text or "request was blocked" in lower or "permission" in lower:
+            return text
+        return "抱歉，我遇到了一些问题。系统没有丢掉你的输入，可以稍后重试，或切换一个更稳定的模型再继续。"
     
     def _format_auto_tool_result(self, result: Dict[str, Any]) -> str:
         """

@@ -39,7 +39,7 @@ class EmbeddingService:
     """
     向量化服务
     
-    封装硅基流动API，提供文本向量化功能。
+    封装 OpenAI 兼容 Embeddings API，提供文本向量化功能。
     """
     
     def __init__(self, config: Optional[SiliconFlowConfig] = None):
@@ -47,7 +47,7 @@ class EmbeddingService:
         初始化向量化服务
         
         Args:
-            config: 硅基流动API配置
+            config: OpenAI 兼容向量 API 配置
         """
         if not HTTPX_AVAILABLE:
             raise ImportError("httpx未安装，请运行: pip install httpx")
@@ -63,8 +63,8 @@ class EmbeddingService:
         """验证配置"""
         if not self.config.api_key:
             raise ValueError(
-                "缺少硅基流动API密钥，请设置环境变量 SILICONFLOW_API_KEY "
-                "或在配置中提供 api_key"
+                "缺少向量API密钥，请设置环境变量 KB_EMBEDDING_API_KEY "
+                "或 SILICONFLOW_API_KEY，或在配置中提供 api_key"
             )
     
     def _initialize_client(self):
@@ -183,7 +183,7 @@ class EmbeddingService:
     
     def _call_api(self, texts: list[str]) -> list[list[float]]:
         """
-        调用硅基流动API
+        调用 OpenAI 兼容 Embeddings API
         
         Args:
             texts: 文本列表

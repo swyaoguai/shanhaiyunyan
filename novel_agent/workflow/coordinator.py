@@ -387,6 +387,13 @@ class NovelCoordinator:
         """Dedup: sync outline to library service."""
         try:
             from ..library_service import get_library_service
+            from ..source_modes import annotate_payload_source
+
+            outline_rows = annotate_payload_source(
+                outline_rows,
+                "multi_agent",
+                source_type="multi_agent_outline",
+            )
             svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("outline", outline_rows)
         except Exception as e:
@@ -396,6 +403,13 @@ class NovelCoordinator:
         """Dedup: sync eventlines to library service."""
         try:
             from ..library_service import get_library_service
+            from ..source_modes import annotate_payload_source
+
+            eventline_rows = annotate_payload_source(
+                eventline_rows,
+                "multi_agent",
+                source_type="multi_agent_eventlines",
+            )
             svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("eventlines", eventline_rows)
         except Exception as e:
@@ -405,6 +419,13 @@ class NovelCoordinator:
         """Dedup: sync chapter settings to library service."""
         try:
             from ..library_service import get_library_service
+            from ..source_modes import annotate_payload_source
+
+            chapter_setting_rows = annotate_payload_source(
+                chapter_setting_rows,
+                "multi_agent",
+                source_type="multi_agent_chapter_settings",
+            )
             svc = get_library_service(self.project_dir)
             svc.upsert_from_legacy("chapter_settings", chapter_setting_rows)
         except Exception as e:
@@ -421,6 +442,13 @@ class NovelCoordinator:
         merged_rows = merge_eventline_rows(existing_rows, generated_rows)
         merged_rows = enrich_eventlines_with_character_participants(merged_rows, character_rows)
         if merged_rows != existing_rows:
+            from ..source_modes import annotate_payload_source
+
+            merged_rows = annotate_payload_source(
+                merged_rows,
+                "multi_agent",
+                source_type="multi_agent_eventlines",
+            )
             self.project_manager.save_project_data("eventlines", merged_rows)
             self._sync_eventlines_to_library(merged_rows)
             return {
@@ -1524,6 +1552,11 @@ class NovelCoordinator:
         row["chapter_number"] = chapter_number
         row["title"] = chapter_title
         row["content"] = chapter_content
+        row["source_mode"] = "multi_agent"
+        row["source_type"] = "multi_agent_chapter"
+        row.setdefault("tags", [])
+        if isinstance(row["tags"], list) and "source:multi_agent" not in row["tags"]:
+            row["tags"].append("source:multi_agent")
         row["updated_at"] = timestamp
 
         # Keep slots through the current chapter so chapter identity does not
@@ -1546,6 +1579,11 @@ class NovelCoordinator:
             legacy_row["chapter_number"] = chapter_number
             legacy_row["title"] = chapter_title
             legacy_row["content"] = chapter_content
+            legacy_row["source_mode"] = "multi_agent"
+            legacy_row["source_type"] = "multi_agent_chapter"
+            legacy_row.setdefault("tags", [])
+            if isinstance(legacy_row["tags"], list) and "source:multi_agent" not in legacy_row["tags"]:
+                legacy_row["tags"].append("source:multi_agent")
             legacy_row["updated_at"] = timestamp
             self.project_manager.save_project_data("outline", legacy_rows)
             self._sync_outline_to_library(legacy_rows)
@@ -1579,7 +1617,11 @@ class NovelCoordinator:
                     title=chapter_title,
                     content=chapter_content,
                 )
-                save_chapter_summary_to_library(chapter_number, summary)
+                save_chapter_summary_to_library(
+                    chapter_number,
+                    summary,
+                    source_mode="multi_agent",
+                )
         except Exception as e:
             logger.warning(f"[Coordinator] Auto chapter summary failed: {e}")
 
@@ -1826,6 +1868,8 @@ class NovelCoordinator:
             persist_worldbuilding_project_data(
                 {"world": world_data},
                 project_manager=self.project_manager,
+                source_mode="multi_agent",
+                source_type="multi_agent_worldbuilding",
             )
 
         self._update_checkpoint(add_stage="worldbuilding")
@@ -1900,7 +1944,13 @@ class NovelCoordinator:
         try:
             from ..project_data_recovery import persist_project_data
 
-            persist_project_data("characters", self.character_manager.export_for_llm(), project_manager=self.project_manager)
+            persist_project_data(
+                "characters",
+                self.character_manager.export_for_llm(),
+                project_manager=self.project_manager,
+                source_mode="multi_agent",
+                source_type="multi_agent_characters",
+            )
         except Exception as exc:
             logger.warning(f"[Coordinator] 角色档案同步到项目资料库失败: {exc}")
         progress.append({
@@ -2197,11 +2247,21 @@ class NovelCoordinator:
             raise
 
     def _outline_to_project_rows(self, outline_data: Any) -> List[Dict[str, Any]]:
+        from ..source_modes import annotate_payload_source
+
         timestamp = datetime.now().isoformat()
         overview = build_outline_overview_row(outline_data, timestamp=timestamp)
-        return [overview] if overview else []
+        rows = [overview] if overview else []
+        return annotate_payload_source(rows, "multi_agent", source_type="multi_agent_outline")
 
     def _persist_outline_rows(self, outline_rows: List[Dict[str, Any]]) -> Dict[str, str]:
+        from ..source_modes import annotate_payload_source
+
+        outline_rows = annotate_payload_source(
+            outline_rows,
+            "multi_agent",
+            source_type="multi_agent_outline",
+        )
         outline_path = self.project_manager.get_project_data_path("outline")
         existed_before = outline_path.exists()
         self.project_manager.save_project_data("outline", outline_rows)
@@ -2496,7 +2556,11 @@ class NovelCoordinator:
                     title=chapter_title,
                     content=chapter_content,
                 )
-                save_chapter_summary_to_library(chapter_num, summary)
+                save_chapter_summary_to_library(
+                    chapter_num,
+                    summary,
+                    source_mode="multi_agent",
+                )
         except Exception as e:
             logger.warning(f"[Coordinator] Auto chapter summary failed: {e}")
 

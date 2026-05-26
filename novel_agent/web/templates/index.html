@@ -151,7 +151,7 @@
             <div class="copilot-workflow-panel hidden" id="copilot-workflow-panel"></div>
             <div class="copilot-body scrollbar-custom" id="copilot-messages">
                 <div class="msg ai">你好！我是山海·云烟创作助手。试试：
-                    • 输入 <b>@</b> 引用角色、章节或设定
+                    • 输入 <b>@</b> 引用角色、章节、世界观、大纲或章纲
                     • 直接提问或发指令</div>
             </div>
             <div class="copilot-input">
@@ -161,7 +161,7 @@
                 </div>
                 <div class="copilot-input-resize-handle" id="copilot-resize-handle" title="拖动调整输入框高度"></div>
                 <div class="copilot-input-wrapper">
-                    <textarea id="copilot-input-text" placeholder="输入内容，@ 可引用角色/章节，输入 / 查看命令；直接中文会按自然语言理解..." rows="2"></textarea>
+                    <textarea id="copilot-input-text" placeholder="输入内容，@ 可引用角色/章节/世界观/大纲/细纲/章纲；直接中文会按自然语言理解..." rows="2"></textarea>
                     <button id="copilot-send-btn" title="发送"><i class="ri-send-plane-fill"></i></button>
                 </div>
             </div>
@@ -191,7 +191,7 @@
     <!-- 2. 主题设置（依赖 utils） -->
     <script src="/static/app-theme.js?v=1.1"></script>
     <!-- 3. 核心状态和初始化（依赖 utils, theme） -->
-    <script src="/static/app-core.js?v=1.24"></script>
+    <script src="/static/app-core.js?v=1.25"></script>
     <!-- 4. 导航渲染（依赖 core） -->
     <script src="/static/app-nav.js?v=1.3"></script>
     <!-- 5. 资料库管理（依赖 core, nav） -->
@@ -209,11 +209,11 @@
     <!-- 7.1 备份与资料库管理（依赖 core, settings） -->
     <script src="/static/app-backup-resources.js?v=1.0"></script>
     <!-- 8. Copilot增强（依赖 core） -->
-    <script src="/static/app-copilot.js?v=1.2"></script>
+    <script src="/static/app-copilot.js?v=1.3"></script>
     <!-- 8.1 工作流结果同步（依赖 core, copilot） -->
     <script src="/static/app-workflow-auto-save.js?v=1.1"></script>
     <!-- 9. 项目管理（依赖 core） -->
-    <script src="/static/app-project.js?v=1.7"></script>
+    <script src="/static/app-project.js?v=1.8"></script>
     <!-- 10. 连续写作功能 -->
     <script src="/static/continuous_write.js?v=2.2"></script>
     <!-- 10.1 短篇创作固定面板 -->
@@ -232,7 +232,7 @@
     <!-- 10.3 小说封面生成 -->
     <script src="/static/app-cover-images.js?v=1.0"></script>
     <!-- 10.1 无限续写章节编辑器 -->
-    <script src="/static/iw-editor.js?v=1.0"></script>
+    <script src="/static/iw-editor.js?v=1.1"></script>
     <!-- 11. 提示词管理 -->
     <script src="/static/prompt_manager.js?v=2.0"></script>
     <!-- 12. Token统计 -->

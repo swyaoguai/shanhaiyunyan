@@ -201,6 +201,37 @@ function safeHostname(url, fallback = '未设置') {
     }
 }
 
+const IMAGE_MODEL_PATTERN = /(image|imagen|dall[-_ ]?e|gpt-image|codex-gpt-image|flux|stable[-_ ]?diffusion|seedream|jimeng|midjourney|ideogram|recraft|hidream|playground|pixverse)/i;
+const NON_TEXT_MODEL_PATTERN = /(embedding|embed|rerank|tts|whisper|audio|speech|moderation)/i;
+
+function getConfiguredModels(config) {
+    if (!Array.isArray(config?.models)) return [];
+    return config.models
+        .map((model) => String(model || '').trim())
+        .filter(Boolean);
+}
+
+function isImageModelName(model) {
+    return IMAGE_MODEL_PATTERN.test(String(model || ''));
+}
+
+function isNonTextModelName(model) {
+    return NON_TEXT_MODEL_PATTERN.test(String(model || ''));
+}
+
+function isTextModelName(model) {
+    const value = String(model || '').trim();
+    return Boolean(value) && !isImageModelName(value) && !isNonTextModelName(value);
+}
+
+function getImageModelsFromConfig(config) {
+    return getConfiguredModels(config).filter((model) => isImageModelName(model));
+}
+
+function getTextModelsFromConfig(config) {
+    return getConfiguredModels(config).filter((model) => isTextModelName(model));
+}
+
 function makeElementActivatable(element, onActivate, options = {}) {
     if (!element || typeof onActivate !== 'function') {
         return element;
@@ -414,29 +445,59 @@ function saveCustomAIClicheWords(words) {
 
 // 默认正则替换规则
 const DEFAULT_REGEX_RULES = [
-    { id: '1', name: '多余空格', pattern: '\\s{2,}', replacement: ' ', enabled: true, description: '将多个连续空格替换为单个空格' },
-    { id: '2', name: '中英文空格', pattern: '([\\u4e00-\\u9fa5])\\s+([\\u4e00-\\u9fa5])', replacement: '$1$2', enabled: true, description: '去除中文之间的空格' },
+    { id: '1', name: '多余空格', pattern: '[ \\t]{2,}', replacement: ' ', enabled: true, description: '将多个连续空格或Tab替换为单个空格' },
+    { id: '2', name: '中英文空格', pattern: '([\\u4e00-\\u9fa5])[ \\t]+([\\u4e00-\\u9fa5])', replacement: '$1$2', enabled: true, description: '去除中文之间的空格或Tab' },
     { id: '3', name: '重复标点', pattern: '([。！？，、；：])\\1+', replacement: '$1', enabled: true, description: '去除重复的标点符号' },
     { id: '4', name: '"的"字过多', pattern: '的{2,}', replacement: '的', enabled: false, description: '将多个连续的"的"替换为单个' },
     { id: '5', name: '省略号规范', pattern: '\\.{3,}|。{3,}', replacement: '……', enabled: true, description: '将三个及以上句点替换为省略号' }
 ];
+
+const REGEX_RULE_PATTERN_MIGRATIONS = {
+    '\\s{2,}': '[ \\t]{2,}',
+    '([\\u4e00-\\u9fa5])\\s+([\\u4e00-\\u9fa5])': '([\\u4e00-\\u9fa5])[ \\t]+([\\u4e00-\\u9fa5])'
+};
+
+function normalizeRegexRule(rule) {
+    const normalized = { ...(rule || {}) };
+    const pattern = String(normalized.pattern || '');
+    if (Object.prototype.hasOwnProperty.call(REGEX_RULE_PATTERN_MIGRATIONS, pattern)) {
+        normalized.pattern = REGEX_RULE_PATTERN_MIGRATIONS[pattern];
+        if (normalized.description === '将多个连续空格替换为单个空格') {
+            normalized.description = '将多个连续空格或Tab替换为单个空格';
+        }
+        if (normalized.description === '去除中文之间的空格') {
+            normalized.description = '去除中文之间的空格或Tab';
+        }
+    }
+    return normalized;
+}
+
+function normalizeRegexRules(rules) {
+    const source = Array.isArray(rules) ? rules : DEFAULT_REGEX_RULES;
+    return source.map(normalizeRegexRule);
+}
 
 // 获取用户保存的规则
 function getRegexRules() {
     try {
         const saved = localStorage.getItem('regex_replacement_rules');
         if (saved) {
-            return JSON.parse(saved);
+            const parsed = JSON.parse(saved);
+            const normalized = normalizeRegexRules(parsed);
+            if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+                saveRegexRules(normalized);
+            }
+            return normalized;
         }
     } catch (e) {
         console.error('Failed to load regex rules:', e);
     }
-    return [...DEFAULT_REGEX_RULES];
+    return normalizeRegexRules(DEFAULT_REGEX_RULES);
 }
 
 // 保存规则
 function saveRegexRules(rules) {
-    localStorage.setItem('regex_replacement_rules', JSON.stringify(rules));
+    localStorage.setItem('regex_replacement_rules', JSON.stringify(normalizeRegexRules(rules)));
 }
 
 // 检测文本中的AI套路词汇
@@ -545,8 +606,8 @@ function applyRegexRules(text, rules) {
     let result = text;
     let appliedCount = 0;
     const appliedDetails = [];
-    
-    rules.filter(r => r.enabled).forEach(rule => {
+
+    normalizeRegexRules(rules).filter(r => r.enabled).forEach(rule => {
         try {
             const regex = new RegExp(rule.pattern, 'g');
             const matches = result.match(regex);
@@ -757,9 +818,9 @@ function showWordCheckDialog(content, onApply) {
     
     // 删除规则
     modal.querySelectorAll('.delete-rule-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', async (e) => {
             const ruleId = e.target.closest('.regex-rule-item').dataset.id;
-            if (confirm('确定要删除这条规则吗？')) {
+            if (await window.showConfirmDialog('确定要删除这条规则吗？')) {
                 currentRules = currentRules.filter(r => r.id !== ruleId);
                 saveRegexRules(currentRules);
                 showWordCheckDialog(currentContent, onApply);
@@ -1067,8 +1128,26 @@ window.apiFormCall = apiFormCall;
 window.showToast = showToast;
 window.escapeHtml = escapeHtml;
 window.safeHostname = safeHostname;
+window.getConfiguredModels = getConfiguredModels;
+window.isImageModelName = isImageModelName;
+window.isNonTextModelName = isNonTextModelName;
+window.isTextModelName = isTextModelName;
+window.getImageModelsFromConfig = getImageModelsFromConfig;
+window.getTextModelsFromConfig = getTextModelsFromConfig;
 window.makeElementActivatable = makeElementActivatable;
 window.updateBreadcrumbs = updateBreadcrumbs;
+window.openDatabase = openDatabase;
+window.saveToIndexedDB = saveToIndexedDB;
+window.loadFromIndexedDB = loadFromIndexedDB;
+window.deleteFromIndexedDB = deleteFromIndexedDB;
+window.getRegexRules = getRegexRules;
+window.saveRegexRules = saveRegexRules;
+window.analyzeHighFrequencyWords = analyzeHighFrequencyWords;
+window.detectAIClicheWords = detectAIClicheWords;
+window.analyzeAIClicheByCategory = analyzeAIClicheByCategory;
+window.getAllAIClicheWords = getAllAIClicheWords;
+window.getCustomAIClicheWords = getCustomAIClicheWords;
+window.saveCustomAIClicheWords = saveCustomAIClicheWords;
 window.openDatabase = openDatabase;
 window.saveToIndexedDB = saveToIndexedDB;
 window.loadFromIndexedDB = loadFromIndexedDB;
@@ -1089,5 +1168,81 @@ window.showManageClicheWordsDialog = showManageClicheWordsDialog;
 window.showEditRuleDialog = showEditRuleDialog;
 window.AI_CLICHE_WORDS = AI_CLICHE_WORDS;
 
-console.log('[app-utils.js] 工具函数模块已加载');
+// ===== 自定义统一弹窗 =====
+function showConfirmDialog(message, title = '确认操作') {
+    return new Promise((resolve) => {
+        const dialogEl = document.createElement('div');
+        dialogEl.className = 'custom-dialog-overlay';
+        dialogEl.innerHTML = `
+            <div class="custom-dialog-box">
+                <div class="custom-dialog-header">
+                    <i class="ri-question-line"></i>
+                    <span>${escapeHtml(title)}</span>
+                </div>
+                <div class="custom-dialog-body">
+                    ${escapeHtml(message).replace(/\n/g, '<br>')}
+                </div>
+                <div class="custom-dialog-footer">
+                    <button class="custom-dialog-btn btn-cancel">取消</button>
+                    <button class="custom-dialog-btn btn-confirm">确认</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(dialogEl);
 
+        // 动画触发
+        requestAnimationFrame(() => dialogEl.classList.add('show'));
+
+        const closeDialog = (result) => {
+            dialogEl.classList.remove('show');
+            setTimeout(() => {
+                dialogEl.remove();
+                resolve(result);
+            }, 300); // 对应CSS过渡时间
+        };
+
+        dialogEl.querySelector('.btn-cancel').addEventListener('click', () => closeDialog(false));
+        dialogEl.querySelector('.btn-confirm').addEventListener('click', () => closeDialog(true));
+    });
+}
+
+function showAlertDialog(message, title = '提示') {
+    return new Promise((resolve) => {
+        const dialogEl = document.createElement('div');
+        dialogEl.className = 'custom-dialog-overlay';
+        dialogEl.innerHTML = `
+            <div class="custom-dialog-box">
+                <div class="custom-dialog-header">
+                    <i class="ri-information-line"></i>
+                    <span>${escapeHtml(title)}</span>
+                </div>
+                <div class="custom-dialog-body">
+                    ${escapeHtml(message).replace(/\n/g, '<br>')}
+                </div>
+                <div class="custom-dialog-footer" style="justify-content: center;">
+                    <button class="custom-dialog-btn btn-confirm">确定</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(dialogEl);
+
+        // 动画触发
+        requestAnimationFrame(() => dialogEl.classList.add('show'));
+
+        const closeDialog = () => {
+            dialogEl.classList.remove('show');
+            setTimeout(() => {
+                dialogEl.remove();
+                resolve(true);
+            }, 300);
+        };
+
+        dialogEl.querySelector('.btn-confirm').addEventListener('click', () => closeDialog());
+    });
+}
+
+window.showConfirmDialog = showConfirmDialog;
+window.showAlertDialog = showAlertDialog;
+
+
+console.log('[app-utils.js] 工具函数模块已加载');

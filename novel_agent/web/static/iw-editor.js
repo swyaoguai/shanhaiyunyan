@@ -16,13 +16,13 @@ let iwFindMatches = [];
 let iwCurrentMatchIndex = -1;
 
 // ===== 显示章节编辑器（替换原有的预览功能） =====
-function showInfiniteWriteChapterEditor(chapter) {
+async function showInfiniteWriteChapterEditor(chapter) {
     if (typeof loadInfiniteWriteDataForCurrentProject === 'function') {
         loadInfiniteWriteDataForCurrentProject();
     }
 
     if (currentEditingIWChapter.modified && currentEditingIWChapter.chapter?.chapter_number !== chapter.chapter_number) {
-        const confirmed = confirm('当前章节有未保存的修改，确定要切换章节吗？');
+        const confirmed = await window.showConfirmDialog('当前章节有未保存的修改，确定要切换章节吗？');
         if (!confirmed) return;
     }
 
@@ -51,10 +51,6 @@ function showInfiniteWriteChapterEditor(chapter) {
 
     workspace.innerHTML = `
         <div class="editor-container" style="display: flex; flex-direction: column; height: 100%; padding: 24px; position: relative;">
-            <button id="iw-open-panel-fab" class="app-back-button app-back-button--floating" title="返回创作面板">
-                <i class="ri-layout-right-2-line"></i>
-                <span>返回创作面板</span>
-            </button>
             <div class="editor-header" style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap;">
                 <span style="color: var(--text-secondary); font-size: 14px;">第${chapter.chapter_number}章</span>
                 <input type="text" id="iw-edit-chapter-title" value="${escapeHtml(chapter.title || '')}" placeholder="章节标题" style="flex: 1; min-width: 260px; background: transparent; border: none; color: var(--text-primary); font-size: 24px; font-weight: 600; outline: none;">
@@ -62,10 +58,6 @@ function showInfiniteWriteChapterEditor(chapter) {
                     <span id="iw-edit-word-count">${(chapter.word_count || 0).toLocaleString()} 字</span>
                     <span id="iw-edit-save-status" style="color: #10b981; display: none;">已保存</span>
                 </div>
-                <button id="close-iw-editor" class="app-back-button">
-                    <i class="ri-layout-right-2-line"></i>
-                    <span>返回创作面板</span>
-                </button>
             </div>
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
                 <button id="iw-edit-find-replace-btn" style="padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer; font-size: 13px;" title="查找替换 (Ctrl+H)">
@@ -135,9 +127,15 @@ function showInfiniteWriteChapterEditor(chapter) {
                     ${chapter.important_events ? `<span style="margin-right: 16px;"><strong>重要事件：</strong>${chapter.important_events}</span>` : ''}
                     ${chapter.new_characters && chapter.new_characters !== '无' ? `<span><strong>新增角色：</strong>${chapter.new_characters}</span>` : ''}
                 </div>
-                <button id="iw-delete-chapter-btn" style="padding: 10px 18px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer;">
-                    <i class="ri-delete-bin-line"></i> 删除章节
-                </button>
+                <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap;">
+                    <button id="iw-return-panel-btn" class="app-back-button" title="返回创作面板">
+                        <i class="ri-layout-right-2-line"></i>
+                        <span>返回创作面板</span>
+                    </button>
+                    <button id="iw-delete-chapter-btn" style="padding: 10px 18px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 8px; cursor: pointer;">
+                        <i class="ri-delete-bin-line"></i> 删除章节
+                    </button>
+                </div>
             </div>
         </div>
     `;
@@ -153,11 +151,8 @@ function bindIWEditorEvents(chapter) {
     const wordCountEl = document.getElementById('iw-edit-word-count');
     const saveStatusEl = document.getElementById('iw-edit-save-status');
     
-    // 关闭编辑器
-    document.getElementById('close-iw-editor')?.addEventListener('click', () => {
-        closeIWEditor();
-    });
-    document.getElementById('iw-open-panel-fab')?.addEventListener('click', () => {
+    // 返回创作面板
+    document.getElementById('iw-return-panel-btn')?.addEventListener('click', () => {
         closeIWEditor();
     });
     
@@ -192,8 +187,8 @@ function bindIWEditorEvents(chapter) {
     
     // 词汇检测（复用智能体模式的功能）
     document.getElementById('iw-edit-word-check-btn')?.addEventListener('click', () => {
-        const content = contentTextarea.value.trim();
-        if (!content) {
+        const content = contentTextarea.value;
+        if (!content.trim()) {
             showToast('请先输入需要检测的内容', 'warning');
             return;
         }
@@ -302,7 +297,7 @@ function bindIWEditorEvents(chapter) {
     document.getElementById('iw-regenerate-btn')?.addEventListener('click', async () => {
         const chapterNumber = currentEditingIWChapter.chapter?.chapter_number;
         if (!chapterNumber) return;
-        const confirmed = confirm(`确定要重新生成第${chapterNumber}章吗？\n\n将删除本章及之后章节并重新生成。`);
+        const confirmed = await window.showConfirmDialog(`确定要重新生成第${chapterNumber}章吗？\n\n将删除本章及之后章节并重新生成。`);
         if (!confirmed) return;
         currentEditingIWChapter.modified = false;
         closeIWEditor();
@@ -337,17 +332,17 @@ function bindIWEditorEvents(chapter) {
 }
 
 // ===== 关闭编辑器 =====
-function confirmLeaveInfiniteWriteEditor(actionLabel = '离开当前章节') {
+async function confirmLeaveInfiniteWriteEditor(actionLabel = '离开当前章节') {
     if (currentEditingIWChapter.modified) {
-        if (!confirm(`有未保存的修改，确定要${actionLabel}吗？`)) {
+        if (!(await window.showConfirmDialog(`有未保存的修改，确定要${actionLabel}吗？`))) {
             return false;
         }
     }
     return true;
 }
 
-function closeIWEditor() {
-    if (!confirmLeaveInfiniteWriteEditor('返回创作面板')) {
+async function closeIWEditor() {
+    if (!(await confirmLeaveInfiniteWriteEditor('返回创作面板'))) {
         return false;
     }
 
@@ -451,7 +446,7 @@ async function deleteIWChapterByNumber(chapterNumber, options = {}) {
 
     const chapter = infiniteWriteState.chapters[chapterIndex];
     const shouldConfirm = options.confirmed === true;
-    if (!shouldConfirm && !confirm(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`)) {
+    if (!shouldConfirm && !(await window.showConfirmDialog(`确定要删除「第${chapter.chapter_number}章 ${chapter.title || ''}」吗？\n\n此操作不可恢复！`))) {
         return false;
     }
 

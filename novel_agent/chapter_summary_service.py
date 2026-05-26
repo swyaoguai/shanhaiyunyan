@@ -98,17 +98,21 @@ def save_chapter_summary_to_library(
     summary_dict: Dict[str, Any],
     *,
     project_dir: Optional[Path] = None,
+    source_mode: str = "multi_agent",
 ) -> bool:
     """将章节摘要保存到统一资料库，并同步生成 Markdown 笔记。"""
     try:
         from .library_service import get_library_service
         from .library_types import EntryType, LibraryEntry, SourceType, _now_iso
+        from .source_modes import ensure_source_tag, normalize_source_mode
 
         resolved_project_dir = _resolve_project_dir(project_dir)
         svc = get_library_service(resolved_project_dir)
         if svc.is_degraded:
             return False
 
+        normalized_source_mode = normalize_source_mode(source_mode, default="multi_agent")
+        tags = ensure_source_tag(["auto_summary", "chapter_summary"], normalized_source_mode)
         entry_id = f"chapter_summary_{chapter_number}"
         title = summary_dict.get("title") or f"第{chapter_number}章摘要"
         links = _normalize_links(summary_dict.get("links") or [])
@@ -130,10 +134,11 @@ def save_chapter_summary_to_library(
                 "title": str(title),
             },
             source_type=SourceType.DERIVED.value,
-            tags=["auto_summary", "chapter_summary"],
+            tags=tags,
             relations=links,
             metadata={
                 "chapter_number": chapter_number,
+                "source_mode": normalized_source_mode,
                 "characters": characters,
                 "key_events": key_events,
                 "character_state_changes": state_changes,
@@ -149,12 +154,14 @@ def save_chapter_summary_to_library(
         normalized_summary.setdefault("title", str(title))
         normalized_summary.setdefault("vector_text", saved.summary or summary_text)
         normalized_summary.setdefault("links", links)
+        normalized_summary.setdefault("source_mode", normalized_source_mode)
         _write_chapter_summary_markdown(resolved_project_dir, saved, normalized_summary)
         _write_chapter_summary_wiki(
             resolved_project_dir,
             saved,
             normalized_summary,
             store=getattr(svc, "_store", None),
+            source_mode=normalized_source_mode,
         )
         return True
     except Exception as e:
@@ -176,6 +183,7 @@ async def index_chapter_summary_vector(project_dir: Optional[Path], summary_dict
             "metadata": {
                 "chapter_number": chapter_number,
                 "title": str(summary_dict.get("title") or "").strip(),
+                "source_mode": str(summary_dict.get("source_mode") or "").strip(),
                 "links": _normalize_links(summary_dict.get("links") or []),
                 "appearing_characters": _as_list(summary_dict.get("appearing_characters")),
                 "foreshadowing": _as_list(summary_dict.get("foreshadowing")),
@@ -440,13 +448,16 @@ def _write_chapter_summary_wiki(
     summary_dict: Dict[str, Any],
     *,
     store: Any = None,
+    source_mode: str = "multi_agent",
 ) -> None:
     """把章节摘要写成 Wiki 章节页，供后续章节写作检索。"""
     if not project_dir:
         return
     try:
         from .wiki.wiki_types import Frontmatter, PageType, WikiPage
+        from .source_modes import ensure_source_tag, normalize_source_mode
 
+        normalized_source_mode = normalize_source_mode(source_mode, default="multi_agent")
         title = str(getattr(entry, "title", "") or summary_dict.get("title") or "").strip()
         chapter_number = int(summary_dict.get("chapter_number") or 0)
         body = _markdown_for_summary(entry, summary_dict)
@@ -460,7 +471,7 @@ def _write_chapter_summary_wiki(
             page_type=PageType.CHAPTER,
             title=title or f"第{chapter_number}章摘要",
             sources=[f"chapter_{chapter_number}"] if chapter_number else [],
-            tags=["auto_summary", "chapter_summary"],
+            tags=ensure_source_tag(["auto_summary", "chapter_summary"], normalized_source_mode),
             chapter_number=chapter_number or None,
             entities=list(dict.fromkeys(characters + [link.strip("[]") for link in links])),
             word_count=len(summary_text) + sum(len(item) for item in key_events + foreshadowing + open_threads),

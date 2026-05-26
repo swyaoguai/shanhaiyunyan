@@ -933,6 +933,7 @@ async def get_project_data(data_type: str):
 @router.post("/project-data/{data_type}")
 async def save_project_data(data_type: str, request: Request):
     from ...project_manager import get_project_manager
+    from ...source_modes import annotate_payload_source
 
     pm = get_project_manager()
     if not pm.current_project_id:
@@ -946,6 +947,11 @@ async def save_project_data(data_type: str, request: Request):
             _denormalize_builtin_project_data(data_type, data_rows, existing_payload)
             if data_type in BUILTIN_PROJECT_DATA_TYPES
             else data_rows
+        )
+        payload_to_save = annotate_payload_source(
+            payload_to_save,
+            "manual",
+            source_type="manual_knowledge",
         )
         pm.save_project_data(data_type, payload_to_save)
 
@@ -1429,8 +1435,12 @@ async def rebuild_chapter_knowledge_sync():
     except ValueError as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
     result = ChapterKnowledgeSyncService(pm).sync_chapters(force=True, delete_missing=True)
-    status_code = 200 if result.get("success") else 503
-    return JSONResponse(result, status_code=status_code)
+    if not result.get("success"):
+        result.setdefault(
+            "message",
+            "章节正文已保留在本地项目中，但全文/向量索引暂不可用。请检查知识库向量依赖或嵌入配置后再重建索引。",
+        )
+    return JSONResponse(result)
 
 
 @router.get("/projects/backup/export")

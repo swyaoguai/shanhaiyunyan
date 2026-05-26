@@ -56,6 +56,18 @@ NON_CHAPTER_RESPONSE_PATTERNS = (
     r"粗略的想法",
 )
 
+_CHAPTER_MARK_RE = r"第\s*[\d一二三四五六七八九十百千万零〇两]+\s*[章节回]"
+_MARKDOWN_CHAPTER_HEADING_RE = re.compile(
+    rf"^\s{{0,3}}#{{1,6}}\s*(?:{_CHAPTER_MARK_RE})\s*[-—:：、.．\s]*(?P<title>[^\n\r]*)\s*(?:\r?\n|$)"
+)
+_PLAIN_CHAPTER_HEADING_RE = re.compile(
+    rf"^\s{{0,3}}(?:{_CHAPTER_MARK_RE})(?:(?:\s*[-—:：、.．]\s*|\s+)(?P<title>[^\n\r]*))?\s*(?:\r?\n|$)"
+)
+_CHAPTER_TITLE_PREFIX_RE = re.compile(
+    rf"^\s*(?:#{{1,6}}\s*)?(?:{_CHAPTER_MARK_RE})(?:\s*[-—:：、.．]\s*|\s+)?"
+)
+_BARE_CHAPTER_TITLE_RE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?(?:{_CHAPTER_MARK_RE})\s*$")
+
 _COMMON_CHINESE_SURNAMES = (
     "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜"
     "谢邹喻柏水章云苏潘葛范彭郎鲁韦昌马苗花方俞任袁柳鲍史唐费廉岑"
@@ -723,7 +735,11 @@ class ContinuousWriter(BaseAgent):
                         title=chapter_data.get("title", ""),
                         content=chapter_data.get("content", ""),
                     )
-                    save_chapter_summary_to_library(chapter_data["chapter_number"], summary)
+                    save_chapter_summary_to_library(
+                        chapter_data["chapter_number"],
+                        summary,
+                        source_mode="infinite_write",
+                    )
             except Exception as e:
                 logger.warning(f"[ContinuousWriter] Auto chapter summary failed: {e}")
 
@@ -971,20 +987,36 @@ class ContinuousWriter(BaseAgent):
 
         return self._ensure_text_integrity(prompt_text, "章节提示词")
 
+    def _normalize_chapter_title(self, title: str, chapter_number: int) -> str:
+        """Return a display title without chapter-number or Markdown heading markers."""
+        cleaned = str(title or "").strip()
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned).strip()
+        cleaned = re.sub(r"[*_`~]+", "", cleaned).strip()
+        cleaned = _CHAPTER_TITLE_PREFIX_RE.sub("", cleaned, count=1).strip()
+        cleaned = re.sub(r"^[\-—:：、.．\s]+", "", cleaned).strip()
+        if _BARE_CHAPTER_TITLE_RE.fullmatch(cleaned):
+            cleaned = ""
+        return cleaned or f"第{chapter_number}章"
+
+    def _split_chapter_heading(self, response: str, chapter_number: int) -> tuple[str, str]:
+        """Extract a leading chapter heading and remove it from the body."""
+        text = str(response or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        for pattern in (_MARKDOWN_CHAPTER_HEADING_RE, _PLAIN_CHAPTER_HEADING_RE):
+            match = pattern.match(text)
+            if match:
+                title = self._normalize_chapter_title(match.group("title") or "", chapter_number)
+                return title, text[match.end():].strip()
+
+        return self._normalize_chapter_title("", chapter_number), text
+
     def _parse_chapter_response(self, response: str, chapter_number: int) -> Dict[str, Any]:
         """解析 LLM 响应。"""
-        title_match = re.search(r'#\s*第\d+章\s*(.+?)(?:\n|$)', response)
-        title = title_match.group(1).strip() if title_match else f"第{chapter_number}章"
-        
-        content = response
+        title, content = self._split_chapter_heading(response, chapter_number)
         chapter_info = {}
         
-        info_match = re.search(r'---\n.+?(.*?)(?:$|\n---)', response, re.DOTALL)
+        info_match = re.search(r'---\n.+?(.*?)(?:$|\n---)', content, re.DOTALL)
         if info_match:
-            content = response[:info_match.start()].strip()
-        
-        if title_match:
-            content = content[title_match.end():].strip()
+            content = content[:info_match.start()].strip()
 
         self._ensure_chapter_like_content(content, chapter_number)
         
@@ -1050,8 +1082,19 @@ class ContinuousWriter(BaseAgent):
                 total += para_words
             else:
                 break
-        
-        return '\n\n'.join(result).strip() or content[:max_words * 2]
+
+        truncated = '\n\n'.join(result).strip()
+        if truncated:
+            return truncated
+        kept: List[str] = []
+        visible_count = 0
+        for char in content:
+            if not char.isspace():
+                visible_count += 1
+            if visible_count > max_words:
+                break
+            kept.append(char)
+        return ''.join(kept).strip()
     
     def _update_character_states(self, chapter_data: Dict[str, Any]) -> None:
         """根据最新章节更新角色状态与剧情锚点。"""
@@ -1552,7 +1595,10 @@ class ContinuousWriter(BaseAgent):
                 chapter_number=chapter_data["chapter_number"],
                 metadata={
                     "word_count": chapter_data["word_count"],
-                    "model_used": self._current_model
+                    "model_used": self._current_model,
+                    "source_mode": "infinite_write",
+                    "source_type": "continuous_write",
+                    "source_session_id": self._session_id,
                 }
             )
             
@@ -1953,9 +1999,27 @@ class ContinuousWriter(BaseAgent):
 
     def set_session_id(self, session_id: str, project_id: str = "") -> None:
         """设置会话 ID。"""
-        self._session_id = session_id
-        self._project_id = project_id
-        logger.info(f"[{self.name}] 会话 ID 已设置: {session_id}")
+        normalized_session_id = str(session_id or "default").strip() or "default"
+        normalized_project_id = str(project_id or "").strip()
+        session_changed = (
+            normalized_session_id != self._session_id
+            or normalized_project_id != self._project_id
+        )
+        if session_changed and (self._session_id or self._project_id):
+            self._session_state = None
+            self._story_beginning = ""
+            self._current_chapter = 0
+            self._is_running = False
+            self._should_stop = False
+            self._written_chapters = []
+            self._dead_characters = []
+            self._user_inspirations = []
+            self._corrections = []
+            self._characters = {}
+            self._plot_points = []
+        self._session_id = normalized_session_id
+        self._project_id = normalized_project_id
+        logger.info(f"[{self.name}] 会话 ID 已设置: {normalized_session_id}")
     
     def set_model(self, model: str) -> None:
         """设置当前模型。"""

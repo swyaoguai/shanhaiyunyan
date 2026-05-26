@@ -46,6 +46,117 @@ def _resolve_agent_effective_model(agent_name: str, fallback_model: str = "") ->
         logger.debug(f"[Chat] resolve effective model failed for {target_agent}: {exc}")
     return str(fallback_model or "").strip()
 
+
+def _normalize_project_chapters_for_chat(pm: Any) -> List[Dict[str, Any]]:
+    """Load saved project chapters for lightweight chat answers."""
+    if pm is None:
+        return []
+    try:
+        payload = pm.load_project_data("chapters")
+    except Exception as exc:
+        logger.debug(f"[Chat] load project chapters for direct answer failed: {exc}")
+        return []
+    if isinstance(payload, dict):
+        rows = payload.get("chapters")
+    else:
+        rows = payload
+    if not isinstance(rows, list):
+        return []
+
+    chapters: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "").strip()
+        content = str(row.get("content") or "").strip()
+        summary = str(row.get("summary") or row.get("description") or "").strip()
+        title = str(row.get("title") or row.get("name") or "").strip()
+        if source == "chapter_settings" and not content:
+            continue
+        if not (title or content or summary):
+            continue
+        try:
+            chapter_number = int(row.get("chapter_number") or row.get("number") or row.get("chapter") or index)
+        except (TypeError, ValueError):
+            chapter_number = index
+        if chapter_number <= 0:
+            chapter_number = index
+        chapters.append({
+            "chapter_number": chapter_number,
+            "title": title or f"第{chapter_number}章",
+            "content": content,
+            "summary": summary,
+            "word_count": int(row.get("word_count") or len(re.sub(r"\s+", "", content)) or 0),
+        })
+    return sorted(chapters, key=lambda item: item["chapter_number"])
+
+
+def _project_chapter_chat_payload(pm: Any, message: str) -> Optional[Dict[str, Any]]:
+    text = str(message or "").strip()
+    if not text or text.startswith("/"):
+        return None
+    compact = re.sub(r"\s+", "", text)
+    asks_count = any(token in compact for token in ("几章", "多少章", "有几章", "章节列表", "有哪些章节"))
+    asks_current = any(token in compact for token in ("现在第几章", "当前第几章", "目前第几章", "现在有几章", "目前有几章"))
+    chapter_match = re.search(r"第\s*(\d+)\s*章", text)
+    asks_specific = bool(chapter_match and any(token in compact for token in ("内容", "正文", "写了什么", "看看", "检查", "保存了没", "有没有")))
+    if not (asks_count or asks_current or asks_specific):
+        return None
+    if chapter_match and any(token in compact for token in ("写第", "生成第", "创作第", "续写第", "润色第")) and not asks_specific:
+        return None
+
+    chapters = _normalize_project_chapters_for_chat(pm)
+    routing = {
+        "intent": "query_project_chapters",
+        "target_agent": "ProjectChapters",
+        "display": "正文章节",
+        "confidence": 1.0,
+    }
+    if not chapters:
+        return {
+            "reply": "当前项目还没有保存的正文章节。左侧如果显示了章节标题，请先打开章节并确认正文已保存。",
+            "is_complete": False,
+            "routed": True,
+            "routing": routing,
+            "project_chapters": {"total": 0, "written": 0, "chapters": []},
+        }
+
+    if asks_specific and chapter_match:
+        target_number = int(chapter_match.group(1))
+        chapter = next((item for item in chapters if item["chapter_number"] == target_number), None)
+        if not chapter:
+            available = "、".join(f"第{item['chapter_number']}章" for item in chapters[:12])
+            return {
+                "reply": f"当前项目没有找到第{target_number}章。已保存章节：{available}。",
+                "is_complete": False,
+                "routed": True,
+                "routing": routing,
+                "project_chapters": {"total": len(chapters), "written": sum(1 for item in chapters if item["content"]), "chapters": chapters},
+            }
+        body = chapter["content"] or chapter["summary"] or "这一章目前只有标题，还没有保存正文内容。"
+        if len(body) > 1200:
+            body = body[:1200].rstrip() + "..."
+        reply = f"找到了第{chapter['chapter_number']}章《{chapter['title']}》。\n\n{body}"
+        return {
+            "reply": reply,
+            "is_complete": False,
+            "routed": True,
+            "routing": routing,
+            "project_chapters": {"total": len(chapters), "written": sum(1 for item in chapters if item["content"]), "chapters": chapters},
+        }
+
+    written = sum(1 for item in chapters if item["content"])
+    lines = [f"- 第{item['chapter_number']}章《{item['title']}》" + ("（有正文）" if item["content"] else "（仅标题/摘要）") for item in chapters[:20]]
+    more = "\n..." if len(chapters) > 20 else ""
+    reply = f"当前项目已保存 {len(chapters)} 章，其中 {written} 章有正文内容。\n" + "\n".join(lines) + more
+    return {
+        "reply": reply,
+        "is_complete": False,
+        "routed": True,
+        "routing": routing,
+        "project_chapters": {"total": len(chapters), "written": written, "chapters": chapters},
+    }
+
 # 存储对话会话（内存热缓存）
 chat_sessions = {}
 _chat_session_locks = {}
@@ -1477,6 +1588,7 @@ def _build_router_context(
     context["routing_decision"] = routing_decision
     context["operation"] = routing_decision.get("operation")
     context["side_effect_allowed"] = routing_decision.get("side_effect_allowed")
+    context["intent"] = intent_name
 
     if intent_name == "create_novel":
         should_auto_execute = bool(routing_decision.get("execution_allowed") and routing_decision.get("side_effect_allowed"))
@@ -2234,6 +2346,41 @@ def _router_result_allows_assistant_auto_save(
     return True
 
 
+_CREATIVE_DECISION_PLANNING_KINDS = {"creation_contract", "task_pool", "chat_creative_decisions"}
+_ROUTED_EXECUTION_SKIP_CREATIVE_DECISION = {
+    "continue_write",
+    "polish_content",
+}
+_ROUTED_AGENT_SKIP_CREATIVE_DECISION = {
+    "ContinuousWriter",
+    "Polisher",
+    "PolisherAgent",
+}
+
+
+def _creative_decision_touched_project_content(updated_files: List[Dict[str, Any]]) -> bool:
+    for item in updated_files:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        if kind and kind not in _CREATIVE_DECISION_PLANNING_KINDS:
+            return True
+    return False
+
+
+def _should_process_creative_decision_after_router(
+    routing_hint: Optional[Dict[str, Any]],
+    delegated_result: Optional[Dict[str, Any]],
+) -> bool:
+    intent = str((routing_hint or {}).get("intent") or "").strip()
+    if intent in _ROUTED_EXECUTION_SKIP_CREATIVE_DECISION:
+        return False
+    agent_name = str((delegated_result or {}).get("agent_name") or "").strip()
+    if agent_name in _ROUTED_AGENT_SKIP_CREATIVE_DECISION:
+        return False
+    return True
+
+
 def _merge_creative_decision_result(result: Dict[str, Any], decision_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Attach creative decision data to a chat response payload."""
     if not isinstance(decision_result, dict):
@@ -2247,9 +2394,16 @@ def _merge_creative_decision_result(result: Dict[str, Any], decision_result: Opt
         )
     result["creative_decision"] = decision_result.get("decision")
     if decision_result.get("applied") and result.get("reply"):
+        if _creative_decision_touched_project_content(updated_files):
+            note = "已根据这轮讨论更新创作决策，并同步到相关项目内容。"
+        else:
+            note = (
+                "已根据这轮讨论记录创作决策，并更新创作规划；本次没有创建资料库文件。"
+                "如需落到角色、世界观、大纲或章节正文，请切换为执行模式，或明确说“保存到资料库”。"
+            )
         result["reply"] = (
             f"{str(result.get('reply') or '').rstrip()}\n\n"
-            "已根据这轮讨论更新创作决策，并同步到相关项目内容。"
+            f"{note}"
         )
     return result
 
@@ -2911,6 +3065,9 @@ async def chat(request: ChatRequest):
     targeted_command = prepared["targeted_command"]
     handled_control = prepared["handled_control"]
     creative_mode = _load_chat_creative_mode(getattr(request, "creative_mode", "auto"))
+    chapter_answer = _project_chapter_chat_payload(pm, processed_message)
+    if chapter_answer:
+        return JSONResponse(chapter_answer)
     try:
         from ...story_memory_actions import handle_story_memory_request
 
@@ -3100,7 +3257,10 @@ async def chat(request: ChatRequest):
             if routing_hint:
                 result["routing"] = routing_hint
             decision_result = None
-            if str(delegated_result.get("action") or "") != "manual_category_selection_required":
+            if (
+                str(delegated_result.get("action") or "") != "manual_category_selection_required"
+                and _should_process_creative_decision_after_router(routing_hint, delegated_result)
+            ):
                 decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
                 _merge_creative_decision_result(result, decision_result)
             auto_save_result = None
@@ -3199,6 +3359,14 @@ async def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'workflow', 'workflow': handled_control['workflow']}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'reply': reply, 'is_complete': False, 'routing': handled_control['routing'], 'workflow': handled_control.get('workflow')}, ensure_ascii=False)}\n\n"
         return StreamingResponse(control_gen(), media_type="text/event-stream")
+
+    chapter_answer = _project_chapter_chat_payload(pm, processed_message)
+    if chapter_answer:
+        async def chapter_answer_gen():
+            reply = str(chapter_answer.get("reply") or "")
+            yield f"data: {json.dumps({'type': 'chunk', 'content': reply}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', **chapter_answer}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(chapter_answer_gen(), media_type="text/event-stream")
 
     lock = await _get_chat_session_lock(session_key)
     async with lock:
@@ -3374,8 +3542,9 @@ async def chat_stream(request: ChatRequest):
                                     "status": str((workflow_snapshot or {}).get("status") or "").strip(),
                                 },
                             ).to_dict()
-                        decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
-                        _merge_creative_decision_result(done_payload, decision_result)
+                        if _should_process_creative_decision_after_router(routing, delegated_result):
+                            decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)
+                            _merge_creative_decision_result(done_payload, decision_result)
                         auto_save_result = None
                         if _router_result_allows_assistant_auto_save(router_result, delegated_result, workflow_snapshot):
                             auto_save_result = _process_assistant_auto_save(
@@ -3464,7 +3633,7 @@ async def chat_stream(request: ChatRequest):
                         data_str = sse_event.split("data: ", 1)[1].rstrip("\n")
                         data = json.loads(data_str)
                         data["routing"] = routing_hint
-                        workflow = _workflow_public_snapshot(_get_workflow_record(session_key, session_id))
+                        workflow = _workflow_public_snapshot(_get_active_workflow(session_key))
                         if workflow:
                             data["workflow"] = workflow
                         decision_result = _process_chat_creative_decision(pm, processed_message, creative_mode)

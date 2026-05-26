@@ -56,7 +56,7 @@ SOURCE_ONNX_MODEL_DIR = ROOT_DIR / "novel_agent" / "models" / "embedding" / "def
 SOURCE_SKILLS_DIR = ROOT_DIR / "skills"
 PRESET_API_CONFIG_ID = "preset-tsc5"
 PRESET_API_CONFIG_NAME = "探索仓API"
-PRESET_API_BASE = "https://test.tsc5.top/v1"
+PRESET_API_BASE = "https://api.tsc5.top/v1"
 
 
 def calculate_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
@@ -161,6 +161,16 @@ def pyinstaller_skill_dependency_args() -> list[str]:
         "--hidden-import", "bs4.builder._htmlparser",
         "--hidden-import", "ddgs",
         "--collect-submodules", "ddgs",
+    ]
+
+
+def pyinstaller_knowledge_dependency_args() -> list[str]:
+    """Return PyInstaller args for ChromaDB modules loaded dynamically at runtime."""
+    return [
+        "--hidden-import", "chromadb.telemetry.product.posthog",
+        "--hidden-import", "chromadb.api.rust",
+        "--collect-submodules", "chromadb",
+        "--collect-data", "chromadb",
     ]
 
 
@@ -348,6 +358,7 @@ def run_pyinstaller():
         # 图标（如果存在）
     ]
     cmd.extend(pyinstaller_skill_dependency_args())
+    cmd.extend(pyinstaller_knowledge_dependency_args())
     cmd.extend(pyinstaller_optional_exclude_args())
     if skills_dir.exists():
         cmd.extend(["--add-data", f"{skills_dir};skills"])

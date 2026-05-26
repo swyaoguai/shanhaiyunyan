@@ -10,13 +10,31 @@ from typing import Optional
 from pathlib import Path
 
 
+def _first_env(*keys: str, default: str = "") -> str:
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            return value
+    return default
+
+
+def _first_env_int(*keys: str, default: int) -> int:
+    raw = _first_env(*keys)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class SiliconFlowConfig:
-    """硅基流动API配置"""
-    api_key: str = field(default_factory=lambda: os.getenv("SILICONFLOW_API_KEY", ""))
-    base_url: str = "https://api.siliconflow.cn/v1"
-    model: str = "BAAI/bge-m3"
-    embedding_dim: int = 1024  # 可选: 512, 1024, 2048
+    """OpenAI 兼容向量 API 配置（历史字段名沿用 siliconflow）。"""
+    api_key: str = field(default_factory=lambda: _first_env("KB_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY"))
+    base_url: str = field(default_factory=lambda: _first_env("KB_EMBEDDING_BASE_URL", "SILICONFLOW_BASE_URL", default="https://api.siliconflow.cn/v1"))
+    model: str = field(default_factory=lambda: _first_env("KB_EMBEDDING_MODEL", "SILICONFLOW_EMBEDDING_MODEL", default="BAAI/bge-m3"))
+    embedding_dim: int = field(default_factory=lambda: _first_env_int("KB_EMBEDDING_DIM", "SILICONFLOW_EMBEDDING_DIM", default=1024))
     max_tokens: int = 8192  # bge-m3支持的最大输入长度
     timeout: int = 30  # API请求超时时间（秒）
     max_retries: int = 3  # 最大重试次数
@@ -145,14 +163,14 @@ class KnowledgeBaseConfig:
         if provider := (os.getenv("KB_EMBEDDING_PROVIDER") or os.getenv("EMBEDDING_PROVIDER")):
             config.embedding_provider = provider
         
-        # 从环境变量覆盖硅基流动配置
-        if api_key := os.getenv("SILICONFLOW_API_KEY"):
+        # 从环境变量覆盖 OpenAI 兼容向量 API 配置
+        if api_key := _first_env("KB_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY"):
             config.siliconflow.api_key = api_key
-        if base_url := os.getenv("SILICONFLOW_BASE_URL"):
+        if base_url := _first_env("KB_EMBEDDING_BASE_URL", "SILICONFLOW_BASE_URL"):
             config.siliconflow.base_url = base_url
-        if model := os.getenv("SILICONFLOW_EMBEDDING_MODEL"):
+        if model := _first_env("KB_EMBEDDING_MODEL", "SILICONFLOW_EMBEDDING_MODEL"):
             config.siliconflow.model = model
-        if dim := os.getenv("SILICONFLOW_EMBEDDING_DIM"):
+        if dim := _first_env("KB_EMBEDDING_DIM", "SILICONFLOW_EMBEDDING_DIM"):
             config.siliconflow.embedding_dim = int(dim)
         
         # 从环境变量覆盖NVIDIA配置
@@ -193,7 +211,7 @@ class KnowledgeBaseConfig:
         
         # 根据选择的提供商验证API密钥
         if provider in {"api", "siliconflow"} and not self.siliconflow.api_key:
-            errors.append("缺少硅基流动API密钥 (SILICONFLOW_API_KEY)")
+            errors.append("缺少向量API密钥 (KB_EMBEDDING_API_KEY 或 SILICONFLOW_API_KEY)")
         elif provider == "nvidia" and not self.nvidia.api_key:
             errors.append("缺少NVIDIA API密钥 (NVIDIA_API_KEY)")
         elif provider in {"local", "local_onnx"}:

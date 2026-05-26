@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_PRESET_ID = "preset-tsc5"
 LEGACY_API_PRESET_NAME = "预设接口"
 DEFAULT_API_PRESET_NAME = "探索仓API"
-DEFAULT_API_PRESET_BASE = "https://test.tsc5.top/v1"
+DEFAULT_API_PRESET_BASE = "https://api.tsc5.top/v1"
 IMAGE_API_FORMATS = {
     "auto",
     "openai_images",
@@ -36,6 +36,10 @@ def _is_tsc5_api_base(api_base: str) -> bool:
     return "tsc5.top" in str(api_base or "").lower()
 
 
+def _is_legacy_tsc5_api_base(api_base: str) -> bool:
+    return "test.tsc5.top" in str(api_base or "").lower()
+
+
 def _normalize_versioned_openai_base_url(api_base: str) -> str:
     base_url = str(api_base or "").strip().rstrip("/")
     if not base_url:
@@ -48,6 +52,8 @@ def _normalize_versioned_openai_base_url(api_base: str) -> str:
 
 def _normalize_api_base_for_config(api_base: str, *, config_id: str = "") -> str:
     base_url = str(api_base or "").strip()
+    if config_id == DEFAULT_API_PRESET_ID and _is_legacy_tsc5_api_base(base_url):
+        return DEFAULT_API_PRESET_BASE
     if config_id == DEFAULT_API_PRESET_ID or _is_tsc5_api_base(base_url):
         return _normalize_versioned_openai_base_url(base_url)
     return base_url

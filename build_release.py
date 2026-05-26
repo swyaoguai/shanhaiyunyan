@@ -56,6 +56,8 @@ def bump_version(version: str, part: str) -> str:
     if part == "minor":
         return format_semver((major, minor + 1, 0))
     if part == "patch":
+        if patch >= 9:
+            return format_semver((major, minor + 1, 0))
         return format_semver((major, minor, patch + 1))
     raise ValueError(f"Unsupported bump part: {part}")
 
@@ -239,7 +241,11 @@ def print_summary(ctx: BuildContext) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the public Windows release installer.")
     parser.add_argument("--version", help="Set VERSION to an exact semantic version before building, e.g. 1.0.1.")
-    parser.add_argument("--bump", choices=("patch", "minor", "major"), help="Bump VERSION before building.")
+    parser.add_argument(
+        "--bump",
+        choices=("patch", "minor", "major"),
+        help="Bump VERSION before building. Patch releases roll x.y.9 forward to x.(y+1).0.",
+    )
     parser.add_argument("--strict-version", action="store_true", help="Fail when VERSION is not ahead of the latest CHANGELOG release.")
     parser.add_argument("--check-version-only", action="store_true", help="Only print version detection information.")
     return parser.parse_args(argv)

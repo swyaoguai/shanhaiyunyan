@@ -5,7 +5,7 @@
 const SETTINGS_DEFAULT_API_PRESET_ID = 'preset-tsc5';
 const SETTINGS_DEFAULT_API_PRESET_LEGACY_NAME = '预设接口';
 const SETTINGS_DEFAULT_API_PRESET_DISPLAY_NAME = '探索仓API';
-const SETTINGS_RELAY_SITE_URL = 'https://test.tsc5.top/';
+const SETTINGS_RELAY_SITE_URL = 'https://api.tsc5.top/';
 
 function normalizeApiConfigDisplayName(config) {
     const name = String(config?.name || '').trim();
@@ -456,11 +456,15 @@ function renderApiTestResultPanel(result = null) {
 }
 
 function renderModelOptions(config, selectedModel = currentActiveModel) {
-    if (!config || !config.models || config.models.length === 0) {
+    const models = typeof window.getTextModelsFromConfig === 'function'
+        ? window.getTextModelsFromConfig(config)
+        : (Array.isArray(config?.models) ? config.models : []);
+
+    if (!config || models.length === 0) {
         return '<option value="">-- 请先添加模型 --</option>';
     }
 
-    return config.models.map((model) => `
+    return models.map((model) => `
         <option value="${safeAttr(model)}" ${model === selectedModel ? 'selected' : ''}>${safeText(model)}</option>
     `).join('');
 }
@@ -723,8 +727,11 @@ function renderAgentSettingsView(agentTypes, agents) {
 function renderAgentModelOptions(configId, selectedModel) {
     if (!configId) {
         const activeConfig = agentPageApiConfigs.find((cfg) => cfg.id === agentPageActiveConfigId);
-        if (activeConfig && activeConfig.models && activeConfig.models.length > 0) {
-            return activeConfig.models.map((model) => `
+        const activeModels = typeof window.getTextModelsFromConfig === 'function'
+            ? window.getTextModelsFromConfig(activeConfig)
+            : (Array.isArray(activeConfig?.models) ? activeConfig.models : []);
+        if (activeModels.length > 0) {
+            return activeModels.map((model) => `
                 <option value="${safeAttr(model)}" ${model === selectedModel ? 'selected' : ''}>${safeText(model)} (全局)</option>
             `).join('');
         }
@@ -732,13 +739,16 @@ function renderAgentModelOptions(configId, selectedModel) {
     }
 
     const config = agentPageApiConfigs.find((item) => item.id === configId);
-    if (config && config.models && config.models.length > 0) {
-        return config.models.map((model) => `
+    const models = typeof window.getTextModelsFromConfig === 'function'
+        ? window.getTextModelsFromConfig(config)
+        : (Array.isArray(config?.models) ? config.models : []);
+    if (models.length > 0) {
+        return models.map((model) => `
             <option value="${safeAttr(model)}" ${model === selectedModel ? 'selected' : ''}>${safeText(model)}</option>
         `).join('');
     }
 
-    return '<option value="">-- 该配置无可用模型 --</option>';
+    return '<option value="">-- 该配置无可用文本模型 --</option>';
 }
 
 async function loadKnowledgeBaseSettings() {
@@ -768,6 +778,9 @@ async function loadKnowledgeBaseSettings() {
                 ? getActiveProjectId()
                 : (window.store && window.store.currentProjectId)
         );
+        const embeddingModel = config.embedding_model || config.siliconflow_model || 'BAAI/bge-m3';
+        const embeddingBaseUrl = config.embedding_base_url || config.siliconflow_base_url || 'https://api.siliconflow.cn/v1';
+        const embeddingDim = config.embedding_dim ?? config.siliconflow_embedding_dim ?? 1024;
 
         content.innerHTML = `
             <div class="settings-page">
@@ -795,13 +808,13 @@ async function loadKnowledgeBaseSettings() {
                         </button>
                     </div>
                     <p class="settings-note">
-                        当前使用：${isLocalProvider ? '本地模型包' : '硅基流动线上模型'}
+                        当前使用：${isLocalProvider ? '本地模型包' : 'API / 自定义向量模型'}
                     </p>
                     <div class="settings-stack" style="margin-top: 16px;">
                         <div>
                             <label class="settings-label">嵌入模型来源</label>
                             <select id="kb-embedding-provider" class="settings-field">
-                                <option value="api" ${!isLocalProvider ? 'selected' : ''}>硅基流动线上模型</option>
+                                <option value="api" ${!isLocalProvider ? 'selected' : ''}>API / 自定义向量模型</option>
                                 <option value="local_onnx" ${isLocalProvider ? 'selected' : ''}>本地模型包</option>
                             </select>
                         </div>
@@ -809,16 +822,12 @@ async function loadKnowledgeBaseSettings() {
                         <div id="kb-provider-api-panel" class="settings-stack" style="${isLocalProvider ? 'display: none;' : ''}">
                             <div class="settings-grid settings-grid-wide-narrow">
                                 <div>
-                                    <label class="settings-label">API Base URL</label>
-                                    <input type="text" id="kb-siliconflow-base" value="${safeAttr(config.siliconflow_base_url || 'https://api.siliconflow.cn/v1')}" placeholder="https://api.siliconflow.cn/v1" class="settings-field">
+                                    <label class="settings-label">Embedding API Base URL</label>
+                                    <input type="text" id="kb-siliconflow-base" value="${safeAttr(embeddingBaseUrl)}" placeholder="https://api.siliconflow.cn/v1" class="settings-field">
                                 </div>
                                 <div>
                                     <label class="settings-label">向量维度</label>
-                                    <select id="kb-embedding-dim" class="settings-field">
-                                        <option value="512" ${config.siliconflow_embedding_dim == 512 ? 'selected' : ''}>512</option>
-                                        <option value="1024" ${config.siliconflow_embedding_dim == 1024 || !config.siliconflow_embedding_dim ? 'selected' : ''}>1024 (推荐)</option>
-                                        <option value="2048" ${config.siliconflow_embedding_dim == 2048 ? 'selected' : ''}>2048</option>
-                                    </select>
+                                    <input type="number" id="kb-embedding-dim" min="0" step="1" value="${safeAttr(embeddingDim)}" placeholder="0 表示不发送 dimensions" class="settings-field">
                                 </div>
                             </div>
                             <div>
@@ -827,19 +836,22 @@ async function loadKnowledgeBaseSettings() {
                                     ${hasApiKey ? '<span class="settings-chip settings-chip--success" style="margin-left: 8px;">✓ 已保存</span>' : ''}
                                 </label>
                                 <div class="settings-input-action">
-                                    <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入硅基流动API Key（sk-...）'}" class="settings-field settings-field--with-action">
+                                    <input type="password" id="kb-siliconflow-key" value="" placeholder="${hasApiKey ? '已保存，如需修改请输入新Key' : '请输入向量 API Key'}" class="settings-field settings-field--with-action">
                                     <button id="toggle-kb-key" class="settings-button settings-button--ghost" type="button">
                                         <i class="ri-eye-line"></i>
                                     </button>
                                 </div>
                             </div>
                             <div>
-                                <label class="settings-label">Embedding 模型</label>
-                                <select id="kb-siliconflow-model" class="settings-field">
-                                    <option value="BAAI/bge-m3" ${config.siliconflow_model === 'BAAI/bge-m3' || !config.siliconflow_model ? 'selected' : ''}>BAAI/bge-m3 (推荐，多语言)</option>
-                                    <option value="BAAI/bge-large-zh-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-zh-v1.5' ? 'selected' : ''}>BAAI/bge-large-zh-v1.5 (中文优化)</option>
-                                    <option value="BAAI/bge-large-en-v1.5" ${config.siliconflow_model === 'BAAI/bge-large-en-v1.5' ? 'selected' : ''}>BAAI/bge-large-en-v1.5 (英文优化)</option>
-                                </select>
+                                <label class="settings-label">Embedding 模型（可自定义）</label>
+                                <input type="text" id="kb-siliconflow-model" value="${safeAttr(embeddingModel)}" placeholder="例如 BAAI/bge-m3 或 text-embedding-3-small" list="kb-embedding-model-presets" class="settings-field">
+                                <datalist id="kb-embedding-model-presets">
+                                    <option value="BAAI/bge-m3"></option>
+                                    <option value="BAAI/bge-large-zh-v1.5"></option>
+                                    <option value="BAAI/bge-large-en-v1.5"></option>
+                                    <option value="text-embedding-3-small"></option>
+                                    <option value="text-embedding-3-large"></option>
+                                </datalist>
                             </div>
                         </div>
 

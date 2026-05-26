@@ -84,7 +84,7 @@ class ConfigValidator:
         kb_config = load_knowledge_base_settings(data_dir)
         effective_config = apply_bundled_local_onnx_defaults(kb_config)
 
-        if not has_embedding_config(kb_config):
+        if not has_embedding_config(effective_config):
             self.warnings.append(
                 "知识库向量 provider 未配置。知识库功能将不可用。"
                 f"请在 {config_path} 中配置 SiliconFlow API Key，或使用本地 ONNX 模型目录。"

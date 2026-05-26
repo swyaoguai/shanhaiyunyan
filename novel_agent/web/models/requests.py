@@ -246,9 +246,13 @@ class NovelToScriptBatchReconvertRequest(BaseModel):
 class KnowledgeBaseConfigRequest(BaseModel):
     embedding_provider: str = "api"
     siliconflow_api_key: str = ""
+    embedding_api_key: str = ""
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_base_url: str = ""
     siliconflow_model: str = "BAAI/bge-m3"
+    embedding_model: str = ""
     siliconflow_embedding_dim: int = 1024
+    embedding_dim: Optional[int] = None
     onnx_model_dir: str = ""
     onnx_model_file: str = "model.onnx"
     onnx_tokenizer_dir: str = ""
@@ -268,6 +272,7 @@ class TestEmbeddingRequest(BaseModel):
     api_base: str = ""
     api_key: str = ""
     model: str = ""
+    dimensions: Optional[int] = None
 
 
 class ImportFileRequest(BaseModel):

@@ -13,12 +13,65 @@ FIXED_NEGATIVE_PROMPT = (
     "避免低清晰度、过度模糊、脸部崩坏、手部畸形。"
 )
 
+FANQIE_COVER_RULE_PROMPT = (
+    "番茄小说横版封面规则：最终成图固定 800x600；"
+    "根据书名和题材选择写实或意境化背景，背景必须服务书名意境；"
+    "避免漫画人物、卡通人物、二次元人物，优先商业网文封面的写实场景、氛围光影和核心意象；"
+    "书名醒目清晰，最多两行，断行符合阅读习惯，作者名小字与整体风格协调；"
+    "画面有前中远景层次，标题区域留出干净空间，远看可识别。"
+)
+
 NEUTRAL_ELEMENT_DEFAULTS = {
     "characters": "主角或核心主体根据书名、项目资料或创作想法呈现，身份、动作和关系不添加未提供设定",
     "scene_background": "背景场景根据书名、项目资料或创作想法呈现，保持与内容一致，不引入额外题材",
     "symbols_props": "只使用书名、项目资料或创作想法中明确出现的道具、符号和核心意象",
     "atmosphere_color": "根据作品内容选择情绪、主色和光影，主体突出，氛围清晰",
 }
+
+GENRE_KEYWORD_RULES = (
+    (
+        "历史",
+        ("皇帝", "皇后", "太子", "公主", "王朝", "大唐", "大宋", "明朝", "清朝", "古代", "穿越", "重生", "权谋", "朝堂", "后宫", "太监"),
+        "古代建筑、宫殿、山水、朝堂剪影、传统纹样等写实古风元素",
+        "厚重古风色调，金、红、墨、青灰等传统配色",
+    ),
+    (
+        "玄幻",
+        ("修仙", "修真", "仙侠", "玄幻", "武神", "武帝", "神王", "仙帝", "天劫", "飞升", "灵根", "丹药", "法宝", "功法"),
+        "仙山云雾、灵光、法宝、修炼场景等高幻想意象",
+        "神秘梦幻色彩，灵光流动，明暗层次丰富",
+    ),
+    (
+        "都市",
+        ("都市", "现代", "总裁", "豪门", "商战", "职场", "校园", "青春", "霸总"),
+        "现代建筑、城市夜景、商务空间、校园或生活场景",
+        "现代清晰色调，霓虹、暖光或干净柔光",
+    ),
+    (
+        "科幻",
+        ("星际", "未来", "机甲", "科技", "AI", "机器人", "太空", "宇宙", "末世", "丧尸"),
+        "未来城市、太空、机甲轮廓、科技界面或末世城市",
+        "冷色科技光效，金属质感，空间纵深强",
+    ),
+    (
+        "游戏",
+        ("游戏", "网游", "全息", "虚拟", "副本", "BOSS", "玩家", "职业", "技能"),
+        "虚拟世界、游戏场景、职业符号、战斗空间或副本入口",
+        "高对比炫彩光效，速度感和虚拟感明确",
+    ),
+    (
+        "悬疑",
+        ("悬疑", "推理", "侦探", "案件", "真相", "秘密", "谜团", "线索", "诡异", "异常", "惊悚"),
+        "暗色街巷、旧档案、雨夜、碎镜、线索物等悬疑意象",
+        "暗色调，冷暖局部光对比，紧张压迫",
+    ),
+    (
+        "言情",
+        ("宠妻", "甜宠", "虐恋", "甜文", "虐文", "爱", "婚", "玫瑰", "心动"),
+        "浪漫空间、温馨场景、玫瑰、信笺、窗边柔光等情感元素",
+        "柔和暖光、浪漫渐变或清透明亮色彩",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -336,6 +389,69 @@ COVER_TEMPLATES: List[CoverTemplate] = [
             "atmosphere_color": "深紫朦胧背景配纯白笔触，柔美大气",
         },
     ),
+    _cover_template(
+        template_id="sci_fi_matte_metal_3d",
+        name="深灰金属3D字",
+        genre="金属 / 3D / 黄铜描边",
+        description="深灰磨砂金属、黄铜描边和厚重 3D 浮雕组成的硬朗标题字。",
+        preview="超粗黑体3D字、黄铜描边、磨砂金属",
+        preview_image="/static/cover-examples/typography-14.png",
+        typography_style=(
+            "超粗黑体3D立体字，厚重硬朗的未来感标题字体，棱角分明，笔画粗壮均匀，"
+            "深灰色磨砂金属质感，表面带有细腻的金属颗粒纹理，边缘有精致的黄铜色金属描边，"
+            "描边带有微弱光泽，浮雕效果，轻微斜面倒角，顶部柔和光源照射，"
+            "字体表面有自然明暗变化，强烈的立体感和厚重感，标题字稳定可读，"
+            "电影级质感，8K，超高分辨率，细节拉满"
+        ),
+        defaults={
+            "characters": NEUTRAL_ELEMENT_DEFAULTS["characters"],
+            "scene_background": NEUTRAL_ELEMENT_DEFAULTS["scene_background"],
+            "symbols_props": NEUTRAL_ELEMENT_DEFAULTS["symbols_props"],
+            "atmosphere_color": "深灰磨砂金属与黄铜描边形成厚重高反差，背景色彩根据作品内容匹配",
+        },
+    ),
+    _cover_template(
+        template_id="xianxia_crystal_neon",
+        name="蓝紫水晶书法字",
+        genre="水晶 / 书法 / 霓虹",
+        description="飘逸书法、水晶玻璃质感和蓝紫霓虹光边组成的标题字。",
+        preview="蓝紫水晶立体字、发光圆环、星光高光",
+        preview_image="/static/cover-examples/typography-15.png",
+        typography_style=(
+            "蓝紫水晶书法艺术字，飘逸书法笔触，笔画末端带有灵动飘逸的拉长曲线，"
+            "粗体厚重与柔美曲线结合，3D立体字，斜面浮雕效果，冰蓝色到淡紫色的渐变色彩，"
+            "半透明水晶玻璃质感，边缘环绕明亮的蓝紫色霓虹光边，字体中心有强烈的星光高光点，"
+            "周围有流动的蓝紫色光效线条，字体后方有淡紫色发光圆环，整体散发柔和的光晕辉光，"
+            "标题字稳定可读，神秘梦幻氛围，光影效果强烈，电影级质感，8K，超高分辨率，细节拉满"
+        ),
+        defaults={
+            "characters": NEUTRAL_ELEMENT_DEFAULTS["characters"],
+            "scene_background": NEUTRAL_ELEMENT_DEFAULTS["scene_background"],
+            "symbols_props": NEUTRAL_ELEMENT_DEFAULTS["symbols_props"],
+            "atmosphere_color": "冰蓝到淡紫渐变，水晶通透质感与蓝紫辉光突出标题，背景色彩根据作品内容匹配",
+        },
+    ),
+    _cover_template(
+        template_id="dark_fantasy_blade_silver",
+        name="古银刀锋金属字",
+        genre="刀锋 / 古银 / 深红",
+        description="刀锋剑刃笔画、做旧古银金属和深红描边组成的硬朗标题字。",
+        preview="古银刀锋字、深红内描边、斑驳划痕",
+        preview_image="/static/cover-examples/typography-16.png",
+        typography_style=(
+            "暗黑刀锋风格艺术字，锋利尖锐的刀锋剑刃造型笔画，棱角极其分明，"
+            "充满杀伐感和力量感，3D立体浮雕字，明显斜面倒角，做旧古银色金属质感，"
+            "表面带有磨损划痕和斑驳纹理，边缘有深红色内描边，顶部侧方光源照射，"
+            "字体表面形成强烈明暗对比，厚重硬朗，标题字稳定可读，"
+            "史诗感拉满，电影级质感，8K，超高分辨率，细节拉满"
+        ),
+        defaults={
+            "characters": NEUTRAL_ELEMENT_DEFAULTS["characters"],
+            "scene_background": NEUTRAL_ELEMENT_DEFAULTS["scene_background"],
+            "symbols_props": NEUTRAL_ELEMENT_DEFAULTS["symbols_props"],
+            "atmosphere_color": "做旧古银与深红暗光形成强烈明暗对比，背景色彩根据作品内容匹配",
+        },
+    ),
 ]
 
 
@@ -384,6 +500,58 @@ def _join_non_empty(values: Iterable[Any], *, limit: int = 420) -> str:
 
 def _contains_any(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def _infer_genre_design(title: str, genre: str = "", summary: str = "") -> Dict[str, str]:
+    text = _compact_text(" ".join([title, genre, summary]), 520)
+    if not text:
+        return {
+            "genre": "通用网文",
+            "keywords": "",
+            "background": "根据书名意境选择写实或意境化背景，不额外添加未提供剧情",
+            "color": "根据书名情绪选择清晰主色和高可读光影",
+        }
+
+    for genre_name, keywords, background, color in GENRE_KEYWORD_RULES:
+        matched = [keyword for keyword in keywords if keyword in text]
+        if matched:
+            return {
+                "genre": genre_name,
+                "keywords": "、".join(matched[:5]),
+                "background": background,
+                "color": color,
+            }
+
+    return {
+        "genre": _compact_text(genre, 40) or "通用网文",
+        "keywords": "",
+        "background": "根据书名意境选择写实或意境化背景，不额外添加未提供剧情",
+        "color": "根据书名情绪选择清晰主色和高可读光影",
+    }
+
+
+def _merge_genre_visual_guidance(
+    elements: Dict[str, str],
+    design: Mapping[str, str],
+    *,
+    source_content_empty: bool,
+) -> Dict[str, str]:
+    result = dict(elements)
+    background = _compact_text(design.get("background"), 180)
+    color = _compact_text(design.get("color"), 160)
+    if background:
+        current_background = _compact_text(result.get("scene_background"), 360)
+        if not current_background:
+            result["scene_background"] = background
+        elif source_content_empty and background not in current_background:
+            result["scene_background"] = _join_non_empty([current_background, f"题材场景补充：{background}"], limit=520)
+    if color:
+        current_color = _compact_text(result.get("atmosphere_color"), 300)
+        if not current_color:
+            result["atmosphere_color"] = color
+        elif source_content_empty and color not in current_color:
+            result["atmosphere_color"] = _join_non_empty([current_color, f"题材色彩补充：{color}"], limit=420)
+    return result
 
 
 def _infer_visual_elements_from_seed(seed_text: str, title: str, template: CoverTemplate) -> Dict[str, str]:
@@ -560,6 +728,11 @@ class CoverPromptBuilder:
         explicit_title = _compact_text(title)
         merged["title"] = _first_non_empty(explicit_title, project_title, template.defaults.get("title"), "未命名小说")
         merged["author"] = _first_non_empty(author, merged.get("author"), "XXXX")
+        genre_design = _infer_genre_design(
+            merged["title"],
+            project_elements.get("genre", ""),
+            _join_non_empty([project_elements.get("summary", ""), creative_idea], limit=520),
+        )
 
         seed_text = _join_non_empty(
             [
@@ -587,13 +760,18 @@ class CoverPromptBuilder:
             if key in variable_keys and not _compact_text(before_default) and _compact_text(merged.get(key)):
                 fallback_fields.append(key)
 
+        merged = _merge_genre_visual_guidance(merged, genre_design, source_content_empty=source_content_empty)
+
         typography_prompt = template.typography_prompt.format(**merged)
         element_prompt = template.element_prompt.format(**merged)
         final_prompt = "\n".join(
             [
                 typography_prompt,
                 element_prompt,
-                "构图要求：小说商业封面，主体清晰，远看可识别，标题区域稳定可读，避免真实平台标识。",
+                f"题材判断：{genre_design['genre']}"
+                + (f"；关键词：{genre_design['keywords']}" if genre_design.get("keywords") else "")
+                + "。",
+                f"平台与构图要求：{FANQIE_COVER_RULE_PROMPT}",
                 f"禁止项：{FIXED_NEGATIVE_PROMPT}",
             ]
         )
@@ -640,6 +818,8 @@ class CoverPromptBuilder:
             "fallback_fields": fallback_fields,
             "project_context_empty": project_context_empty,
             "custom_elements_empty": custom_elements_empty,
+            "genre_design": dict(genre_design),
+            "platform_rule": FANQIE_COVER_RULE_PROMPT,
             "completion_notice": completion_notice,
             "prompt_generation_mode": prompt_generation_mode,
             "prompt_api_config_id": "",
@@ -678,11 +858,15 @@ class CoverPromptBuilder:
 
         typography_prompt = _first_non_empty(draft.get("typography_prompt")) or template.typography_prompt.format(**merged)
         element_prompt = template.element_prompt.format(**merged)
+        genre_design = draft.get("genre_design") if isinstance(draft.get("genre_design"), Mapping) else {}
+        genre_label = _compact_text(genre_design.get("genre"), 40) or _infer_genre_design(merged["title"]).get("genre", "通用网文")
+        genre_keywords = _compact_text(genre_design.get("keywords"), 80)
         final_prompt = "\n".join(
             [
                 typography_prompt,
                 element_prompt,
-                "构图要求：小说商业封面，主体清晰，远看可识别，标题区域稳定可读，避免真实平台标识。",
+                f"题材判断：{genre_label}" + (f"；关键词：{genre_keywords}" if genre_keywords else "") + "。",
+                f"平台与构图要求：{FANQIE_COVER_RULE_PROMPT}",
                 f"禁止项：{FIXED_NEGATIVE_PROMPT}",
             ]
         )

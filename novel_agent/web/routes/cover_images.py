@@ -14,7 +14,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from ...cover_image_service import CoverImageService
-from ...cover_prompt_enhancer import CoverPromptEnhancer
 from ...cover_prompt_builder import CoverPromptBuilder, get_cover_templates
 from ...project_manager import get_project_manager
 from ..models.cover_image import CoverBatchDeleteRequest, CoverGenerateRequest, CoverPromptDraftRequest
@@ -23,7 +22,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _prompt_builder = CoverPromptBuilder()
-_prompt_enhancer = CoverPromptEnhancer(builder=_prompt_builder)
 _image_service = CoverImageService()
 _JOB_POLL_INTERVAL_MS = 2000
 _JOB_CACHE_TTL = timedelta(hours=6)
@@ -214,21 +212,6 @@ async def build_cover_prompt_draft(request: CoverPromptDraftRequest):
             author=request.author,
             custom_elements=request.custom_elements,
         )
-        if request.prompt_api_config_id or request.prompt_model:
-            try:
-                draft = await _prompt_enhancer.enhance(
-                    draft,
-                    api_config_id=request.prompt_api_config_id,
-                    model=request.prompt_model,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:
-                logger.warning("[CoverImages] prompt enhancement failed: %s", exc)
-                draft["prompt_model_warning"] = (
-                    "文本模型补全失败，已改用本地推断和模板补全。"
-                    "可以更换文本模型，或在创作想法和四项元素中补充内容后重试。"
-                )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _ok({"data": draft})

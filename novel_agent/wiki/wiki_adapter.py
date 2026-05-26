@@ -121,6 +121,8 @@ class LibraryEntryCompat:
     @classmethod
     def from_wiki_page(cls, page: WikiPage) -> "LibraryEntryCompat":
         """从 WikiPage 创建兼容对象"""
+        from ..source_modes import source_mode_from_tags
+
         entry_type = PAGE_TYPE_TO_ENTRY_TYPE.get(page.page_type, "custom")
         
         # 从正文提取摘要（前200字）
@@ -136,6 +138,7 @@ class LibraryEntryCompat:
                 "body": page.body,
                 "vector_text": page.plain_text(),
                 "summary_text": summary,
+                "source_mode": source_mode_from_tags(page.tags),
             },
             relations=page.extract_wikilinks(),
             links_out=page.extract_wikilinks(),
@@ -165,6 +168,7 @@ class LibraryEntryCompat:
             tags=data.get("tags", []),
             created_at=now_iso(),
             updated_at=now_iso(),
+            source_type=str(data.get("source_type") or ""),
         )
 
 
@@ -425,7 +429,15 @@ class WikiLibraryAdapter:
 
     def _compat_entry_to_page(self, entry: LibraryEntryCompat) -> WikiPage:
         """将兼容条目转为 WikiPage"""
+        from ..source_modes import ensure_source_tag, source_mode_from_record
+
         page_type = ENTRY_TYPE_TO_PAGE_TYPE.get(entry.entry_type, PageType.CUSTOM)
+        source_mode = source_mode_from_record({
+            "source_mode": entry.content_structured.get("source_mode") if isinstance(entry.content_structured, dict) else "",
+            "source_type": entry.source_type,
+            "tags": entry.tags,
+        })
+        tags = ensure_source_tag(entry.tags or [], source_mode) if source_mode else (entry.tags or [])
         
         # 构建正文
         body_parts = [f"# {entry.title}", ""]
@@ -470,7 +482,7 @@ class WikiLibraryAdapter:
             page_type=page_type,
             title=entry.title,
             sources=["library.json"],
-            tags=entry.tags or [],
+            tags=tags,
             created_at=entry.created_at or now_iso(),
             updated_at=entry.updated_at or now_iso(),
             word_count=len(re.sub(r"\s+", "", body_text)),
@@ -483,9 +495,12 @@ class WikiLibraryAdapter:
 
     def _dict_to_page(self, data: Dict[str, Any]) -> WikiPage:
         """将字典转为 WikiPage"""
+        from ..source_modes import ensure_source_tag, source_mode_from_record
+
         title = data.get("title", data.get("name", "未命名"))
         entry_type = data.get("entry_type", "custom")
         page_type = ENTRY_TYPE_TO_PAGE_TYPE.get(entry_type, PageType.CUSTOM)
+        source_mode = source_mode_from_record(data)
         
         body_parts = [f"# {title}", ""]
         
@@ -503,7 +518,7 @@ class WikiLibraryAdapter:
             frontmatter=Frontmatter(
                 page_type=page_type,
                 title=title,
-                tags=data.get("tags", []),
+                tags=ensure_source_tag(data.get("tags", []), source_mode) if source_mode else data.get("tags", []),
                 created_at=data.get("created_at", now_iso()),
                 updated_at=data.get("updated_at", now_iso()),
             ),
@@ -512,9 +527,17 @@ class WikiLibraryAdapter:
 
     def _object_to_page(self, obj) -> WikiPage:
         """将任意对象转为 WikiPage"""
+        from ..source_modes import ensure_source_tag, source_mode_from_record
+
         title = getattr(obj, "title", getattr(obj, "name", "未命名"))
         entry_type = getattr(obj, "entry_type", "custom")
         page_type = ENTRY_TYPE_TO_PAGE_TYPE.get(entry_type, PageType.CUSTOM)
+        tags = getattr(obj, "tags", [])
+        source_mode = source_mode_from_record({
+            "source_mode": getattr(obj, "source_mode", ""),
+            "source_type": getattr(obj, "source_type", ""),
+            "tags": tags,
+        })
         
         body = f"# {title}\n\n"
         summary = getattr(obj, "summary", "")
@@ -525,7 +548,7 @@ class WikiLibraryAdapter:
             frontmatter=Frontmatter(
                 page_type=page_type,
                 title=title,
-                tags=getattr(obj, "tags", []),
+                tags=ensure_source_tag(tags, source_mode) if source_mode else tags,
                 created_at=getattr(obj, "created_at", now_iso()),
                 updated_at=getattr(obj, "updated_at", now_iso()),
             ),

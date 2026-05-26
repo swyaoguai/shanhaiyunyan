@@ -337,12 +337,15 @@ function bindGlobalAPISettingsEvents(timeoutSettings = {}) {
             event.stopPropagation();
             const configId = btn.dataset.configId;
             const config = currentApiConfigs.find((item) => item.id === configId);
-            if (!confirm(`确定要删除配置 "${config?.name || configId}" 吗？`)) {
+            if (!(await window.showConfirmDialog(`确定要删除配置 "${config?.name || configId}" 吗？`))) {
                 return;
             }
             try {
                 await deleteApiConfig(configId);
                 showToast('配置已删除');
+                if (typeof window.notifyApiConfigsUpdated === 'function') {
+                    window.notifyApiConfigsUpdated({ reason: 'deleted', configId });
+                }
                 loadGlobalAPISettings();
             } catch (e) {
                 showToast(`删除失败: ${e.message}`, 'error');
@@ -959,16 +962,18 @@ function showConfigEditModal(configId = null) {
         button.innerHTML = '<i class="ri-loader-4-line"></i> 保存中...';
 
         try {
+            let savedConfigId = editingConfigId || '';
             if (isEdit) {
                 const updateData = { name, api_base: apiBase, models: currentModels, temperature, max_tokens: maxTokens, api_type: apiType, image_api_format: imageApiFormat };
                 if (apiKeys.length > 0) {
                     updateData.api_key = apiKeys[0];
                     updateData.api_keys = apiKeyEntries;
                 }
-                await updateApiConfig(editingConfigId, updateData);
+                const result = await updateApiConfig(editingConfigId, updateData);
+                savedConfigId = result?.config?.id || editingConfigId || '';
                 showToast('配置已更新 ✓', 'success');
             } else {
-                await createApiConfig({
+                const result = await createApiConfig({
                     name,
                     api_base: apiBase,
                     api_key: apiKeys[0] || '',
@@ -979,7 +984,11 @@ function showConfigEditModal(configId = null) {
                     api_type: apiType,
                     image_api_format: imageApiFormat
                 });
+                savedConfigId = result?.config?.id || '';
                 showToast('配置已创建 ✓', 'success');
+            }
+            if (typeof window.notifyApiConfigsUpdated === 'function') {
+                window.notifyApiConfigsUpdated({ reason: isEdit ? 'updated' : 'created', configId: savedConfigId });
             }
             closeFetchedModelPicker();
             modal.style.display = 'none';
@@ -1167,11 +1176,17 @@ function bindKnowledgeBaseEvents() {
 
     const collectKnowledgeBasePayload = () => {
         const apiKey = document.getElementById('kb-siliconflow-key')?.value || '';
+        const embeddingBaseUrl = document.getElementById('kb-siliconflow-base')?.value || 'https://api.siliconflow.cn/v1';
+        const embeddingModel = document.getElementById('kb-siliconflow-model')?.value || 'BAAI/bge-m3';
+        const embeddingDim = parseInt(document.getElementById('kb-embedding-dim')?.value || '1024', 10);
         const payload = {
             embedding_provider: document.getElementById('kb-embedding-provider')?.value || 'api',
-            siliconflow_base_url: document.getElementById('kb-siliconflow-base')?.value || 'https://api.siliconflow.cn/v1',
-            siliconflow_model: document.getElementById('kb-siliconflow-model')?.value || 'BAAI/bge-m3',
-            siliconflow_embedding_dim: parseInt(document.getElementById('kb-embedding-dim')?.value || '1024', 10),
+            siliconflow_base_url: embeddingBaseUrl,
+            embedding_base_url: embeddingBaseUrl,
+            siliconflow_model: embeddingModel,
+            embedding_model: embeddingModel,
+            siliconflow_embedding_dim: Number.isNaN(embeddingDim) ? 1024 : embeddingDim,
+            embedding_dim: Number.isNaN(embeddingDim) ? 1024 : embeddingDim,
             onnx_model_dir: document.getElementById('kb-onnx-model-dir')?.value || 'novel_agent/models/embedding/default',
             onnx_model_file: document.getElementById('kb-onnx-model-file')?.value || 'model.onnx',
             onnx_tokenizer_dir: '',
@@ -1187,6 +1202,7 @@ function bindKnowledgeBaseEvents() {
 
         if (apiKey) {
             payload.siliconflow_api_key = apiKey;
+            payload.embedding_api_key = apiKey;
         }
         return payload;
     };
@@ -1300,7 +1316,7 @@ function bindKnowledgeBaseEvents() {
     document.getElementById('rebuild-chapter-knowledge-btn')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
         const resultEl = document.getElementById('chapter-knowledge-sync-result');
-        if (!confirm('确定要按当前章节正文重建全文知识索引吗？')) {
+        if (!(await window.showConfirmDialog('确定要按当前章节正文重建全文知识索引吗？'))) {
             return;
         }
         button.disabled = true;
@@ -1308,16 +1324,23 @@ function bindKnowledgeBaseEvents() {
         if (resultEl) resultEl.style.display = 'none';
         try {
             const result = await rebuildChapterKnowledgeIndex();
-            const message = `已同步 ${result.synced || 0} 章，跳过 ${result.skipped || 0} 章，清理 ${result.deleted || 0} 条旧索引`;
+            const ok = !result || result.success !== false;
+            const message = ok
+                ? `已同步 ${result.synced || 0} 章，跳过 ${result.skipped || 0} 章，清理 ${result.deleted || 0} 条旧索引`
+                : (result.message || `章节正文已保存在本地，但全文索引暂不可用：${(result.errors || [])[0] || '知识库未就绪'}`);
+            const boxStyle = ok
+                ? 'background: rgba(16,185,129,0.16); border: 1px solid rgba(16,185,129,0.45); color: #10b981;'
+                : 'background: rgba(245,158,11,0.16); border: 1px solid rgba(245,158,11,0.45); color: #f59e0b;';
+            const icon = ok ? 'ri-check-circle-line' : 'ri-alert-line';
             if (resultEl) {
                 resultEl.innerHTML = `
-                    <div style="background: rgba(16,185,129,0.16); border: 1px solid rgba(16,185,129,0.45); border-radius: 8px; padding: 12px; color: #10b981;">
-                        <i class="ri-check-circle-line"></i> ${safeText(message)}
+                    <div style="${boxStyle} border-radius: 8px; padding: 12px;">
+                        <i class="${icon}"></i> ${safeText(message)}
                     </div>
                 `;
                 resultEl.style.display = 'block';
             }
-            showToast(message);
+            showToast(message, ok ? 'success' : 'warning');
             setTimeout(() => loadKnowledgeBaseSettings(), 700);
         } catch (e) {
             if (resultEl) {
@@ -1347,7 +1370,8 @@ function bindKnowledgeBaseEvents() {
             const result = await testKnowledgeBaseConnection({
                 api_base: document.getElementById('kb-siliconflow-base').value,
                 api_key: document.getElementById('kb-siliconflow-key').value || '',
-                model: document.getElementById('kb-siliconflow-model').value
+                model: document.getElementById('kb-siliconflow-model').value,
+                dimensions: parseInt(document.getElementById('kb-embedding-dim')?.value || '0', 10) || 0
             });
 
             if (result.success) {
@@ -1412,7 +1436,7 @@ function bindKnowledgeBaseEvents() {
             showToast('请先选择要删除的章节', 'error');
             return;
         }
-        if (!confirm(`确定要删除选中的 ${selected.length} 个章节的知识库数据吗？\n\n此操作不可恢复！`)) {
+        if (!(await window.showConfirmDialog(`确定要删除选中的 ${selected.length} 个章节的知识库数据吗？\n\n此操作不可恢复！`))) {
             return;
         }
         const button = document.getElementById('delete-selected-chapters');
@@ -1435,10 +1459,10 @@ function bindKnowledgeBaseEvents() {
     });
 
     document.getElementById('clear-all-kb')?.addEventListener('click', async () => {
-        if (!confirm('⚠️ 确定要清空当前项目的所有知识库数据吗？\n\n此操作不可恢复！所有向量化数据将被永久删除。')) {
+        if (!(await window.showConfirmDialog('⚠️ 确定要清空当前项目的所有知识库数据吗？\n\n此操作不可恢复！所有向量化数据将被永久删除。'))) {
             return;
         }
-        if (!confirm('再次确认：真的要删除所有知识库数据吗？')) {
+        if (!(await window.showConfirmDialog('再次确认：真的要删除所有知识库数据吗？'))) {
             return;
         }
         const button = document.getElementById('clear-all-kb');
@@ -1495,7 +1519,7 @@ function bindSkillsSettingsEvents() {
         btn.addEventListener('click', async (event) => {
             event.stopPropagation();
             const skillName = btn.dataset.skill;
-            if (!confirm(`确定要删除技能“${skillName}”吗？\n\n此操作会删除整个技能目录和里面的所有文件，删掉后不能恢复。`)) {
+            if (!(await window.showConfirmDialog(`确定要删除技能“${skillName}”吗？\n\n此操作会删除整个技能目录和里面的所有文件，删掉后不能恢复。`))) {
                 return;
             }
             btn.disabled = true;
