@@ -33,6 +33,19 @@ class ResumeCreationFlowRequest(BaseModel):
     approve_chapter_settings: bool = False
 
 
+class CollabRecoveryActionRequest(BaseModel):
+    """对协作诊断中的任务执行显式恢复动作。"""
+    session_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]{0,64}$")
+    action: str = ""
+    task_id: str = ""
+    task_ids: List[str] = Field(default_factory=list)
+    note: str = ""
+    run_after: bool = False
+    max_tasks: int = 7
+    max_chapter_tasks: int = 2
+    approve_chapter_settings: bool = False
+
+
 class GenerateWorldRequest(BaseModel):
     novel_type: str = ""
     theme: str = ""
@@ -102,6 +115,7 @@ class ShortStoryTimeoutSettingsRequest(BaseModel):
     outline: Optional[int] = None
     chapter: Optional[int] = None
     quality: Optional[int] = None
+    quality_rewrite: Optional[int] = None
     coherence: Optional[int] = None
     title: Optional[int] = None
     tags: Optional[int] = None
@@ -167,6 +181,10 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
     creative_mode: str = "auto"
+
+
+class ChatMessageEditRequest(BaseModel):
+    content: str
 
 
 class UserInputRequest(BaseModel):
@@ -423,6 +441,8 @@ class ContinuousWriteContinueRequest(BaseModel):
     api_config_id: str = ""
     enable_trends: bool = False
     trends_platforms: List[str] = Field(default_factory=list)
+    chapters: List[dict] = Field(default_factory=list)
+    current_chapter: int = 0
 
 
 class ContinuousWriteSyncRequest(BaseModel):
@@ -515,6 +535,12 @@ class ShortStoryWorkflowRequest(BaseModel):
     feedback: str = ""
 
 
+class ShortStoryRollbackRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    target_step: str = "previous"
+    feedback: str = ""
+
+
 class ShortStorySelectionRequest(BaseModel):
     workflow: Dict[str, Any] = Field(default_factory=dict)
     selection: int
@@ -551,3 +577,11 @@ class ShortStorySimpleFixRequest(BaseModel):
     workflow: Dict[str, Any] = Field(default_factory=dict)
     report: str = ""
     chapters: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ShortStoryQualityRewriteRequest(BaseModel):
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    report: str = ""
+    chapters: List[Dict[str, Any]] = Field(default_factory=list)
+    api_config_id: str = ""
+    model: str = ""

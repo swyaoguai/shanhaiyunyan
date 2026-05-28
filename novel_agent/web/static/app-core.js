@@ -28,6 +28,7 @@ const store = {
         detail_settings: [],  // 细纲设定
         chapter_settings: [], // 章纲设定
         chapter_summary: [],  // 正文摘要
+        chapter_volumes: [],  // 正文章节分卷
         custom_knowledge: []  // 用户自定义资料库
     },
     // 资料库分类配置
@@ -57,6 +58,9 @@ const store = {
     pendingCreationContract: null,
     currentTaskPool: null,
     collabExecutionTrace: null,
+    collabRunState: null,
+    collabDiagnostics: null,
+    collabHandoff: null,
     projectReadyExecution: null,
     runtimeProjectStatus: null,
     collabRuntimePollingTimer: null,
@@ -561,8 +565,12 @@ function switchModule(moduleId) {
     const shouldOpenMergedKnowledge = moduleId === 'world' && typeof window.openMultiAgentKnowledgeWorkspace === 'function';
     const normalizedModuleId = shouldOpenMergedKnowledge ? 'write' : moduleId;
     const previousModule = store.currentModule;
+    if (typeof window.prepareInfiniteWriteEditorForModuleSwitch === 'function') {
+        window.prepareInfiniteWriteEditorForModuleSwitch(normalizedModuleId, previousModule);
+    }
     store.currentModule = normalizedModuleId;
     const renderToken = beginModuleRender(normalizedModuleId);
+    closeStaleModuleModal(normalizedModuleId);
 
     // 更新资源栏激活状态
     ui.resItems.forEach(item => {
@@ -575,8 +583,9 @@ function switchModule(moduleId) {
     // 控制创作助手按钮的显示（只在多Agent创作模式显示）
     const isWritingModule = normalizedModuleId === 'write';
     const wasWritingModule = previousModule === 'write';
-    // 如果切换到非创作模块，自动关闭Copilot面板
-    if (!isWritingModule && store.copilotVisible) {
+    // 非多Agent模块必须强制关闭右侧助手；不能只依赖 store.copilotVisible，
+    // 旧会话或异步恢复可能让 DOM 面板仍处于展开状态。
+    if (!isWritingModule) {
         setCopilotVisible(false);
     }
     // 首次进入创作模块时默认打开山海·云烟助手
@@ -720,6 +729,30 @@ function isCurrentModuleRender(moduleId, renderToken) {
         && renderToken.generation === store.moduleRenderGeneration;
 }
 
+function markModuleModalOwner(moduleId) {
+    const modal = document.getElementById('modal-container');
+    if (!modal || !moduleId) return modal;
+    modal.dataset.moduleOwner = moduleId;
+    return modal;
+}
+
+function clearModuleModalOwner(moduleId = null) {
+    const modal = document.getElementById('modal-container');
+    if (!modal) return;
+    if (moduleId && modal.dataset.moduleOwner !== moduleId) return;
+    modal.classList.add('hidden');
+    modal.innerHTML = '';
+    delete modal.dataset.moduleOwner;
+}
+
+function closeStaleModuleModal(activeModuleId) {
+    const modal = document.getElementById('modal-container');
+    const owner = modal?.dataset?.moduleOwner || '';
+    if (owner && owner !== activeModuleId) {
+        clearModuleModalOwner(owner);
+    }
+}
+
 function isCompactViewport() {
     return typeof window !== 'undefined'
         && typeof window.matchMedia === 'function'
@@ -727,18 +760,19 @@ function isCompactViewport() {
 }
 
 function setCopilotVisible(visible) {
-    store.copilotVisible = Boolean(visible);
+    const nextVisible = Boolean(visible) && store.currentModule === 'write';
+    store.copilotVisible = nextVisible;
     if (ui.copilotPanel) {
-        ui.copilotPanel.classList.toggle('collapsed', !store.copilotVisible);
-        ui.copilotPanel.style.display = store.copilotVisible ? 'flex' : 'none';
+        ui.copilotPanel.classList.toggle('collapsed', !nextVisible);
+        ui.copilotPanel.style.display = nextVisible ? '' : 'none';
     }
-    if (!store.copilotVisible) {
+    if (!nextVisible) {
         hideCopilotSessionMenu();
     } else {
         // Copilot 打开时，更新状态面板
         updateCopilotWorkflowPanel();
     }
-    if (store.currentModule === 'write') {
+    if (nextVisible) {
         connectNovelCollabRealtime();
         startNovelCollabRuntimePolling();
     }
@@ -909,19 +943,19 @@ function translateTechnicalText(text) {
         [/Markdown/gi, '格式化文本'],
         [/Agent/gi, '助手'],
         [/Coordinator/gi, '创作协调器'],
-        [/Communicator/gi, '沟通助手'],
-        [/Worldbuilder/gi, '世界观构建师'],
-        [/Outliner/gi, '大纲规划师'],
+        [/Communicator/gi, '创作沟通助手'],
+        [/Worldbuilder/gi, '世界观设定师'],
+        [/Outliner/gi, '全书大纲规划师'],
         [/DetailOutlineBuilder/gi, '细纲构建师'],
-        [/ChapterSettingBuilder/gi, '章纲构建师'],
+        [/ChapterSettingBuilder/gi, '章纲设定师'],
         [/EventlineBuilder/gi, '事件线构建师'],
-        [/ChapterWriter/gi, '章节写手'],
-        [/ContinuousWriter/gi, '续写助手'],
-        [/Polisher/gi, '润色助手'],
-        [/SummaryOrchestrator/gi, '摘要编排助手'],
+        [/ChapterWriter/gi, '章节正文写手'],
+        [/ContinuousWriter/gi, '无限续写正文写手'],
+        [/Polisher/gi, '正文润色师'],
+        [/SummaryOrchestrator/gi, '摘要编排师'],
         [/ContextStrategy/gi, '上下文策略助手'],
         [/ContentReader/gi, '内容读取助手'],
-        [/ContentExpansion/gi, '内容扩展助手'],
+        [/ContentExpansion/gi, '正文扩写师'],
         [/FileNaming/gi, '文件命名助手'],
         [/CharacterBuilder/gi, '角色构建师'],
         [/ProjectDataBuilder/gi, '项目资料构建器'],
@@ -1336,7 +1370,18 @@ function buildRealtimeWorkflowHint(payload, messageType) {
         || payload.type
         || ''
     ).trim();
-    const stage = String(payload.stage || payload.type || messageType || '').trim();
+    const stage = String(payload.stage || payload.type || '').trim();
+    const inferredStage = stage
+        || (agent === 'Worldbuilder' ? 'build_world' : '')
+        || (agent === 'Outliner' ? 'build_outline' : '')
+        || (agent === 'ChapterWriter' ? 'write_chapter' : '')
+        || (agent === 'SummaryOrchestrator' ? 'summary_orchestrate' : '')
+        || String(messageType || '').trim();
+    const stageLabel = getWorkflowStageDisplayName(inferredStage);
+    let progress = progressMessage;
+    if (stageLabel && progress && stageLabel !== progress && !progress.includes(stageLabel)) {
+        progress = `${stageLabel} · ${progress}`;
+    }
     const status = payload.error
         ? 'failed'
         : (messageType === 'alert' ? 'failed' : 'running');
@@ -1345,8 +1390,8 @@ function buildRealtimeWorkflowHint(payload, messageType) {
         status,
         current_agent: agent || 'Coordinator',
         target_agent: agent || '',
-        stage,
-        last_progress: progressMessage,
+        stage: inferredStage,
+        last_progress: progress,
         model: modelLabel,
         current_model: modelLabel
     });
@@ -1408,7 +1453,14 @@ function deriveWorkflowFromRuntime() {
     const traceTitle = lastTraceEvent
         ? String(lastTraceEvent.title || lastTraceEvent.message || lastTraceEvent.task_type || '').trim()
         : '';
+    const rawStage = activeTask
+        ? String(activeTask.task_type || '').trim()
+        : String(lastTraceEvent?.task_type || workflowState || lastTraceEvent?.type || '').trim();
+    const stageLabel = getWorkflowStageDisplayName(rawStage);
     let lastProgress = activeTaskTitle || traceTitle;
+    if (stageLabel && lastProgress && stageLabel !== lastProgress && !lastProgress.includes(stageLabel)) {
+        lastProgress = `${stageLabel} · ${lastProgress}`;
+    }
     if (!lastProgress && totalChapters > 0) {
         lastProgress = `章节进度 ${completedChapters}/${totalChapters}`;
     } else if (!lastProgress && currentChapter > 0) {
@@ -1418,9 +1470,7 @@ function deriveWorkflowFromRuntime() {
     const currentAgent = activeTask
         ? String(activeTask.assigned_agent || '').trim()
         : String(lastTraceEvent?.agent || lastTraceEvent?.assigned_agent || '').trim();
-    const stage = activeTask
-        ? String(activeTask.task_type || activeTask.title || '').trim()
-        : String(workflowState || lastTraceEvent?.task_type || lastTraceEvent?.type || '').trim();
+    const stage = rawStage || activeTaskTitle || traceTitle;
 
     const derivedWorkflow = normalizeCopilotWorkflow({
         status,
@@ -1476,6 +1526,14 @@ function updateCopilotWorkflowPanel(workflow, routing) {
     store.copilotWorkflow = normalizedWorkflow;
     store.copilotRouting = normalizedRouting;
 
+    if (store.currentModule !== 'write') {
+        if (ui.copilotWorkflowPanel) {
+            ui.copilotWorkflowPanel.innerHTML = '';
+            ui.copilotWorkflowPanel.classList.add('hidden');
+        }
+        return;
+    }
+
     if (DEBUG_COPILOT_WORKFLOW) {
         console.log('[DEBUG] updateCopilotWorkflowPanel called:', {
             workflow: normalizedWorkflow,
@@ -1524,17 +1582,17 @@ function updateCopilotWorkflowPanel(workflow, routing) {
     };
 
     const agentDisplayMap = {
-        'Worldbuilder': '🌍 世界观构建',
-        'Outliner': '📋 大纲规划',
+        'Worldbuilder': '🌍 世界观设定',
+        'Outliner': '📋 全书大纲规划',
         'EventlineBuilder': '🧭 事件线构建',
         'DetailOutlineBuilder': '🗂️ 细纲构建',
-        'ChapterSettingBuilder': '📑 章纲构建',
-        'ChapterWriter': '✍️ 章节创作',
-        'ContinuousWriter': '🔄 续写生成',
-        'Polisher': '✨ 润色处理',
+        'ChapterSettingBuilder': '📑 章纲设定',
+        'ChapterWriter': '✍️ 章节正文创作',
+        'ContinuousWriter': '🔄 无限续写正文',
+        'Polisher': '✨ 正文润色',
         'SummaryOrchestrator': '🧾 摘要编排',
         'Coordinator': '🎯 创作协调',
-        'Communicator': '💬 沟通助手',
+        'Communicator': '💬 创作沟通助手',
         'Router': '🔀 智能路由',
         'WebSearch': '🔍 网络搜索',
         'TrendsSearch': '🔥 热点搜索'
@@ -1548,23 +1606,23 @@ function updateCopilotWorkflowPanel(workflow, routing) {
     const subAgent = store.activeSubAgent;
     if (subAgent && subAgent.agent && subAgent.status) {
         const subAgentDisplayMap = {
-            'Worldbuilder': '🌍 世界观构建器',
-            'Outliner': '📋 大纲规划器',
+            'Worldbuilder': '🌍 世界观设定师',
+            'Outliner': '📋 全书大纲规划师',
             'EventlineBuilder': '🧭 事件线构建器',
             'DetailOutlineBuilder': '🗂️ 细纲构建器',
-            'ChapterSettingBuilder': '📑 章纲构建器',
-            'ChapterWriter': '✍️ 章节写作器',
-            'ContinuousWriter': '🔄 续写生成器',
-            'Polisher': '✨ 润色处理器',
-            'SummaryOrchestrator': '🧾 摘要编排助手（内部）',
+            'ChapterSettingBuilder': '📑 章纲设定师',
+            'ChapterWriter': '✍️ 章节正文写手',
+            'ContinuousWriter': '🔄 无限续写正文写手',
+            'Polisher': '✨ 正文润色师',
+            'SummaryOrchestrator': '🧾 摘要编排师（内部）',
             'Coordinator': '🎯 创作协调器',
-            'Communicator': '💬 沟通助手',
+            'Communicator': '💬 创作沟通助手',
             'Router': '🔀 智能路由',
             'ContextStrategy': '🧠 上下文策略助手（内部）',
             'ContentReader': '📖 内容读取助手（内部）',
-            'ContentExpansion': '📝 内容扩展助手（内部）',
+            'ContentExpansion': '📝 正文扩写师（内部）',
             'FileNaming': '📁 文件命名助手（内部）',
-            'Evaluator': '🔍 质量评估器',
+            'Evaluator': '🔍 质检评估师',
             'CharacterBuilder': '👤 角色构建器'
         };
         const subAgentDisplay = subAgentDisplayMap[subAgent.agent] || getAgentDisplayName(subAgent.agent);
@@ -1628,6 +1686,9 @@ function getNovelCollabRuntimeSnapshot() {
         runtimeProjectStatus: store.runtimeProjectStatus,
         taskPool: store.currentTaskPool,
         collabExecutionTrace: store.collabExecutionTrace,
+        collabRunState: store.collabRunState,
+        collabDiagnostics: store.collabDiagnostics,
+        collabHandoff: store.collabHandoff,
         creationContract: store.pendingCreationContract,
         projectReadyExecution: store.projectReadyExecution
     };
@@ -1659,6 +1720,9 @@ async function refreshNovelCollabRuntime(options = {}) {
             store.runtimeProjectStatus = normalizeRuntimeProjectStatus(res);
             store.currentTaskPool = res && res.task_pool ? res.task_pool : null;
             store.collabExecutionTrace = res && res.collab_execution_trace ? res.collab_execution_trace : null;
+            store.collabRunState = res && res.collab_run_state ? res.collab_run_state : null;
+            store.collabDiagnostics = res && res.collab_diagnostics ? res.collab_diagnostics : null;
+            store.collabHandoff = res && res.collab_handoff ? res.collab_handoff : null;
             store.projectReadyExecution = res && res.project_ready_execution ? res.project_ready_execution : null;
             updateCopilotSessionModelLabel(extractModelLabelFromPayload(res));
             if (res && res.creation_contract) {
@@ -1732,12 +1796,16 @@ function scheduleNovelCollabRuntimeRefresh(delayMs = 1500) {
         store.collabRealtimeRefreshTimer = null;
         const runtime = await refreshNovelCollabRuntime();
         if (
+            store.currentModule === 'write'
+            &&
             ['status', 'task-pool'].includes(String(window.multiAgentWriteState?.activeView || '').trim())
             && typeof window.renderCollabTaskPoolWorkspace === 'function'
         ) {
-            window.renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution);
+            window.renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution, runtime.collabRunState, runtime.collabDiagnostics, runtime.collabHandoff);
         }
-        updateCopilotWorkflowPanel(store.copilotWorkflow, store.copilotRouting);
+        if (store.currentModule === 'write') {
+            updateCopilotWorkflowPanel(store.copilotWorkflow, store.copilotRouting);
+        }
     }, Math.max(0, Number(delayMs) || 0));
 }
 
@@ -1755,6 +1823,9 @@ function getNovelCollabRealtimeSocketUrl() {
 
 function handleNovelCollabRealtimePayload(messageType, payload) {
     if (!payload || typeof payload !== 'object') {
+        return;
+    }
+    if (store.currentModule !== 'write') {
         return;
     }
     updateCopilotSessionModelLabel(extractModelLabelFromPayload(payload));
@@ -1951,11 +2022,14 @@ function startNovelCollabRuntimePolling() {
         store.collabRuntimePollingBusy = true;
         try {
             const runtime = await refreshNovelCollabRuntime();
+            if (!shouldPollNovelCollabRuntime()) {
+                return;
+            }
             if (
                 ['status', 'task-pool'].includes(String(window.multiAgentWriteState?.activeView || '').trim())
                 && typeof window.renderCollabTaskPoolWorkspace === 'function'
             ) {
-                window.renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution);
+                window.renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution, runtime.collabRunState, runtime.collabDiagnostics, runtime.collabHandoff);
             }
             if (typeof updateCopilotWorkflowPanel === 'function') {
                 updateCopilotWorkflowPanel(store.copilotWorkflow, store.copilotRouting);
@@ -2061,6 +2135,7 @@ function navigateToFileLocation(fileKind) {
 function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
     const modal = document.getElementById('modal-container');
     if (!modal || !filePath) return;
+    if (store.currentModule !== 'write') return;
     const filename = String(responsePayload && responsePayload.filename || filePath).trim();
     const language = String(responsePayload && responsePayload.language || 'text').trim();
     const content = String(responsePayload && responsePayload.content || '').trim();
@@ -2069,6 +2144,7 @@ function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
         ? renderMarkdown(content)
         : `<pre style="margin: 0; white-space: pre-wrap; word-break: break-word;"><code>${escapeHtml(content)}</code></pre>`;
 
+    markModuleModalOwner('write');
     modal.classList.remove('hidden');
     modal.innerHTML = `
         <div class="copilot-preview-overlay">
@@ -2093,8 +2169,7 @@ function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
         </div>
     `;
     modal.querySelector('.copilot-preview-close')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        clearModuleModalOwner('write');
     });
     modal.querySelector('.copilot-preview-download')?.addEventListener('click', () => {
         if (!downloadUrl) return;
@@ -2102,8 +2177,7 @@ function openFilePreviewModal(filePath, responsePayload, downloadUrl) {
     });
     modal.querySelector('.copilot-preview-overlay')?.addEventListener('click', (evt) => {
         if (evt.target === evt.currentTarget) {
-            modal.classList.add('hidden');
-            modal.innerHTML = '';
+            clearModuleModalOwner('write');
         }
     });
 }
@@ -2216,24 +2290,24 @@ function toCopilotRole(role) {
 
 function getAgentDisplayName(agentName) {
     const labels = {
-        Communicator: '沟通助手',
+        Communicator: '创作沟通助手',
         Coordinator: '创作协调器',
-        Worldbuilder: '世界观构建师',
-        Outliner: '大纲规划师',
+        Worldbuilder: '世界观设定师',
+        Outliner: '全书大纲规划师',
         EventlineBuilder: '事件线构建师',
         DetailOutlineBuilder: '细纲构建师',
-        ChapterSettingBuilder: '章纲构建师',
-        ChapterWriter: '章节写手',
-        ContinuousWriter: '续写助手',
-        Polisher: '润色助手',
-        SummaryOrchestrator: '摘要编排助手（内部）',
+        ChapterSettingBuilder: '章纲设定师',
+        ChapterWriter: '章节正文写手',
+        ContinuousWriter: '无限续写正文写手',
+        Polisher: '正文润色师',
+        SummaryOrchestrator: '摘要编排师（内部）',
         Router: '智能路由',
         WebSearch: '网络搜索助手',
         TrendsSearch: '热点搜索助手',
         ProjectManager: '项目管理助手',
         ContextStrategy: '上下文策略助手（内部）',
         ContentReader: '内容读取助手（内部）',
-        ContentExpansion: '内容扩展助手（内部）',
+        ContentExpansion: '正文扩写师（内部）',
         FileNaming: '文件命名助手（内部）'
     };
     const key = String(agentName || '').trim();
@@ -2297,14 +2371,14 @@ function buildRoutingStatusLines(routing, workflow) {
 
         if (status === 'running' || status === 'starting') {
             const runningTextMap = {
-                Worldbuilder: '世界观构建中...',
-                Outliner: '大纲规划中...',
+                Worldbuilder: '世界观设定中...',
+                Outliner: '全书大纲规划中...',
                 EventlineBuilder: '事件线构建中...',
                 DetailOutlineBuilder: '细纲构建中...',
-                ChapterSettingBuilder: '章纲构建中...',
-                ChapterWriter: '章节创作中...',
-                ContinuousWriter: '续写生成中...',
-                Polisher: '润色处理中...',
+                ChapterSettingBuilder: '章纲设定中...',
+                ChapterWriter: '章节正文创作中...',
+                ContinuousWriter: '无限续写正文中...',
+                Polisher: '正文润色中...',
                 Coordinator: '创作协调中...',
                 WebSearch: '网络搜索中...',
                 TrendsSearch: '热点搜索中...'
@@ -2333,6 +2407,465 @@ function renderRoutingStatusBlock(routing, workflow) {
     return `<div class="copilot-route-status">${html}</div>`;
 }
 
+let copilotLocalMessageIndex = 0;
+const copilotMessagePayloads = new WeakMap();
+
+function nextCopilotLocalMessageIndex() {
+    const current = copilotLocalMessageIndex;
+    copilotLocalMessageIndex += 1;
+    return current;
+}
+
+function resetCopilotLocalMessageIndex(count = 0) {
+    copilotLocalMessageIndex = Math.max(0, Number(count) || 0);
+}
+
+function getCopilotMessageTitle(role, index) {
+    const label = role === 'user' ? '我的输入' : '引擎回复';
+    const numeric = Number(index);
+    return Number.isFinite(numeric) ? `${label} #${numeric + 1}` : label;
+}
+
+function renderCopilotMessageContent(content, role, rawHtml = false) {
+    if (rawHtml) return String(content || '');
+    if (role === 'ai') return renderMarkdown(content || '');
+    return `<div class="msg-plain-text">${window.escapeHtml ? window.escapeHtml(String(content || '')) : String(content || '')}</div>`;
+}
+
+function buildCopilotMessageShell({ text = '', role = 'ai', messageIndex = null, rawHtml = false } = {}) {
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+    if (messageIndex !== null && messageIndex !== undefined && messageIndex !== '') {
+        div.dataset.messageIndex = String(messageIndex);
+    }
+    div.dataset.role = role;
+    div.dataset.rawText = String(text || '');
+
+    const header = document.createElement('div');
+    header.className = 'msg-header';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'msg-collapse-toggle';
+    toggle.title = '展开/折叠';
+    toggle.innerHTML = '<i class="ri-arrow-down-s-line"></i>';
+
+    const title = document.createElement('span');
+    title.className = 'msg-title';
+    title.textContent = getCopilotMessageTitle(role, messageIndex);
+
+    const preview = document.createElement('span');
+    preview.className = 'msg-preview';
+    preview.textContent = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 72);
+
+    header.appendChild(toggle);
+    header.appendChild(title);
+    header.appendChild(preview);
+    div.appendChild(header);
+
+    const content = document.createElement('div');
+    content.className = 'msg-content';
+    content.innerHTML = renderCopilotMessageContent(text, role, rawHtml);
+    div.appendChild(content);
+
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    actions.innerHTML = `
+        <button type="button" class="msg-action msg-edit" title="编辑"><i class="ri-pencil-line"></i><span>编辑</span></button>
+        ${role === 'ai' ? '<button type="button" class="msg-action msg-regenerate" title="重新生成"><i class="ri-refresh-line"></i><span>重生</span></button>' : ''}
+        ${role === 'ai' ? '<button type="button" class="msg-action msg-insert" title="把这段内容带入输入框，方便保存到正文或资料库"><i class="ri-file-add-line"></i><span>插入</span></button>' : ''}
+        <button type="button" class="msg-action msg-delete" title="真正删除这条会话消息"><i class="ri-delete-bin-line"></i><span>删除</span></button>
+    `;
+    div.appendChild(actions);
+
+    bindCopilotMessageActions(div);
+    return div;
+}
+
+function setCopilotMessagePayload(div, payload) {
+    if (!div || !payload || typeof payload !== 'object') return;
+    copilotMessagePayloads.set(div, payload);
+}
+
+function refreshCopilotMessageShell(div, text, role, rawHtml = false) {
+    if (!div) return;
+    div.classList.remove('pending');
+    div.dataset.rawText = String(text || '');
+    const preview = div.querySelector('.msg-preview');
+    if (preview) preview.textContent = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 72);
+    const content = div.querySelector('.msg-content');
+    if (content) content.innerHTML = renderCopilotMessageContent(text, role || div.dataset.role || 'ai', rawHtml);
+}
+
+function getCopilotMessagePayload(div) {
+    return (div && copilotMessagePayloads.get(div)) || {};
+}
+
+function setCopilotMessageCollapsed(div, collapsed) {
+    if (!div) return;
+    div.classList.toggle('collapsed', Boolean(collapsed));
+}
+
+function getPreviousUserMessageText(messageDiv) {
+    let cursor = messageDiv?.previousElementSibling || null;
+    while (cursor) {
+        if (cursor.classList?.contains('msg') && cursor.dataset.role === 'user') {
+            return cursor.dataset.rawText || cursor.textContent || '';
+        }
+        cursor = cursor.previousElementSibling;
+    }
+    return '';
+}
+
+async function persistCopilotMessageEdit(messageDiv, nextText) {
+    const index = messageDiv?.dataset?.messageIndex;
+    if (index === undefined || index === null || index === '') return false;
+    const sid = getCurrentCopilotSessionId();
+    await apiCall(`/api/chat/messages/${encodeURIComponent(index)}?session_id=${encodeURIComponent(sid)}`, 'PATCH', {
+        content: nextText
+    });
+    return true;
+}
+
+async function deleteCopilotMessage(messageDiv) {
+    if (!messageDiv) return;
+    const index = messageDiv.dataset.messageIndex;
+    if (index === undefined || index === null || index === '') {
+        messageDiv.remove();
+        return;
+    }
+    if (window.showConfirmDialog && !(await window.showConfirmDialog('确定要永久删除这条聊天消息吗？'))) {
+        return;
+    }
+    const sid = getCurrentCopilotSessionId();
+    await apiCall(`/api/chat/messages/${encodeURIComponent(index)}?session_id=${encodeURIComponent(sid)}`, 'DELETE');
+    await restoreCopilotHistory();
+}
+
+const COPILOT_INSERT_TARGETS = [
+    { key: 'chapters', label: '章节正文', type: 'chapter', keywords: ['正文', '章节正文', '第', '章', '段落', '场景', '对白'], agents: ['ChapterWriter', 'ContinuousWriter', 'ContentExpansion'] },
+    { key: 'characters', label: '角色档案', type: 'knowledge', keywords: ['角色', '人物', '主角', '反派', '性格', '能力', '背景', '关系'], agents: ['CharacterBuilder'] },
+    { key: 'worldbuilding', label: '世界观设定', type: 'knowledge', keywords: ['世界观', '世界设定', '规则', '体系', '势力', '地理', '修炼', '力量'], agents: ['Worldbuilder', 'WorldBuilder'] },
+    { key: 'items', label: '道具物品', type: 'knowledge', keywords: ['道具', '物品', '装备', '法宝', '武器', '效果', '来源'], agents: [] },
+    { key: 'eventlines', label: '事件线', type: 'knowledge', keywords: ['事件线', '剧情线', '主线', '支线', '时间线', '节点'], agents: ['EventlineBuilder'] },
+    { key: 'detail_settings', label: '细纲设定', type: 'knowledge', keywords: ['细纲', '分场', '场景目标', '本段冲突'], agents: ['DetailOutlineBuilder'] },
+    { key: 'chapter_settings', label: '章纲设定', type: 'knowledge', keywords: ['章纲', '本章目标', '关键事件', '结尾钩子'], agents: ['ChapterSettingBuilder'] },
+    { key: 'chapter_summary', label: '正文摘要', type: 'knowledge', keywords: ['摘要', '章节摘要', '总结', '回顾'], agents: ['SummaryOrchestrator'] },
+    { key: 'outline', label: '大纲', type: 'knowledge', keywords: ['大纲', '全书大纲', '分卷', '卷纲', '主线规划'], agents: ['Outliner'] }
+];
+
+function normalizeCopilotInsertKind(value) {
+    return String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+}
+
+function collectCopilotInsertKinds(payload) {
+    const kinds = [];
+    const push = (value) => {
+        const kind = normalizeCopilotInsertKind(value);
+        if (kind) kinds.push(kind);
+    };
+    const scanFile = (item) => {
+        if (!item || typeof item !== 'object') return;
+        push(item.kind);
+        push(item.data_type);
+        const path = String(item.path || item.filename || '').toLowerCase();
+        if (path.includes('chapter_settings')) push('chapter_settings');
+        if (path.includes('chapter_summary')) push('chapter_summary');
+        if (path.includes('detail')) push('detail_settings');
+        if (path.includes('event')) push('eventlines');
+        if (path.includes('character')) push('characters');
+        if (path.includes('world')) push('worldbuilding');
+        if (path.includes('item')) push('items');
+        if (path.includes('outline')) push('outline');
+        if (path.includes('/chapters/') || path.includes('\\chapters\\') || path.includes('chapters.json')) push('chapters');
+    };
+    ['created_files', 'updated_files', 'reused_files'].forEach((key) => {
+        (Array.isArray(payload?.[key]) ? payload[key] : []).forEach(scanFile);
+        (Array.isArray(payload?.workflow?.[key]) ? payload.workflow[key] : []).forEach(scanFile);
+    });
+    const delegated = payload?.delegated_result || {};
+    const workflow = payload?.workflow || {};
+    [delegated.action, delegated.data_type, delegated.kind, payload?.routed_to, payload?.routing?.target_agent, workflow?.target_agent, workflow?.current_agent].forEach(push);
+    return kinds;
+}
+
+function inferCopilotInsertTarget(text, payload = {}) {
+    const normalizedText = String(text || '').toLowerCase();
+    const kinds = collectCopilotInsertKinds(payload);
+    const scored = COPILOT_INSERT_TARGETS.map((target) => {
+        let score = 0;
+        if (kinds.includes(target.key)) score += 9;
+        if (target.agents.some(agent => kinds.includes(normalizeCopilotInsertKind(agent)))) score += 7;
+        target.keywords.forEach((keyword) => {
+            if (normalizedText.includes(String(keyword).toLowerCase())) score += 1;
+        });
+        return { ...target, score };
+    }).sort((a, b) => b.score - a.score);
+    return scored[0]?.score > 0 ? scored[0].key : 'chapters';
+}
+
+function getCopilotInsertTargets() {
+    const categories = Array.isArray(store.knowledgeCategories) ? store.knowledgeCategories : [];
+    return [
+        { key: 'chapters', label: '章节正文', type: 'chapter' },
+        ...categories.map((category) => ({ key: category.key, label: category.name, type: 'knowledge' }))
+    ];
+}
+
+function getCopilotInsertTitle(text, targetKey) {
+    const firstLine = String(text || '').split(/\n+/).map(line => line.trim()).find(Boolean) || '';
+    const heading = firstLine.replace(/^#+\s*/, '').replace(/^[【\[](.+)[】\]].*$/, '$1').trim();
+    if (heading) return heading.slice(0, 40);
+    const target = getCopilotInsertTargets().find(item => item.key === targetKey);
+    return `${target?.label || '资料'} ${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function getCopilotInsertRows(targetKey) {
+    if (targetKey === 'chapters') return Array.isArray(store.projectData.chapters) ? store.projectData.chapters : [];
+    return Array.isArray(store.projectData[targetKey]) ? store.projectData[targetKey] : [];
+}
+
+function getCopilotInsertRowName(row, index, targetKey) {
+    if (targetKey === 'chapters') {
+        const number = row?.chapter_number || row?.number || index + 1;
+        return `第${number}章 ${row?.title || row?.name || ''}`.trim();
+    }
+    if (typeof getKnowledgeItemDisplayName === 'function') {
+        const category = store.knowledgeCategories?.find(item => item.key === targetKey);
+        return getKnowledgeItemDisplayName(row, category) || `条目 ${index + 1}`;
+    }
+    return row?.title || row?.name || `条目 ${index + 1}`;
+}
+
+function refreshCopilotInsertExistingOptions(modal, targetKey) {
+    const select = modal.querySelector('#copilot-insert-existing');
+    const chapterFields = modal.querySelector('.copilot-insert-chapter-fields');
+    const titleLabel = modal.querySelector('#copilot-insert-title-label');
+    if (!select) return;
+    const rows = getCopilotInsertRows(targetKey);
+    select.innerHTML = rows.length
+        ? rows.map((row, index) => `<option value="${index}">${window.escapeHtml ? window.escapeHtml(getCopilotInsertRowName(row, index, targetKey)) : getCopilotInsertRowName(row, index, targetKey)}</option>`).join('')
+        : '<option value="">暂无可追加条目</option>';
+    select.disabled = rows.length === 0;
+    if (chapterFields) chapterFields.style.display = targetKey === 'chapters' ? '' : 'none';
+    if (titleLabel) titleLabel.textContent = targetKey === 'chapters' ? '章节标题' : '条目标题';
+}
+
+async function persistCopilotInsertTarget(targetKey) {
+    if (targetKey === 'chapters') {
+        await apiCall('/api/project-data/chapters', 'POST', { data: store.projectData.chapters || [] });
+    } else if (typeof saveSettingData === 'function') {
+        await saveSettingData(targetKey);
+    } else {
+        await apiCall(`/api/project-data/${targetKey}`, 'POST', { data: store.projectData[targetKey] || [] });
+    }
+    if (store.currentModule === 'write' && typeof window.renderMultiAgentWriteNavPanel === 'function') {
+        window.renderMultiAgentWriteNavPanel();
+    }
+}
+
+async function applyCopilotInsert({ targetKey, mode, existingIndex, title, chapterNumber, text }) {
+    const cleanText = String(text || '').trim();
+    if (!cleanText) throw new Error('没有可插入的内容');
+    if (targetKey === 'chapters') {
+        const rows = Array.isArray(store.projectData.chapters) ? store.projectData.chapters : [];
+        store.projectData.chapters = rows;
+        if (mode === 'append' && rows[existingIndex]) {
+            rows[existingIndex].content = `${String(rows[existingIndex].content || '').trim()}\n\n${cleanText}`.trim();
+            rows[existingIndex].updated_at = new Date().toISOString();
+        } else {
+            const number = Number(chapterNumber) || rows.length + 1;
+            rows.push({
+                chapter_number: number,
+                title: String(title || '').trim() || `第${number}章`,
+                content: cleanText,
+                word_count: cleanText.length,
+                source: 'copilot_insert',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            });
+            rows.sort((a, b) => Number(a.chapter_number || 0) - Number(b.chapter_number || 0));
+        }
+        await persistCopilotInsertTarget(targetKey);
+        return;
+    }
+
+    const rows = Array.isArray(store.projectData[targetKey]) ? store.projectData[targetKey] : [];
+    store.projectData[targetKey] = rows;
+    if (mode === 'append' && rows[existingIndex]) {
+        const row = rows[existingIndex];
+        const existingContent = String(row.content || row.raw_content || row.details || row.description || '').trim();
+        const nextContent = `${existingContent}\n\n${cleanText}`.trim();
+        row.content = nextContent;
+        row.raw_content = nextContent;
+        row.details = nextContent;
+        row.description = nextContent;
+        row.updated_at = new Date().toISOString();
+        if (typeof ensureKnowledgeSourceTag === 'function') rows[existingIndex] = ensureKnowledgeSourceTag(row, 'multi_agent');
+    } else {
+        const category = store.knowledgeCategories?.find(item => item.key === targetKey);
+        const values = { title: String(title || '').trim() || getCopilotInsertTitle(cleanText, targetKey), content: cleanText, notes: '由聊天回复插入' };
+        const item = typeof buildFreeformKnowledgeItem === 'function'
+            ? buildFreeformKnowledgeItem(category, values)
+            : { title: values.title, name: values.title, content: cleanText, raw_content: cleanText, description: cleanText, details: cleanText };
+        item.source = 'copilot_insert';
+        item.created_at = new Date().toISOString();
+        item.updated_at = item.created_at;
+        rows.push(typeof ensureKnowledgeSourceTag === 'function' ? ensureKnowledgeSourceTag(item, 'multi_agent') : item);
+    }
+    await persistCopilotInsertTarget(targetKey);
+}
+
+function showCopilotInsertDialog(messageDiv) {
+    const text = String(messageDiv?.dataset.rawText || '').trim();
+    if (!text) {
+        showToast('没有可插入的内容', 'error');
+        return;
+    }
+    const payload = getCopilotMessagePayload(messageDiv);
+    const recommended = inferCopilotInsertTarget(text, payload);
+    const targets = getCopilotInsertTargets();
+    const modal = document.getElementById('modal-container');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    modal.innerHTML = `
+        <div class="copilot-insert-modal">
+            <div class="copilot-insert-card">
+                <div class="copilot-insert-header">
+                    <h3><i class="ri-file-add-line"></i> 插入到项目</h3>
+                    <button type="button" id="copilot-insert-close" title="关闭"><i class="ri-close-line"></i></button>
+                </div>
+                <div class="copilot-insert-grid">
+                    <label><span>目标位置</span><select id="copilot-insert-target">${targets.map(target => `<option value="${target.key}" ${target.key === recommended ? 'selected' : ''}>${target.label}${target.key === recommended ? '（推荐）' : ''}</option>`).join('')}</select></label>
+                    <label><span>插入方式</span><select id="copilot-insert-mode"><option value="new">新建条目/章节</option><option value="append">追加到已有</option></select></label>
+                    <label id="copilot-insert-title-wrap"><span id="copilot-insert-title-label">条目标题</span><input id="copilot-insert-title" value="${window.escapeHtml ? window.escapeHtml(getCopilotInsertTitle(text, recommended)) : getCopilotInsertTitle(text, recommended)}"></label>
+                    <label class="copilot-insert-chapter-fields"><span>章节号</span><input id="copilot-insert-chapter-number" type="number" min="1" value="${(store.projectData.chapters || []).length + 1}"></label>
+                    <label class="copilot-insert-existing-wrap"><span>已有条目</span><select id="copilot-insert-existing"></select></label>
+                </div>
+                <div class="copilot-insert-preview">${renderMarkdown(text.slice(0, 2400))}</div>
+                <div class="copilot-insert-actions">
+                    <button type="button" id="copilot-insert-cancel">取消</button>
+                    <button type="button" id="copilot-insert-confirm"><i class="ri-check-line"></i> 插入</button>
+                </div>
+            </div>
+        </div>
+    `;
+    const targetSelect = modal.querySelector('#copilot-insert-target');
+    const modeSelect = modal.querySelector('#copilot-insert-mode');
+    const existingWrap = modal.querySelector('.copilot-insert-existing-wrap');
+    const titleWrap = modal.querySelector('#copilot-insert-title-wrap');
+    function syncInsertDialog() {
+        const targetKey = targetSelect?.value || recommended;
+        const mode = modeSelect?.value || 'new';
+        refreshCopilotInsertExistingOptions(modal, targetKey);
+        if (existingWrap) existingWrap.style.display = mode === 'append' ? '' : 'none';
+        if (titleWrap) titleWrap.style.display = mode === 'append' ? 'none' : '';
+    }
+    targetSelect?.addEventListener('change', syncInsertDialog);
+    modeSelect?.addEventListener('change', syncInsertDialog);
+    syncInsertDialog();
+
+    const close = () => {
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+    };
+    modal.querySelector('#copilot-insert-close')?.addEventListener('click', close);
+    modal.querySelector('#copilot-insert-cancel')?.addEventListener('click', close);
+    modal.querySelector('#copilot-insert-confirm')?.addEventListener('click', async () => {
+        const button = modal.querySelector('#copilot-insert-confirm');
+        const targetKey = targetSelect?.value || recommended;
+        const mode = modeSelect?.value || 'new';
+        const existingIndex = Number(modal.querySelector('#copilot-insert-existing')?.value || 0);
+        try {
+            if (button) button.disabled = true;
+            await applyCopilotInsert({
+                targetKey,
+                mode,
+                existingIndex,
+                title: modal.querySelector('#copilot-insert-title')?.value || '',
+                chapterNumber: modal.querySelector('#copilot-insert-chapter-number')?.value || '',
+                text,
+            });
+            const targetLabel = targets.find(item => item.key === targetKey)?.label || '项目资料';
+            close();
+            showToast(`已插入到${targetLabel}`);
+        } catch (e) {
+            showToast(`插入失败: ${e.message}`, 'error');
+            if (button) button.disabled = false;
+        }
+    });
+}
+
+function bindCopilotMessageActions(div) {
+    if (!div || div.dataset.actionsBound === '1') return;
+    div.dataset.actionsBound = '1';
+    div.querySelector('.msg-collapse-toggle')?.addEventListener('click', () => {
+        setCopilotMessageCollapsed(div, !div.classList.contains('collapsed'));
+    });
+    div.querySelector('.msg-delete')?.addEventListener('click', async () => {
+        try {
+            await deleteCopilotMessage(div);
+            showToast('消息已删除');
+        } catch (e) {
+            showToast(`删除失败: ${e.message}`, 'error');
+        }
+    });
+    div.querySelector('.msg-regenerate')?.addEventListener('click', async () => {
+        const previousText = getPreviousUserMessageText(div);
+        if (!previousText) {
+            showToast('没有找到可用于重新生成的上一条输入', 'error');
+            return;
+        }
+        if (ui.copilotInput) {
+            ui.copilotInput.value = previousText;
+            await deleteCopilotMessage(div).catch(() => {});
+            await sendCopilotMessage();
+        }
+    });
+    div.querySelector('.msg-insert')?.addEventListener('click', () => {
+        showCopilotInsertDialog(div);
+    });
+    div.querySelector('.msg-edit')?.addEventListener('click', () => {
+        const content = div.querySelector('.msg-content');
+        const actions = div.querySelector('.msg-actions');
+        if (!content || !actions || div.classList.contains('editing')) return;
+        div.classList.add('editing');
+        const role = div.dataset.role || 'ai';
+        const original = div.dataset.rawText || content.textContent || '';
+        content.innerHTML = `<textarea class="msg-edit-textarea">${window.escapeHtml ? window.escapeHtml(original) : original}</textarea>`;
+        const textarea = content.querySelector('textarea');
+        textarea?.focus();
+        if (textarea) textarea.style.height = `${Math.min(360, Math.max(120, textarea.scrollHeight))}px`;
+        actions.innerHTML = `
+            <button type="button" class="msg-action msg-save-edit"><i class="ri-check-line"></i><span>保存</span></button>
+            <button type="button" class="msg-action msg-cancel-edit"><i class="ri-close-line"></i><span>取消</span></button>
+        `;
+        actions.querySelector('.msg-cancel-edit')?.addEventListener('click', () => {
+            div.classList.remove('editing');
+            refreshCopilotMessageShell(div, original, role);
+            div.dataset.actionsBound = '';
+            bindCopilotMessageActions(div);
+        });
+        actions.querySelector('.msg-save-edit')?.addEventListener('click', async () => {
+            const nextText = textarea?.value.trim() || '';
+            if (!nextText) {
+                showToast('消息内容不能为空', 'error');
+                return;
+            }
+            try {
+                await persistCopilotMessageEdit(div, nextText);
+                div.classList.remove('editing');
+                refreshCopilotMessageShell(div, nextText, role);
+                div.dataset.actionsBound = '';
+                bindCopilotMessageActions(div);
+                showToast('消息已保存');
+            } catch (e) {
+                showToast(`保存失败: ${e.message}`, 'error');
+            }
+        });
+    });
+}
+
 async function restoreCopilotHistory() {
     if (!ui.copilotMsgs) return;
     try {
@@ -2344,9 +2877,14 @@ async function restoreCopilotHistory() {
             return;
         }
         ui.copilotMsgs.innerHTML = '';
+        let maxRestoredIndex = -1;
         history.forEach(item => {
-            appendMessage(item.content || '', toCopilotRole(item.role), false);
+            appendMessage(item.content || '', toCopilotRole(item.role), false, { messageIndex: item.message_index });
+            if (Number.isFinite(Number(item.message_index))) {
+                maxRestoredIndex = Math.max(maxRestoredIndex, Number(item.message_index));
+            }
         });
+        resetCopilotLocalMessageIndex(maxRestoredIndex + 1);
         ui.copilotMsgs.scrollTop = ui.copilotMsgs.scrollHeight;
     } catch (e) {
         renderCopilotWelcomeMessage();
@@ -2728,6 +3266,10 @@ async function clearCopilotChat() {
 }
 
 function toggleCopilot() {
+    if (store.currentModule !== 'write') {
+        setCopilotVisible(false);
+        return;
+    }
     setCopilotVisible(!store.copilotVisible);
 }
 
@@ -3155,6 +3697,27 @@ function renderCreationContractCard(contractPayload) {
     const wordsPerChapterText = wordsPerChapter
         ? `约${wordsPerChapter.toLocaleString()}字${wordsPerChapterSource === 'estimated' ? '（估算，可改）' : ''}`
         : '待确认';
+    const lengthPlanAdjustment = contractMetadata.length_plan_adjustment && typeof contractMetadata.length_plan_adjustment === 'object'
+        ? contractMetadata.length_plan_adjustment
+        : null;
+    const lengthPlanNotice = contractMetadata.length_plan_adjusted
+        ? (() => {
+            const previousTotal = Number(lengthPlanAdjustment?.previous_total_chapters || 0);
+            const adjustedTotal = Number(lengthPlanAdjustment?.adjusted_total_chapters || scope.total_chapters || 0);
+            const previousWords = Number(lengthPlanAdjustment?.previous_estimated_total_words || 0);
+            const adjustedWords = Number(lengthPlanAdjustment?.adjusted_estimated_total_words || 0);
+            const parts = [];
+            if (previousTotal && adjustedTotal && previousTotal !== adjustedTotal) {
+                parts.push(`章节数已由${previousTotal}章校正为${adjustedTotal}章`);
+            }
+            if (previousWords && adjustedWords && previousWords !== adjustedWords) {
+                parts.push(`预计正文由约${previousWords.toLocaleString()}字校正为约${adjustedWords.toLocaleString()}字`);
+            }
+            const text = parts.length ? parts.join('，') : '篇幅、单章字数与章节数已自动校正';
+            const safeText = window.escapeHtml ? window.escapeHtml(text) : text;
+            return `<div class="copilot-contract-section"><div class="copilot-contract-empty">${safeText}</div></div>`;
+        })()
+        : '';
     const deliverablesHtml = deliverables.length
         ? `<ul>${deliverables.slice(0, 8).map(item => `<li>${window.escapeHtml ? window.escapeHtml(formatPlanDeliverableLabel(item)) : formatPlanDeliverableLabel(item)}</li>`).join('')}</ul>`
         : '<div class="copilot-contract-empty">暂无计划产物</div>';
@@ -3200,6 +3763,7 @@ function renderCreationContractCard(contractPayload) {
                 ${formatContractScopeLine('风格约束', styleText)}
                 ${formatContractScopeLine('质量规则', qualityText)}
             </div>
+            ${lengthPlanNotice}
             <div class="copilot-contract-section">
                 <div class="copilot-contract-section-title">计划产物</div>
                 ${deliverablesHtml}
@@ -3271,6 +3835,21 @@ async function confirmCreationContract(contractPayload) {
     const nextTaskPool = response && response.task_pool ? response.task_pool : null;
     store.pendingCreationContract = nextContract;
     store.currentTaskPool = nextTaskPool;
+    if (response && response.collab_execution_trace) {
+        store.collabExecutionTrace = response.collab_execution_trace;
+    }
+    if (response && response.collab_run_state) {
+        store.collabRunState = response.collab_run_state;
+    }
+    if (response && response.collab_diagnostics) {
+        store.collabDiagnostics = response.collab_diagnostics;
+    }
+    if (response && response.collab_handoff) {
+        store.collabHandoff = response.collab_handoff;
+    }
+    if (response && response.project_ready_execution) {
+        store.projectReadyExecution = response.project_ready_execution;
+    }
     if (typeof window.loadCurrentProjectData === 'function') {
         await window.loadCurrentProjectData();
     }
@@ -3303,6 +3882,15 @@ async function resumeCreationContractFlow(options = {}) {
     store.currentTaskPool = nextTaskPool;
     if (response && response.collab_execution_trace) {
         store.collabExecutionTrace = response.collab_execution_trace;
+    }
+    if (response && response.collab_run_state) {
+        store.collabRunState = response.collab_run_state;
+    }
+    if (response && response.collab_diagnostics) {
+        store.collabDiagnostics = response.collab_diagnostics;
+    }
+    if (response && response.collab_handoff) {
+        store.collabHandoff = response.collab_handoff;
     }
     if (response && response.project_ready_execution) {
         store.projectReadyExecution = response.project_ready_execution;
@@ -3399,6 +3987,7 @@ function bindContractCardActions(container) {
 // ===== 流式消息 =====
 
 async function sendCopilotMessage() {
+    if (store.currentModule !== 'write') return;
     if (!ui.copilotInput) return;
     const text = ui.copilotInput.value.trim();
     if (!text) return;
@@ -3442,6 +4031,7 @@ async function sendCopilotMessage() {
         const textNode = document.createTextNode(pendingChunks);
         contentEl.appendChild(textNode);
         pendingChunks = '';
+        refreshCopilotMessageShell(aiDiv, fullText, 'ai');
         scrollCopilotToBottom();
     }
 
@@ -3494,7 +4084,7 @@ async function sendCopilotMessage() {
             }
             await handleAssistantAutoSaveResult(res && res.assistant_auto_save);
 
-            appendMessage((res.reply || '收到'), 'ai');
+            appendMessage((res.reply || '收到'), 'ai', true, { messageIndex: aiDiv.dataset.messageIndex, payload: res });
 
             const delegatedParams = res && res.delegated_result && res.delegated_result.params && typeof res.delegated_result.params === 'object'
                 ? res.delegated_result.params
@@ -3557,6 +4147,7 @@ async function sendCopilotMessage() {
                         updateCopilotWorkflowPanel(evt.workflow);
                         appendStreamWorkflowProgress(aiDiv, evt.workflow);
                     } else if (evt.type === 'done') {
+                        setCopilotMessagePayload(aiDiv, evt);
                         updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
                         // 清除内联状态指示器
                         clearInlineStatus();
@@ -3566,7 +4157,7 @@ async function sendCopilotMessage() {
                         // 最终完整回复
                         if (evt.reply) {
                             fullText = evt.reply;
-                            contentEl.innerHTML = renderMarkdown(fullText);
+                            refreshCopilotMessageShell(aiDiv, fullText, 'ai');
                         }
                         if (evt.routing) {
                             updateCopilotSessionHeaderFromRouting(evt.routing);
@@ -3604,10 +4195,11 @@ async function sendCopilotMessage() {
                         // 移除打字光标
                         aiDiv.classList.remove('streaming');
                     } else if (evt.type === 'error') {
+                        setCopilotMessagePayload(aiDiv, evt);
                         updateCopilotSessionModelLabel(extractModelLabelFromPayload(evt));
                         clearInlineStatus();
                         fullText = evt.message || '处理请求时出错';
-                        contentEl.innerHTML = renderMarkdown(fullText);
+                        refreshCopilotMessageShell(aiDiv, fullText, 'ai');
                         if (evt.workflow) {
                             updateCopilotWorkflowPanel(evt.workflow);
                         }
@@ -3633,7 +4225,8 @@ async function sendCopilotMessage() {
         flushPendingChunks();
         aiDiv.classList.remove('streaming');
         if (!fullText) {
-            contentEl.innerHTML = renderMarkdown('收到');
+            fullText = '收到';
+            refreshCopilotMessageShell(aiDiv, fullText, 'ai');
         }
 
     } catch (e) {
@@ -3649,12 +4242,14 @@ async function sendCopilotMessage() {
         const contentEl = aiDiv.querySelector('.msg-content');
         if (e.name === 'AbortError') {
             if (contentEl && !contentEl.textContent.trim()) {
-                contentEl.innerHTML = renderMarkdown('已停止生成');
+                fullText = '已停止生成';
+                refreshCopilotMessageShell(aiDiv, fullText, 'ai');
             }
         } else {
             console.error('[sendCopilotMessage] stream error:', e);
             if (contentEl) {
-                contentEl.innerHTML = renderMarkdown('连接失败，请检查API配置');
+                fullText = '连接失败，请检查API配置';
+                refreshCopilotMessageShell(aiDiv, fullText, 'ai');
             }
             setCopilotSessionHeader('多Agent创作模式', '连接失败');
         }
@@ -3666,11 +4261,12 @@ async function sendCopilotMessage() {
 
 function createStreamMessage() {
     if (!ui.copilotMsgs) return null;
-    const div = document.createElement('div');
-    div.className = 'msg ai streaming';
-    const content = document.createElement('div');
-    content.className = 'msg-content';
-    div.appendChild(content);
+    const div = buildCopilotMessageShell({
+        text: '',
+        role: 'ai',
+        messageIndex: nextCopilotLocalMessageIndex()
+    });
+    div.classList.add('streaming', 'pending');
     ui.copilotMsgs.appendChild(div);
     scrollCopilotToBottom();
     return div;
@@ -3704,33 +4300,36 @@ function appendStreamWorkflowProgress(aiDiv, workflow) {
     scrollCopilotToBottom();
 }
 
-function appendMessage(text, role, shouldScroll = true) {
+function appendMessage(text, role, shouldScroll = true, options = {}) {
     if (!ui.copilotMsgs) return null;
-    const div = document.createElement('div');
-    div.className = `msg ${role}`;
-
+    let messageIndex = Object.prototype.hasOwnProperty.call(options || {}, 'messageIndex')
+        ? options.messageIndex
+        : nextCopilotLocalMessageIndex();
+    let rawHtml = false;
     if (role === 'ai') {
-        const content = document.createElement('div');
-        content.className = 'msg-content';
         if (typeof text === 'string' && /copilot-(contract|taskpool|route-status|runtime-message)/.test(text)) {
             const rawText = String(text);
             const routeStatusMatch = rawText.match(/<div class="copilot-route-status">[\s\S]*$/);
             const standaloneCardPattern = /^<div class="copilot-(?:contract-card|taskpool-card|route-status|runtime-message)[\s\S]*$/;
             if (standaloneCardPattern.test(rawText.trim())) {
-                content.innerHTML = rawText;
+                rawHtml = true;
+                if (!Object.prototype.hasOwnProperty.call(options || {}, 'messageIndex')) {
+                    messageIndex = null;
+                    copilotLocalMessageIndex = Math.max(0, copilotLocalMessageIndex - 1);
+                }
             } else {
                 const routeStatusHtml = routeStatusMatch ? routeStatusMatch[0] : '';
                 const markdownPart = routeStatusHtml ? rawText.slice(0, rawText.indexOf(routeStatusHtml)) : rawText;
-                content.innerHTML = (markdownPart ? renderMarkdown(markdownPart) : '') + routeStatusHtml;
+                text = (markdownPart ? renderMarkdown(markdownPart) : '') + routeStatusHtml;
+                rawHtml = true;
             }
-        } else {
-            content.innerHTML = renderMarkdown(text);
         }
-        div.appendChild(content);
-        bindContractCardActions(content);
-    } else {
-        div.textContent = text;
     }
+    const div = buildCopilotMessageShell({ text, role, messageIndex, rawHtml });
+    if (options && options.payload) {
+        setCopilotMessagePayload(div, options.payload);
+    }
+    bindContractCardActions(div.querySelector('.msg-content') || div);
 
     ui.copilotMsgs.appendChild(div);
     if (shouldScroll) {
@@ -3749,23 +4348,23 @@ function scrollCopilotToBottom() {
 
 // Agent能力活动描述映射
 const AGENT_ACTIVITY_MAP = {
-    'Worldbuilder': { icon: '🌍', activity: '正在构建世界观', done: '世界观构建完成' },
-    'Outliner': { icon: '📋', activity: '正在创建大纲', done: '大纲创建完成' },
+    'Worldbuilder': { icon: '🌍', activity: '正在设定世界观', done: '世界观设定完成' },
+    'Outliner': { icon: '📋', activity: '正在规划全书大纲', done: '全书大纲完成' },
     'EventlineBuilder': { icon: '🧭', activity: '正在整理事件线', done: '事件线构建完成' },
     'DetailOutlineBuilder': { icon: '🗂️', activity: '正在生成细纲', done: '细纲构建完成' },
-    'ChapterSettingBuilder': { icon: '📑', activity: '正在生成章纲', done: '章纲构建完成' },
+    'ChapterSettingBuilder': { icon: '📑', activity: '正在生成章纲', done: '章纲设定完成' },
     'ChapterWriter': { icon: '✍️', activity: '正在创作正文', done: '章节创作完成' },
-    'ContinuousWriter': { icon: '🔄', activity: '正在续写内容', done: '续写完成' },
-    'Polisher': { icon: '✨', activity: '正在润色内容', done: '润色完成' },
+    'ContinuousWriter': { icon: '🔄', activity: '正在无限续写正文', done: '续写完成' },
+    'Polisher': { icon: '✨', activity: '正在润色正文', done: '正文润色完成' },
     'SummaryOrchestrator': { icon: '🧾', activity: '正在执行内部摘要编排', done: '内部摘要编排完成' },
     'Coordinator': { icon: '🎯', activity: '正在协调创作任务', done: '创作协调完成' },
-    'Communicator': { icon: '💬', activity: '正在思考', done: '回复完成' },
+    'Communicator': { icon: '💬', activity: '正在梳理创作需求', done: '需求沟通完成' },
     'Router': { icon: '🔀', activity: '正在分析意图', done: '路由完成' },
     'WebSearch': { icon: '🔍', activity: '正在搜索网络信息', done: '搜索完成' },
     'TrendsSearch': { icon: '🔥', activity: '正在搜索热点信息', done: '热点搜索完成' },
     'ContextStrategy': { icon: '🧠', activity: '正在执行内部上下文规划', done: '内部上下文规划完成' },
     'ContentReader': { icon: '📖', activity: '正在执行内部内容读取', done: '内部内容读取完成' },
-    'ContentExpansion': { icon: '📝', activity: '正在执行内部内容扩展', done: '内部内容扩展完成' },
+    'ContentExpansion': { icon: '📝', activity: '正在执行内部正文扩写', done: '内部正文扩写完成' },
     'FileNaming': { icon: '📁', activity: '正在执行内部文件命名', done: '内部文件命名完成' },
     'Evaluator': { icon: '🔍', activity: '正在评估质量', done: '质量评估完成' },
     'CharacterBuilder': { icon: '👤', activity: '正在创建角色信息', done: '角色创建完成' },
@@ -3939,6 +4538,10 @@ window.NovelAgentApp.core = {
     switchModule,
     beginModuleRender,
     isCurrentModuleRender,
+    markModuleModalOwner,
+    clearModuleModalOwner,
+    closeStaleModuleModal,
+    setCopilotVisible,
     toggleSidebar,
     restoreSidebarState,
     clearCopilotChat,

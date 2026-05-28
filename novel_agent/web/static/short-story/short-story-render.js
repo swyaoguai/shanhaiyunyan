@@ -32,6 +32,49 @@ function renderShortStoryRawOutput(summaryText, content) {
     `;
 }
 
+function canRenderShortStoryRollback(targetStep, stage = getCurrentShortStoryStage()) {
+    const stageOrder = {
+        awaiting_keywords: 0,
+        analyzing_source_input: 0,
+        generating_fusion_options: 1,
+        awaiting_fusion_selection: 1,
+        generating_synopsis: 2,
+        awaiting_synopsis_selection: 2,
+        generating_outline: 3,
+        awaiting_outline_confirm: 3,
+        writing_content: 4,
+        quality_checking: 5,
+        coherence_reviewing: 6,
+        generating_titles: 7,
+        awaiting_title_selection: 7,
+        assembling_output: 8,
+        completed: 8
+    };
+    const targetMinimum = {
+        fusion: 2,
+        synopsis: 3,
+        outline: 4,
+        chapter: 5,
+        quality: 6,
+        coherence: 7,
+        title: 8
+    };
+    return Boolean(getCurrentShortStoryWorkflow())
+        && Number(stageOrder[stage] || 0) >= Number(targetMinimum[targetStep] || 999);
+}
+
+function renderShortStoryRollbackButton(targetStep, label) {
+    if (!canRenderShortStoryRollback(targetStep)) {
+        return '';
+    }
+    const action = `rollback-${targetStep}`;
+    return `
+        <button type="button" class="short-story-btn short-story-btn-warm short-story-rollback-step" data-rollback-target="${escapeHtml(targetStep)}" ${!isShortStoryActionLoading(action) ? '' : 'disabled'}>
+            <i class="ri-arrow-go-back-line"></i>${getShortStoryButtonLabel(action, label || `回到${getShortStoryRollbackLabel(targetStep)}`, '回退中...')}
+        </button>
+    `;
+}
+
 function resolveShortStoryCategory(value, fallback = '其他') {
     if (typeof normalizeShortStoryCategory === 'function') {
         return normalizeShortStoryCategory(value, fallback);
@@ -45,16 +88,21 @@ function getShortStoryMainCategoryOptions() {
     const categories = Array.isArray(window.SHORT_STORY_MAIN_CATEGORIES)
         ? window.SHORT_STORY_MAIN_CATEGORIES
         : ['其他'];
-    return categories.map((item) => resolveShortStoryCategory(item)).filter(Boolean);
+    return [...new Set(categories.map((item) => resolveShortStoryCategory(item)).filter(Boolean))];
 }
 
 function renderShortStoryCategoryField(categoryDraft) {
     const category = resolveShortStoryCategory(categoryDraft);
+    const options = getShortStoryMainCategoryOptions();
+    const isPresetCategory = options.includes(category);
     return `
-        <input id="short-story-category" list="short-story-category-options" type="text" maxlength="32" value="${escapeHtml(category)}" placeholder="输入或选择主分类" class="short-story-field" autocomplete="off">
-        <datalist id="short-story-category-options">
-            ${getShortStoryMainCategoryOptions().map((item) => `<option value="${escapeHtml(item)}"></option>`).join('')}
-        </datalist>
+        <div class="short-story-category-control">
+            <select id="short-story-category" class="short-story-field">
+                ${options.map((item) => `<option value="${escapeHtml(item)}" ${item === category ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}
+                <option value="__custom__" ${isPresetCategory ? '' : 'selected'}>自定义分类</option>
+            </select>
+            <input id="short-story-category-custom" type="text" maxlength="32" value="${isPresetCategory ? '' : escapeHtml(category)}" placeholder="输入自定义主分类" class="short-story-field" autocomplete="off" ${isPresetCategory ? 'hidden' : ''}>
+        </div>
     `;
 }
 
@@ -347,6 +395,7 @@ function getShortStoryTitleCards() {
 }
 
 function renderShortStoryNavPanel() {
+    if (window.store?.currentModule !== 'short-story') return;
     const navList = document.getElementById('nav-list-container');
     if (!navList) return;
 
@@ -373,7 +422,7 @@ function renderShortStoryNavPanel() {
     settingsEntry.className = 'list-item short-story-nav-entry short-story-nav-entry--secondary short-story-nav-settings';
     settingsEntry.innerHTML = `
         <i class="ri-settings-4-line short-story-nav-entry-icon"></i>
-        <span class="list-item-label">短篇设置</span>
+        <span class="list-item-label">超时设置</span>
     `;
     settingsEntry.addEventListener('click', () => {
         if (typeof switchModule === 'function') {
@@ -450,7 +499,6 @@ function renderShortStoryNavPanel() {
 }
 
 function isShortStoryRenderCurrent(renderToken) {
-    if (!renderToken) return true;
     const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
     if (typeof guard === 'function') {
         return guard('short-story', renderToken);
@@ -459,6 +507,8 @@ function isShortStoryRenderCurrent(renderToken) {
 }
 
 async function renderShortStoryInterface(renderToken = null) {
+    if (!isShortStoryRenderCurrent(renderToken)) return;
+
     await hydrateShortStoryProjectState();
     if (!isShortStoryRenderCurrent(renderToken)) return;
 
@@ -509,13 +559,16 @@ async function renderShortStoryInterface(renderToken = null) {
     };
 
     if (activeView === 'final' && workflow?.selected_title) {
+        if (!isShortStoryRenderCurrent(renderToken)) return;
         updateBreadcrumbs(['短篇创作', workflow.selected_title]);
         ui.workspace.innerHTML = renderShortStoryFinalView(workflow);
+        if (!isShortStoryRenderCurrent(renderToken)) return;
         bindShortStoryEvents();
         renderShortStoryNavPanel();
         return;
     }
 
+    if (!isShortStoryRenderCurrent(renderToken)) return;
     updateBreadcrumbs(['短篇创作', '创作面板']);
     ui.workspace.innerHTML = `
         <div class="short-story-page">
@@ -622,12 +675,14 @@ async function renderShortStoryInterface(renderToken = null) {
         </div>
     `;
 
+    if (!isShortStoryRenderCurrent(renderToken)) return;
     renderShortStorySections(flags);
     bindShortStoryEvents();
     renderShortStoryNavPanel();
 }
 
 function renderShortStorySections(flags) {
+    if (window.store?.currentModule !== 'short-story') return;
     const container = document.getElementById('short-story-sections');
     const workflow = getCurrentShortStoryWorkflow();
     if (!container) return;
@@ -657,6 +712,7 @@ function renderShortStorySections(flags) {
         : (actualOutlineChapterCount
             ? `计划章节：${plannedChapterCount || actualOutlineChapterCount}，当前大纲：${actualOutlineChapterCount}。确认前请先核对章节数是否匹配。`
             : `计划章节：${plannedChapterCount || 0}，生成大纲后会按计划拆分章节蓝图。`);
+    const qualityRewriteTargets = Array.isArray(shortStoryState.qualityRewriteTargets) ? shortStoryState.qualityRewriteTargets : [];
 
     const analysisSummary = workflow?.input_analysis?.summary || '';
     const analysisWarnings = Array.isArray(workflow?.input_analysis?.warnings) ? workflow.input_analysis.warnings : [];
@@ -697,6 +753,7 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('fusion', '回到方案')}
             <button id="short-story-generate-synopsis" class="short-story-btn short-story-btn-primary" ${flags.canGenerateSynopsis && !isShortStoryActionLoading('generate-synopsis') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-synopsis', (workflow?.synopsis_candidates?.length || 0) > 0 ? '重新生成 5 条导语' : '生成 5 条导语', '生成中...')}
             </button>
@@ -716,6 +773,7 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('synopsis', '回到导语')}
             <button id="short-story-generate-outline" class="short-story-btn short-story-btn-primary" ${flags.canGenerateOutline && !isShortStoryActionLoading('generate-outline') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-outline', '生成大纲', '生成中...')}
             </button>
@@ -744,6 +802,7 @@ function renderShortStorySections(flags) {
         currentSectionId,
         `
             <div class="short-story-inline-meta">已写 ${workflow?.chapters?.length || 0} / ${workflow?.planned_chapters || 0}</div>
+            ${renderShortStoryRollbackButton('outline', '回到大纲')}
             <button id="short-story-generate-all-chapters" class="short-story-btn short-story-btn-cyan" ${getCurrentShortStoryStage() === 'writing_content' && !isShortStoryActionLoading('generate-all-chapters') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-all-chapters', (workflow?.chapters?.length || 0) > 0 ? '一键补全剩余正文' : '一键生成全部正文', '生成中...')}
             </button>
@@ -762,11 +821,15 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('chapter', '回到正文')}
             <button id="short-story-generate-quality" class="short-story-btn short-story-btn-violet" ${flags.canQualityCheck && !isShortStoryActionLoading('generate-quality') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-quality', '生成质检报告', '生成中...')}
             </button>
             <button id="short-story-apply-simple-quality-fixes" class="short-story-btn short-story-btn-cyan" ${(shortStoryState.qualitySimpleFixes.length > 0) && !isShortStoryActionLoading('apply-simple-quality-fixes') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('apply-simple-quality-fixes', '一键修复简单问题', '修复中...')}
+            </button>
+            <button id="short-story-rewrite-quality-issues" class="short-story-btn short-story-btn-warm" ${(qualityRewriteTargets.length > 0) && !isShortStoryActionLoading('rewrite-quality-issues') ? '' : 'disabled'}>
+                ${getShortStoryButtonLabel('rewrite-quality-issues', '重写有问题章节', '重写中...')}
             </button>
             <button id="short-story-commit-quality" class="short-story-btn short-story-btn-success" ${flags.canQualityCheck && !isShortStoryActionLoading('commit-quality') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('commit-quality', '采纳并进入复审', '提交中...')}
@@ -777,10 +840,11 @@ function renderShortStorySections(flags) {
             ${flags.hasPlaceholderBlueprints ? '<div class="short-story-review-tip short-story-warning-text">当前存在缺少有效大纲蓝图的章节，已禁止继续质检。请先回到大纲阶段补全章节规划，再重写这些章节。</div>' : ''}
             ${shortStoryState.qualitySimpleFixes.length > 0 ? `<div class="short-story-review-tip">检测到 ${shortStoryState.qualitySimpleFixes.length} 条可自动修复的简单问题，可先点“一键修复简单问题”节省 token。</div>` : ''}
             ${shortStoryState.qualitySimpleFixes.length > 0 ? `<div class="short-story-review-tip">${shortStoryState.qualitySimpleFixes.slice(0, 3).map((item) => `第${escapeHtml(String(item.chapter_number))}章：${escapeHtml(String(item.from_name || ''))} → ${escapeHtml(String(item.to_name || ''))}`).join('；')}${shortStoryState.qualitySimpleFixes.length > 3 ? '；…' : ''}</div>` : ''}
+            ${qualityRewriteTargets.length > 0 ? `<div class="short-story-review-tip">检测到 ${qualityRewriteTargets.length} 个需要大模型重写的章节：${qualityRewriteTargets.map((item) => `第${escapeHtml(String(item.chapter_number))}章`).join('、')}。</div>` : ''}
             ${shortStoryState.qualitySuggestedChapters.length > 0 ? '<div class="short-story-review-tip">检测到模型返回了修订后的完整正文，点击"采纳并进入复审"时会一并写回章节。</div>' : ''}
-            <div class="short-story-review-tip">如发现问题章节，请手动修改对应章节内容，或点击对应章节的"生成本章"按钮重新生成。</div>
+            <div class="short-story-review-tip">称呼、人名类问题可先用简单修复；剧情上下文问题可点“重写有问题章节”。重写后需要重新生成质检报告。</div>
         `,
-        shortStoryState.qualityPassedDraft ? '本轮质检已通过，可直接推进到复审。若仍想改章，可在正文区重生成/手改后，再重新点“生成质检报告”。' : '质检只输出问题报告，不会自动修改正文。请到正文区对问题章节手动修改，或点击“生成本章”重写，然后重新点“生成质检报告”。'
+        shortStoryState.qualityPassedDraft ? '本轮质检已通过，可直接推进到复审。若仍想改章，可在正文区重生成/手改后，再重新点“生成质检报告”。' : '质检先发现问题：简单称呼/人名走规则修复，剧情上下文问题走大模型重写；改完都需要重新生成质检报告。'
     );
 
     const coherenceSection = renderShortStorySection(
@@ -788,6 +852,7 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('quality', '回到质检')}
             <button id="short-story-generate-coherence" class="short-story-btn short-story-btn-pink" ${flags.canCoherenceReview && !isShortStoryActionLoading('generate-coherence') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-coherence', '生成复审报告', '生成中...')}
             </button>
@@ -809,6 +874,7 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('coherence', '回到复审')}
             <button id="short-story-generate-titles" class="short-story-btn short-story-btn-warm" ${flags.canGenerateTitles && !isShortStoryActionLoading('generate-titles') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('generate-titles', '生成 5 个书名', '生成中...')}
             </button>
@@ -828,6 +894,7 @@ function renderShortStorySections(flags) {
         workflow,
         currentSectionId,
         `
+            ${renderShortStoryRollbackButton('title', '回到书名')}
             <button id="short-story-assemble" class="short-story-btn short-story-btn-teal" ${flags.canAssemble && !isShortStoryActionLoading('assemble') ? '' : 'disabled'}>
                 ${getShortStoryButtonLabel('assemble', '组装成稿并生成标签', '组装中...')}
             </button>
@@ -985,6 +1052,8 @@ function renderShortStoryFinalView(workflow) {
 
 window.renderShortStoryLoadingBanner = renderShortStoryLoadingBanner;
 window.renderShortStoryRawOutput = renderShortStoryRawOutput;
+window.canRenderShortStoryRollback = canRenderShortStoryRollback;
+window.renderShortStoryRollbackButton = renderShortStoryRollbackButton;
 window.resolveShortStoryCategory = resolveShortStoryCategory;
 window.getShortStoryMainCategoryOptions = getShortStoryMainCategoryOptions;
 window.renderShortStoryCategoryField = renderShortStoryCategoryField;

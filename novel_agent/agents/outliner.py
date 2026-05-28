@@ -147,7 +147,7 @@ class OutlinerAgent(BaseAgent):
 
         direct_chapters = payload.get("chapters")
         if isinstance(direct_chapters, list) and direct_chapters:
-            issues.append("顶层包含 chapters；大纲生成器只能输出全书总纲和卷级规划")
+            issues.append("顶层包含 chapters；全书大纲规划师只能输出全书总纲和卷级规划")
 
         author = str(payload.get("author") or "").strip()
         if author and _AI_AUTHOR_RE.search(author):

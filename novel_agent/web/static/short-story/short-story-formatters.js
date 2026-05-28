@@ -83,6 +83,36 @@ function getShortStoryCurrentSectionId(stage = getCurrentShortStoryStage()) {
     return current ? current.id : 'fusion';
 }
 
+function getShortStoryRollbackTargetForStage(stage = getCurrentShortStoryStage()) {
+    const targets = {
+        generating_synopsis: 'fusion',
+        awaiting_synopsis_selection: 'fusion',
+        generating_outline: 'synopsis',
+        awaiting_outline_confirm: 'synopsis',
+        writing_content: 'outline',
+        quality_checking: 'chapter',
+        coherence_reviewing: 'quality',
+        generating_titles: 'coherence',
+        awaiting_title_selection: 'coherence',
+        assembling_output: 'title',
+        completed: 'title'
+    };
+    return targets[stage] || '';
+}
+
+function getShortStoryRollbackLabel(targetStep) {
+    const labels = {
+        fusion: '创意方案',
+        synopsis: '导语',
+        outline: '大纲',
+        chapter: '正文',
+        quality: '质检',
+        coherence: '复审',
+        title: '书名'
+    };
+    return labels[targetStep] || '';
+}
+
 function getShortStoryProgressSummary(workflow) {
     if (!workflow) {
         return { completed: 0, total: getShortStorySectionsMeta().length };
@@ -248,6 +278,10 @@ function getShortStoryLoadingMeta(actionName = shortStoryState.loadingAction) {
         'generate-quality': {
             text: '正在生成质检报告...',
             hint: '系统会检查正文质量并给出修订建议。'
+        },
+        'rewrite-quality-issues': {
+            text: '正在重写问题章节...',
+            hint: elapsedText ? `系统会只重写质检标记的剧情问题章节。${elapsedText}` : '系统会只重写质检标记的剧情问题章节。'
         },
         'commit-quality': {
             text: '正在提交质检结果...',
@@ -600,6 +634,8 @@ window.getCurrentShortStoryStage = getCurrentShortStoryStage;
 window.isShortStoryPlaceholderBlueprint = isShortStoryPlaceholderBlueprint;
 window.getShortStorySectionsMeta = getShortStorySectionsMeta;
 window.getShortStoryCurrentSectionId = getShortStoryCurrentSectionId;
+window.getShortStoryRollbackTargetForStage = getShortStoryRollbackTargetForStage;
+window.getShortStoryRollbackLabel = getShortStoryRollbackLabel;
 window.getShortStoryProgressSummary = getShortStoryProgressSummary;
 window.getShortStorySectionStatus = getShortStorySectionStatus;
 window.getShortStorySectionBadge = getShortStorySectionBadge;

@@ -102,6 +102,21 @@
 
 ---
 
+## 技术栈
+
+| 层级 | 技术 |
+| --- | --- |
+| 运行语言 | Python 3.10+，Windows 推荐 Python 3.11 |
+| Web 后端 | FastAPI、Uvicorn、Pydantic、AnyIO |
+| 前端 | 服务端模板 Jinja2 + 原生 HTML/CSS/JavaScript |
+| AI 接口 | OpenAI 兼容 Chat Completions / Responses，Anthropic Messages |
+| 知识库检索 | ChromaDB 向量存储、SQLite/全文检索、本地 ONNX Runtime Embedding |
+| 文档与导出 | Pillow、TXT/Markdown/DOCX 导入导出工作流 |
+| 打包发布 | PyInstaller + Inno Setup，生成 Windows 安装 EXE |
+| 测试 | pytest、Vitest、jsdom |
+
+---
+
 ## 桌面安装包
 
 普通用户可以直接使用发布版安装包，无需安装 Python 或手动配置开发环境：

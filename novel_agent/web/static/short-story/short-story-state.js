@@ -173,6 +173,7 @@ function createShortStoryProjectState() {
         qualityReportDraft: '',
         qualityPassedDraft: false,
         qualitySimpleFixes: [],
+        qualityRewriteTargets: [],
         coherenceReportDraft: '',
         coherencePassedDraft: false,
         titleRawOutput: '',
@@ -235,6 +236,7 @@ function applyShortStoryProjectState(data = {}) {
     shortStoryState.qualityReportDraft = data.qualityReportDraft || defaults.qualityReportDraft;
     shortStoryState.qualityPassedDraft = Boolean(data.qualityPassedDraft);
     shortStoryState.qualitySimpleFixes = Array.isArray(data.qualitySimpleFixes) ? data.qualitySimpleFixes : defaults.qualitySimpleFixes;
+    shortStoryState.qualityRewriteTargets = Array.isArray(data.qualityRewriteTargets) ? data.qualityRewriteTargets : defaults.qualityRewriteTargets;
     shortStoryState.coherenceReportDraft = data.coherenceReportDraft || defaults.coherenceReportDraft;
     shortStoryState.coherencePassedDraft = Boolean(data.coherencePassedDraft);
     shortStoryState.titleRawOutput = data.titleRawOutput || defaults.titleRawOutput;
@@ -316,6 +318,7 @@ function buildShortStoryPersistedPayload() {
         qualityReportDraft: shortStoryState.qualityReportDraft,
         qualityPassedDraft: shortStoryState.qualityPassedDraft,
         qualitySimpleFixes: shortStoryState.qualitySimpleFixes,
+        qualityRewriteTargets: shortStoryState.qualityRewriteTargets,
         coherenceReportDraft: shortStoryState.coherenceReportDraft,
         coherencePassedDraft: shortStoryState.coherencePassedDraft,
         titleRawOutput: shortStoryState.titleRawOutput,
@@ -450,6 +453,7 @@ function resetShortStoryWorkflowArtifacts() {
     shortStoryState.qualityReportDraft = '';
     shortStoryState.qualityPassedDraft = false;
     shortStoryState.qualitySimpleFixes = [];
+    shortStoryState.qualityRewriteTargets = [];
     shortStoryState.coherenceReportDraft = '';
     shortStoryState.coherencePassedDraft = false;
     shortStoryState.titleRawOutput = '';
@@ -465,11 +469,49 @@ function resetShortStoryReviewArtifacts() {
     shortStoryState.qualityReportDraft = '';
     shortStoryState.qualityPassedDraft = false;
     shortStoryState.qualitySimpleFixes = [];
+    shortStoryState.qualityRewriteTargets = [];
     shortStoryState.coherenceReportDraft = '';
     shortStoryState.coherencePassedDraft = false;
     shortStoryState.titleRawOutput = '';
     shortStoryState.qualitySuggestedChapters = [];
     shortStoryState.coherenceSuggestedChapters = [];
+}
+
+function resetShortStoryArtifactsForRollback(targetStep) {
+    const stepOrder = ['fusion', 'synopsis', 'outline', 'chapter', 'quality', 'coherence', 'title', 'assemble'];
+    const index = stepOrder.indexOf(targetStep);
+    if (index < 0) return;
+
+    if (index <= stepOrder.indexOf('fusion')) {
+        shortStoryState.synopsisRawOutput = '';
+        shortStoryState.synopsisFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('synopsis')) {
+        shortStoryState.outlineRawOutput = '';
+        shortStoryState.outlineRevisionFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('outline')) {
+        shortStoryState.partialChapterGeneration = null;
+    }
+    if (index <= stepOrder.indexOf('chapter')) {
+        shortStoryState.qualityReportDraft = '';
+        shortStoryState.qualityPassedDraft = false;
+        shortStoryState.qualitySimpleFixes = [];
+        shortStoryState.qualityRewriteTargets = [];
+        shortStoryState.qualitySuggestedChapters = [];
+    }
+    if (index <= stepOrder.indexOf('quality')) {
+        shortStoryState.coherenceReportDraft = '';
+        shortStoryState.coherencePassedDraft = false;
+        shortStoryState.coherenceSuggestedChapters = [];
+    }
+    if (index <= stepOrder.indexOf('coherence')) {
+        shortStoryState.titleRawOutput = '';
+        shortStoryState.titleFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('title')) {
+        shortStoryState.activeView = 'panel';
+    }
 }
 
 function parseShortStoryKeywords() {
@@ -481,13 +523,21 @@ function getRecommendedShortStoryChapterWords(totalWords) {
     return Number(totalWords || 0) >= 8000 ? 1000 : 800;
 }
 
+function getShortStoryCategoryDraftValue(fallback = shortStoryState.draftCategory || '其他') {
+    const selectValue = document.getElementById('short-story-category')?.value || '';
+    if (selectValue === '__custom__') {
+        return normalizeShortStoryCategory(document.getElementById('short-story-category-custom')?.value, fallback);
+    }
+    return normalizeShortStoryCategory(selectValue || fallback);
+}
+
 function syncShortStoryWorkflowDrafts() {
     const workflow = getCurrentShortStoryWorkflow();
     const sourceInput = document.getElementById('short-story-keywords')?.value || shortStoryState.draftSourceInput || shortStoryState.draftKeywords || '';
     const totalWords = parseInt(document.getElementById('short-story-total-words')?.value || `${shortStoryState.draftTotalWords || 5000}`, 10);
     const recommendedChapterWords = getRecommendedShortStoryChapterWords(totalWords);
     const chapterWords = parseInt(document.getElementById('short-story-chapter-words')?.value || `${shortStoryState.draftChapterWords || recommendedChapterWords}`, 10);
-    const category = normalizeShortStoryCategory(document.getElementById('short-story-category')?.value || shortStoryState.draftCategory);
+    const category = getShortStoryCategoryDraftValue();
 
     shortStoryState.draftSourceInput = sourceInput;
     shortStoryState.draftKeywords = sourceInput;
@@ -554,8 +604,10 @@ window.isShortStorySectionCollapsed = isShortStorySectionCollapsed;
 window.markShortStoryDraftSaved = markShortStoryDraftSaved;
 window.resetShortStoryWorkflowArtifacts = resetShortStoryWorkflowArtifacts;
 window.resetShortStoryReviewArtifacts = resetShortStoryReviewArtifacts;
+window.resetShortStoryArtifactsForRollback = resetShortStoryArtifactsForRollback;
 window.normalizeShortStoryCategory = normalizeShortStoryCategory;
 window.parseShortStoryKeywords = parseShortStoryKeywords;
 window.getRecommendedShortStoryChapterWords = getRecommendedShortStoryChapterWords;
+window.getShortStoryCategoryDraftValue = getShortStoryCategoryDraftValue;
 window.syncShortStoryWorkflowDrafts = syncShortStoryWorkflowDrafts;
 window.collectShortStoryChaptersFromEditor = collectShortStoryChaptersFromEditor;

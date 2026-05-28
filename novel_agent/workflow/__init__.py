@@ -26,6 +26,7 @@ from .contracts import (
     ExecutionPolicy,
     build_default_creation_contract,
     build_default_task_graph,
+    normalize_creation_length_plan,
 )
 from .agent_dispatcher import AgentDispatcher, DispatchResult
 from .checkpoint_manager import CheckpointManager
@@ -50,6 +51,7 @@ from .context_bundle import (
 )
 from .memory_sync import MemorySyncManager
 from .routing_policy import RouteDecision, RouteRule, RoutingPolicy, RoutingPolicyError
+from .collab_run_state import CollabRunCheckpoint, CollabRunState, CollabRunStateStore
 from .runtime_event_log import RuntimeEventLog
 from .runtime_events import AgentRuntimeEvent, make_runtime_event
 from .runtime_hooks import RuntimeHookContext, RuntimeHookRegistry, get_runtime_hook_registry
@@ -75,6 +77,7 @@ __all__ = [
     "ExecutionPolicy",
     "build_default_creation_contract",
     "build_default_task_graph",
+    "normalize_creation_length_plan",
     "AgentDispatcher",
     "DispatchResult",
     "CheckpointManager",
@@ -97,6 +100,9 @@ __all__ = [
     "create_context_bundle",
     "load_confirmed_context_bundles_from_project_dir",
     "MemorySyncManager",
+    "CollabRunCheckpoint",
+    "CollabRunState",
+    "CollabRunStateStore",
     "RouteDecision",
     "RouteRule",
     "RoutingPolicy",

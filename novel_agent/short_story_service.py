@@ -81,6 +81,17 @@ SHORT_STORY_MAIN_CATEGORIES = [
 ]
 
 
+SHORT_STORY_ROLLBACK_STEPS = {
+    "fusion",
+    "synopsis",
+    "outline",
+    "chapter",
+    "quality",
+    "coherence",
+    "title",
+}
+
+
 def _normalize_main_category(value: Any, fallback: str = "其他") -> str:
     """Normalize a built-in or user-defined short-story main category."""
 
@@ -161,6 +172,31 @@ SHORT_STORY_TAG_GROUPS = {
         "豪门世家",
     ],
 }
+
+
+SHORT_STORY_PROMPT_AGENT_TYPE = "short_story"
+SHORT_STORY_SYSTEM_PROMPT = "你是专业的中文短篇小说创作助手，请严格遵守用户给出的格式输出。"
+
+
+def _render_short_story_task_prompt(
+    task_name: str,
+    default_template: str,
+    **variables: Any,
+) -> tuple[str, bool]:
+    """Render a short-story task prompt, using PromptManager only when customized."""
+
+    try:
+        from .prompts.prompt_manager import get_prompt_manager
+
+        pm = get_prompt_manager()
+        if pm.has_custom_prompt(SHORT_STORY_PROMPT_AGENT_TYPE, task_name):
+            rendered = pm.render_prompt(SHORT_STORY_PROMPT_AGENT_TYPE, task_name, **variables).strip()
+            if rendered:
+                return rendered, True
+    except Exception:
+        pass
+
+    return default_template.format(**variables), False
 
 
 INPUT_ANALYSIS_PROMPT_TEMPLATE = """你是一位短篇小说创作输入分析师。
@@ -463,6 +499,54 @@ BATCH_QUALITY_CHECK_PROMPT_TEMPLATE = """你是一位严谨的文学编辑 / 质
 2. 总共不超过10行
 3. 不要重新生成完整正文
 4. 系统会根据你的建议重新生成有问题的章节"""
+
+QUALITY_ISSUE_CHAPTER_REWRITE_PROMPT_TEMPLATE = """你是专业的中文短篇小说改稿编辑。
+
+【用户原始素材】
+{keywords}
+
+【主分类】
+{category}
+
+【已选创意方案】
+{selected_fusion}
+
+【选定导语】
+{selected_synopsis}
+
+【角色表】
+{character_table}
+
+【时间线】
+{timeline}
+
+【完整大纲】
+{full_outline}
+
+【本章蓝图】
+{current_chapter_outline}
+
+【上一章片段】
+{previous_chapter_excerpt}
+
+【当前第{chapter_number}章原文】
+{current_chapter_content}
+
+【下一章片段】
+{next_chapter_excerpt}
+
+【质检指出的本章问题】
+{quality_issues}
+
+请只重写第{chapter_number}章正文，修复上述质检问题。
+
+重写要求：
+1. 字数控制在 {chapter_word_min}~{chapter_word_max} 字左右，目标约 {chapter_word_target} 字
+2. 必须保持本章在大纲中的剧情功能、人物关系、视角和情绪走向
+3. 必须修复质检指出的剧情、上下文、时间线、动机、节奏或衔接问题
+4. 与上一章和下一章自然衔接，不要新增无关支线
+5. 角色姓名、称呼、关系、时间线必须与角色表和大纲一致
+6. 不要输出章节标题，不要解释修改原因，直接输出重写后的正文"""
 
 BATCH_COHERENCE_REVIEW_PROMPT_TEMPLATE = """你是一位资深的文学复审编辑。
 
@@ -1619,6 +1703,304 @@ class ShortStoryWorkflowStateMachine:
         self.state["outline_feedback"] = (feedback or "").strip()
         self.state["state"] = ShortStoryStage.GENERATING_OUTLINE.value
 
+    def rollback_to_step(self, target_step: str = "previous", feedback: str = "") -> Dict[str, Any]:
+        normalized_target = self._resolve_rollback_target(target_step)
+        feedback_text = (feedback or "").strip()
+        current_state = ShortStoryStage(self.state["state"])
+
+        if normalized_target == "fusion":
+            self._rollback_to_fusion()
+            message = "已回到创意方案步骤，可重新生成或重选方案。"
+        elif normalized_target == "synopsis":
+            self._rollback_to_synopsis()
+            message = "已回到导语步骤，可重新生成或重选导语。"
+        elif normalized_target == "outline":
+            self._rollback_to_outline(feedback_text)
+            message = "已回到大纲步骤，可重新生成或调整大纲。"
+        elif normalized_target == "chapter":
+            self._rollback_to_chapter()
+            message = "已回到正文步骤，可重写章节后重新质检。"
+        elif normalized_target == "quality":
+            self._rollback_to_quality()
+            message = "已回到质量检查步骤，可重新生成质检报告。"
+        elif normalized_target == "coherence":
+            self._rollback_to_coherence()
+            message = "已回到通篇复审步骤，可重新生成复审报告。"
+        elif normalized_target == "title":
+            self._rollback_to_title(feedback_text)
+            message = "已回到书名步骤，可重新生成或重选书名。"
+        else:
+            raise ValueError(f"不支持回退到 {target_step}。")
+
+        self._append_rollback_warning(message)
+        return {
+            "target_step": normalized_target,
+            "from_state": current_state.value,
+            "to_state": self.state["state"],
+            "message": message,
+        }
+
+    def _resolve_rollback_target(self, target_step: str) -> str:
+        target = (target_step or "previous").strip().lower().replace("-", "_")
+        aliases = {
+            "previous": "",
+            "prev": "",
+            "last": "",
+            "上一项": "",
+            "上一步": "",
+            "idea": "fusion",
+            "fusion_options": "fusion",
+            "synopsis_selection": "synopsis",
+            "lead": "synopsis",
+            "outline_confirm": "outline",
+            "writing": "chapter",
+            "content": "chapter",
+            "chapters": "chapter",
+            "quality_check": "quality",
+            "review": "quality",
+            "coherence_review": "coherence",
+            "titles": "title",
+            "title_selection": "title",
+        }
+        target = aliases.get(target, target)
+        if not target:
+            target = self._previous_step_for_state(ShortStoryStage(self.state["state"]))
+        if target not in SHORT_STORY_ROLLBACK_STEPS:
+            raise ValueError("请选择可回退的步骤：创意方案、导语、大纲、正文、质检、复审或书名。")
+        return target
+
+    @staticmethod
+    def _previous_step_for_state(stage: ShortStoryStage) -> str:
+        mapping = {
+            ShortStoryStage.GENERATING_SYNOPSIS: "fusion",
+            ShortStoryStage.AWAITING_SYNOPSIS_SELECTION: "fusion",
+            ShortStoryStage.GENERATING_OUTLINE: "synopsis",
+            ShortStoryStage.AWAITING_OUTLINE_CONFIRM: "synopsis",
+            ShortStoryStage.WRITING_CONTENT: "outline",
+            ShortStoryStage.QUALITY_CHECKING: "chapter",
+            ShortStoryStage.COHERENCE_REVIEWING: "quality",
+            ShortStoryStage.GENERATING_TITLES: "coherence",
+            ShortStoryStage.AWAITING_TITLE_SELECTION: "coherence",
+            ShortStoryStage.ASSEMBLING_OUTPUT: "title",
+            ShortStoryStage.COMPLETED: "title",
+        }
+        if stage in mapping:
+            return mapping[stage]
+        raise ValueError("当前阶段还没有可回退的上一项。")
+
+    def _append_rollback_warning(self, message: str) -> None:
+        self.state["warnings"] = [
+            item
+            for item in self.state.get("warnings", [])
+            if "已回到" not in str(item)
+        ]
+        self.state["warnings"].append(message)
+
+    def _reset_story_tags(self) -> None:
+        self.state["story_tags"] = self._normalize_story_tags(
+            {"main_category": self.state.get("category", "其他")}
+        )
+
+    def _clear_after_fusion(self) -> None:
+        self.state["selected_synopsis"] = ""
+        self.state["selected_synopsis_index"] = None
+        self.state["synopsis_candidates"] = []
+        self._clear_after_synopsis()
+
+    def _clear_after_synopsis(self) -> None:
+        self.state["outline_text"] = ""
+        self.state["outline_feedback"] = ""
+        self.state["outline_confirmed"] = False
+        self.state["repair_placeholder_numbers"] = []
+        self.state["character_table"] = ""
+        self.state["timeline"] = ""
+        self.state["chapter_blueprints"] = []
+        self._clear_after_outline()
+
+    def _clear_after_outline(self) -> None:
+        self.state["chapters"] = []
+        self.state["manual_intervention_required"] = False
+        self._clear_after_chapters()
+
+    def _clear_after_chapters(self) -> None:
+        self.state["quality_report"] = ""
+        self.state["retry_counts"]["quality_check"] = 0
+        self._clear_after_quality()
+
+    def _clear_after_quality(self) -> None:
+        self.state["coherence_report"] = ""
+        self.state["retry_counts"]["coherence_review"] = 0
+        self._clear_after_coherence()
+
+    def _clear_after_coherence(self) -> None:
+        self.state["title_candidates"] = []
+        self._clear_after_titles()
+
+    def _clear_after_titles(self) -> None:
+        self.state["selected_title"] = ""
+        self.state["selected_title_index"] = None
+        self.state["final_output"] = ""
+        self._reset_story_tags()
+
+    def _cleanup_downstream_warnings(self) -> None:
+        self.state["warnings"] = [
+            item
+            for item in self.state.get("warnings", [])
+            if "大纲实际生成了" not in str(item)
+            and "缺少有效大纲蓝图" not in str(item)
+            and "已清理第 " not in str(item)
+        ]
+
+    def _rollback_to_fusion(self) -> None:
+        allowed_states = {
+            ShortStoryStage.AWAITING_FUSION_SELECTION,
+            ShortStoryStage.GENERATING_SYNOPSIS,
+            ShortStoryStage.AWAITING_SYNOPSIS_SELECTION,
+            ShortStoryStage.GENERATING_OUTLINE,
+            ShortStoryStage.AWAITING_OUTLINE_CONFIRM,
+            ShortStoryStage.WRITING_CONTENT,
+            ShortStoryStage.QUALITY_CHECKING,
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到创意方案。")
+        self.state["selected_fusion"] = {}
+        self.state["selected_fusion_index"] = None
+        self._clear_after_fusion()
+        self._cleanup_downstream_warnings()
+        self.state["state"] = (
+            ShortStoryStage.AWAITING_FUSION_SELECTION.value
+            if self.state.get("fusion_candidates")
+            else ShortStoryStage.GENERATING_FUSION_OPTIONS.value
+        )
+
+    def _rollback_to_synopsis(self) -> None:
+        allowed_states = {
+            ShortStoryStage.GENERATING_SYNOPSIS,
+            ShortStoryStage.AWAITING_SYNOPSIS_SELECTION,
+            ShortStoryStage.GENERATING_OUTLINE,
+            ShortStoryStage.AWAITING_OUTLINE_CONFIRM,
+            ShortStoryStage.WRITING_CONTENT,
+            ShortStoryStage.QUALITY_CHECKING,
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到导语。")
+        self.state["selected_synopsis"] = ""
+        self.state["selected_synopsis_index"] = None
+        self._clear_after_synopsis()
+        self._cleanup_downstream_warnings()
+        self.state["state"] = (
+            ShortStoryStage.AWAITING_SYNOPSIS_SELECTION.value
+            if self.state.get("synopsis_candidates")
+            else ShortStoryStage.GENERATING_SYNOPSIS.value
+        )
+
+    def _rollback_to_outline(self, feedback: str = "") -> None:
+        allowed_states = {
+            ShortStoryStage.GENERATING_OUTLINE,
+            ShortStoryStage.AWAITING_OUTLINE_CONFIRM,
+            ShortStoryStage.WRITING_CONTENT,
+            ShortStoryStage.QUALITY_CHECKING,
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到大纲。")
+        self.state["outline_confirmed"] = False
+        self.state["repair_placeholder_numbers"] = []
+        self.state["manual_intervention_required"] = False
+        if feedback:
+            self.state["outline_feedback"] = feedback
+        self._clear_after_outline()
+        self.state["state"] = (
+            ShortStoryStage.AWAITING_OUTLINE_CONFIRM.value
+            if self.state.get("outline_text")
+            else ShortStoryStage.GENERATING_OUTLINE.value
+        )
+
+    def _rollback_to_chapter(self) -> None:
+        allowed_states = {
+            ShortStoryStage.WRITING_CONTENT,
+            ShortStoryStage.QUALITY_CHECKING,
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到正文。")
+        self._clear_after_chapters()
+        self.state["manual_intervention_required"] = False
+        self.state["state"] = ShortStoryStage.WRITING_CONTENT.value
+
+    def _rollback_to_quality(self) -> None:
+        allowed_states = {
+            ShortStoryStage.QUALITY_CHECKING,
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到质检。")
+        self._clear_after_chapters()
+        self.state["manual_intervention_required"] = False
+        self.state["state"] = ShortStoryStage.QUALITY_CHECKING.value
+
+    def _rollback_to_coherence(self) -> None:
+        allowed_states = {
+            ShortStoryStage.COHERENCE_REVIEWING,
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到复审。")
+        self._clear_after_quality()
+        self.state["manual_intervention_required"] = False
+        self.state["state"] = ShortStoryStage.COHERENCE_REVIEWING.value
+
+    def _rollback_to_title(self, feedback: str = "") -> None:
+        allowed_states = {
+            ShortStoryStage.GENERATING_TITLES,
+            ShortStoryStage.AWAITING_TITLE_SELECTION,
+            ShortStoryStage.ASSEMBLING_OUTPUT,
+            ShortStoryStage.COMPLETED,
+        }
+        current_state = ShortStoryStage(self.state["state"])
+        if current_state not in allowed_states:
+            raise ValueError("当前阶段还不能回到书名。")
+        self.state["selected_title"] = ""
+        self.state["selected_title_index"] = None
+        self.state["final_output"] = ""
+        self._reset_story_tags()
+        self.state["state"] = (
+            ShortStoryStage.AWAITING_TITLE_SELECTION.value
+            if self.state.get("title_candidates") and not feedback
+            else ShortStoryStage.GENERATING_TITLES.value
+        )
+
     def _assert_repair_placeholder_blueprints_resolved(self) -> None:
         required_numbers = [
             int(item)
@@ -2258,7 +2640,9 @@ class ShortStoryCreatorService:
         machine = ShortStoryWorkflowStateMachine(workflow)
         machine._assert_state([ShortStoryStage.ANALYZING_SOURCE_INPUT])
         state = machine.snapshot()
-        prompt = INPUT_ANALYSIS_PROMPT_TEMPLATE.format(
+        prompt, _ = _render_short_story_task_prompt(
+            "input_analysis",
+            INPUT_ANALYSIS_PROMPT_TEMPLATE,
             source_input=state.get("raw_input") or self._format_keywords(state.get("keywords", [])) or "待补充",
             category=state.get("category") or "其他",
         )
@@ -2281,7 +2665,9 @@ class ShortStoryCreatorService:
         machine._assert_state([ShortStoryStage.GENERATING_FUSION_OPTIONS])
         state = machine.snapshot()
         analysis = state.get("input_analysis", {}) if isinstance(state.get("input_analysis"), dict) else {}
-        prompt = FUSION_OPTIONS_PROMPT_TEMPLATE.format(
+        prompt, _ = _render_short_story_task_prompt(
+            "fusion_options",
+            FUSION_OPTIONS_PROMPT_TEMPLATE,
             source_input=state.get("raw_input") or self._format_keywords(state.get("keywords", [])) or "待补充",
             analysis_summary=analysis.get("summary") or "待补充",
             keywords=self._format_keywords(state.get("keywords", [])) or "待补充",
@@ -2324,17 +2710,30 @@ class ShortStoryCreatorService:
         machine = ShortStoryWorkflowStateMachine(workflow)
         machine._assert_state([ShortStoryStage.GENERATING_SYNOPSIS])
         state = machine.snapshot()
-        prompt = SYNOPSIS_PROMPT_TEMPLATE.format(
+        source_input = state.get("raw_input") or "待补充"
+        input_analysis_summary = ""
+        if state.get("input_analysis"):
+            input_analysis_summary = state["input_analysis"].get("summary") or "待补充"
+        selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+        feedback_text = (feedback or "").strip()
+        prompt, used_custom_prompt = _render_short_story_task_prompt(
+            "synopsis",
+            SYNOPSIS_PROMPT_TEMPLATE,
             keywords=self._format_keywords(state["keywords"]),
             category=state.get("category") or "其他",
+            source_input=source_input,
+            input_analysis_summary=input_analysis_summary or "待补充",
+            selected_fusion=selected_fusion or "无",
+            feedback=feedback_text,
         )
-        prompt += f"\n\n【统一输入原文】\n{state.get('raw_input') or '待补充'}"
-        if state.get("input_analysis"):
-            prompt += f"\n\n【素材识别摘要】\n{state['input_analysis'].get('summary') or '待补充'}"
-        if state.get("selected_fusion"):
-            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
-        if (feedback or "").strip():
-            prompt += f"\n\n【用户对导语的新要求】\n{feedback.strip()}"
+        if not used_custom_prompt:
+            prompt += f"\n\n【统一输入原文】\n{source_input}"
+            if input_analysis_summary:
+                prompt += f"\n\n【素材识别摘要】\n{input_analysis_summary}"
+            if selected_fusion:
+                prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
+            if feedback_text:
+                prompt += f"\n\n【用户对导语的新要求】\n{feedback_text}"
         return {
             "success": True,
             "data": {
@@ -2358,7 +2757,11 @@ class ShortStoryCreatorService:
         machine = ShortStoryWorkflowStateMachine(workflow)
         machine._assert_state([ShortStoryStage.GENERATING_OUTLINE])
         state = machine.snapshot()
-        prompt = OUTLINE_PROMPT_TEMPLATE.format(
+        selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+        outline_feedback = str(state.get("outline_feedback") or "").strip()
+        prompt, used_custom_prompt = _render_short_story_task_prompt(
+            "outline",
+            OUTLINE_PROMPT_TEMPLATE,
             keywords=self._format_keywords(state["keywords"]),
             category=state.get("category") or "其他",
             selected_synopsis=state["selected_synopsis"],
@@ -2371,11 +2774,14 @@ class ShortStoryCreatorService:
             chapter_word_target=state.get("chapter_word_target", 800),
             chapter_word_min=state.get("chapter_word_min", 700),
             chapter_word_max=state.get("chapter_word_max", 900),
+            selected_fusion=selected_fusion or "无",
+            outline_feedback=outline_feedback,
         )
-        if state.get("selected_fusion"):
-            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
-        if state.get("outline_feedback"):
-            prompt += f"\n\n【上一版调整意见】\n{state['outline_feedback']}"
+        if not used_custom_prompt:
+            if selected_fusion:
+                prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
+            if outline_feedback:
+                prompt += f"\n\n【上一版调整意见】\n{outline_feedback}"
         return {
             "success": True,
             "data": {
@@ -2431,6 +2837,67 @@ class ShortStoryCreatorService:
         machine.rollback_placeholder_blueprints(feedback=feedback)
         return {"success": True, "data": {"workflow": machine.snapshot(), "next_step": "revise_outline"}}
 
+    def rollback_workflow(self, workflow: Dict[str, Any], target_step: str = "previous", feedback: str = "") -> Dict[str, Any]:
+        machine = ShortStoryWorkflowStateMachine(workflow)
+        result = machine.rollback_to_step(target_step=target_step, feedback=feedback)
+        return {
+            "success": True,
+            "data": {
+                "workflow": machine.snapshot(),
+                **result,
+            },
+        }
+
+    def extract_quality_rewrite_targets(self, workflow: Dict[str, Any], report: str) -> List[Dict[str, Any]]:
+        state = ShortStoryWorkflowStateMachine(workflow).snapshot()
+        chapters_by_number = {
+            int(item.get("chapter_number") or 0): item
+            for item in self.normalize_chapters_payload(state.get("chapters", []))
+        }
+        simple_keys = {
+            (int(item["chapter_number"]), str(item["reason"]).strip())
+            for item in self.extract_simple_quality_fixes(state, report)
+        }
+        targets: List[Dict[str, Any]] = []
+
+        for raw_line in str(report or "").splitlines():
+            parsed = self._parse_quality_issue_line(raw_line)
+            if not parsed:
+                continue
+            chapter_number = int(parsed["chapter_number"])
+            issue_text = str(parsed["issue_text"]).strip()
+            if chapter_number not in chapters_by_number:
+                continue
+            if (chapter_number, issue_text) in simple_keys:
+                continue
+            issue_type = self._classify_quality_issue_type(issue_text)
+            if issue_type == "simple":
+                continue
+            targets.append(
+                {
+                    "chapter_number": chapter_number,
+                    "issue_type": issue_type,
+                    "issue_text": issue_text,
+                    "requires_llm": True,
+                }
+            )
+
+        grouped: Dict[int, Dict[str, Any]] = {}
+        for item in targets:
+            chapter_number = int(item["chapter_number"])
+            grouped.setdefault(
+                chapter_number,
+                {
+                    "chapter_number": chapter_number,
+                    "issue_type": item["issue_type"],
+                    "issues": [],
+                    "requires_llm": True,
+                },
+            )
+            grouped[chapter_number]["issues"].append(item["issue_text"])
+
+        return [grouped[key] for key in sorted(grouped)]
+
     def extract_simple_quality_fixes(self, workflow: Dict[str, Any], report: str) -> List[Dict[str, Any]]:
         state = ShortStoryWorkflowStateMachine(workflow).snapshot()
         chapters_by_number = {
@@ -2444,13 +2911,13 @@ class ShortStoryCreatorService:
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("##") or line.startswith("✅") or "无需修改" in line:
                 continue
-            chapter_match = re.match(r"^第\s*(\d+)\s*章[:：]\s*(.+)$", line)
-            if not chapter_match:
+            parsed = self._parse_quality_issue_line(line)
+            if not parsed:
                 continue
-            chapter_number = int(chapter_match.group(1))
+            chapter_number = int(parsed["chapter_number"])
             if chapter_number not in chapters_by_number:
                 continue
-            issue_text = chapter_match.group(2).strip()
+            issue_text = str(parsed["issue_text"]).strip()
             fix = self._extract_simple_quality_fix_from_line(issue_text, chapter_number, known_names)
             if fix:
                 fixes.append(fix)
@@ -2514,6 +2981,122 @@ class ShortStoryCreatorService:
             },
         }
 
+    def build_quality_issue_rewrite_prompt(
+        self,
+        workflow: Dict[str, Any],
+        chapter_number: int,
+        issues: Sequence[str],
+        chapters: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        machine = ShortStoryWorkflowStateMachine(workflow)
+        machine._assert_state(
+            [
+                ShortStoryStage.QUALITY_CHECKING,
+                ShortStoryStage.COHERENCE_REVIEWING,
+                ShortStoryStage.GENERATING_TITLES,
+                ShortStoryStage.AWAITING_TITLE_SELECTION,
+                ShortStoryStage.ASSEMBLING_OUTPUT,
+                ShortStoryStage.COMPLETED,
+            ]
+        )
+        state = machine.snapshot()
+        if chapters:
+            state["chapters"] = self.normalize_chapters_payload(chapters)
+        self._assert_full_chapter_set_ready(state, action_name="重写问题章节")
+        self._assert_chapter_has_valid_blueprint(state, chapter_number)
+
+        chapter_map = {
+            int(item.get("chapter_number") or 0): dict(item)
+            for item in self.normalize_chapters_payload(state.get("chapters", []))
+        }
+        current_chapter = chapter_map.get(int(chapter_number))
+        if not current_chapter:
+            raise ValueError(f"第 {chapter_number} 章正文不存在，暂时无法重写。")
+
+        blueprint = self._find_chapter_blueprint(state, chapter_number)
+        title = str(current_chapter.get("title") or blueprint.get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+        current_outline = self._format_chapter_blueprint_for_prompt(blueprint)
+        quality_issues = "\n".join(f"- {str(item).strip()}" for item in issues if str(item).strip()).strip()
+        if not quality_issues:
+            raise ValueError("缺少可用于重写的问题描述。")
+
+        previous_chapter = chapter_map.get(int(chapter_number) - 1)
+        next_chapter = chapter_map.get(int(chapter_number) + 1)
+        prompt, _ = _render_short_story_task_prompt(
+            "quality_issue_rewrite",
+            QUALITY_ISSUE_CHAPTER_REWRITE_PROMPT_TEMPLATE,
+            keywords=self._format_keywords(state["keywords"]),
+            category=state.get("category") or "其他",
+            selected_fusion=self._format_selected_fusion(state),
+            selected_synopsis=state["selected_synopsis"] or "待补充",
+            character_table=state["character_table"] or "待补充",
+            timeline=state["timeline"] or "待补充",
+            full_outline=state["outline_text"] or "待补充",
+            current_chapter_outline=current_outline,
+            previous_chapter_excerpt=self._format_neighbor_chapter_excerpt(previous_chapter),
+            current_chapter_content=str(current_chapter.get("content") or "").strip(),
+            next_chapter_excerpt=self._format_neighbor_chapter_excerpt(next_chapter),
+            chapter_number=chapter_number,
+            quality_issues=quality_issues,
+            chapter_word_target=state.get("chapter_word_target", 800),
+            chapter_word_min=state.get("chapter_word_min", 700),
+            chapter_word_max=state.get("chapter_word_max", 900),
+        )
+        return {
+            "success": True,
+            "data": {
+                "workflow": state,
+                "prompt": prompt,
+                "chapter_number": chapter_number,
+                "chapter_title": title,
+                "issues": [str(item).strip() for item in issues if str(item).strip()],
+            },
+        }
+
+    def rewrite_quality_issue_chapters(
+        self,
+        workflow: Dict[str, Any],
+        rewritten_chapters: Sequence[Dict[str, Any]],
+        chapters: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        machine = ShortStoryWorkflowStateMachine(workflow)
+        state = machine.snapshot()
+        chapter_payload = self.normalize_chapters_payload(chapters) if chapters else self.normalize_chapters_payload(state.get("chapters", []))
+        chapter_map = {int(item.get("chapter_number") or 0): dict(item) for item in chapter_payload}
+        applied: List[Dict[str, Any]] = []
+
+        for item in rewritten_chapters:
+            chapter_number = int(item.get("chapter_number") or 0)
+            if chapter_number <= 0 or chapter_number not in chapter_map:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            title = str(item.get("title") or chapter_map[chapter_number].get("title") or f"第{chapter_number}章").strip() or f"第{chapter_number}章"
+            chapter_map[chapter_number] = {
+                **chapter_map[chapter_number],
+                "chapter_number": chapter_number,
+                "title": title,
+                "content": content,
+            }
+            applied.append({"chapter_number": chapter_number, "title": title})
+
+        if not applied:
+            raise ValueError("没有可写回的问题章节正文。")
+
+        revised_chapters = sorted(chapter_map.values(), key=lambda item: int(item.get("chapter_number", 0)))
+        machine.replace_chapters(revised_chapters)
+        return {
+            "success": True,
+            "data": {
+                "workflow": machine.snapshot(),
+                "revised_chapters": revised_chapters,
+                "rewritten_chapters": applied,
+                "rewritten_count": len(applied),
+                "next_step": "quality_check",
+            },
+        }
+
     def build_chapter_prompt(
         self,
         workflow: Dict[str, Any],
@@ -2551,7 +3134,10 @@ class ShortStoryCreatorService:
             outline_lines.append(f"情绪节点：{emotion_point}")
         
         resolved_outline = (current_chapter_outline or "\n".join([line for line in outline_lines if not line.endswith("：")])).strip() or "待补充"
-        prompt = CHAPTER_PROMPT_TEMPLATE.format(
+        selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+        prompt, used_custom_prompt = _render_short_story_task_prompt(
+            "write_chapter",
+            CHAPTER_PROMPT_TEMPLATE,
             keywords=self._format_keywords(state["keywords"]),
             category=state.get("category") or "其他",
             selected_synopsis=state["selected_synopsis"],
@@ -2563,9 +3149,10 @@ class ShortStoryCreatorService:
             chapter_word_min=state.get("chapter_word_min", 700),
             chapter_word_max=state.get("chapter_word_max", 900),
             current_chapter_outline=resolved_outline,
+            selected_fusion=selected_fusion or "无",
         )
-        if state.get("selected_fusion"):
-            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
+        if selected_fusion and not used_custom_prompt:
+            prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
         return {
             "success": True,
             "data": {
@@ -2597,7 +3184,9 @@ class ShortStoryCreatorService:
         
         # 如果章节数少于等于batch_size，或者不使用分批，则使用完整质检
         if not use_batch or total_chapters <= batch_size:
-            prompt = QUALITY_CHECK_PROMPT_TEMPLATE.format(
+            prompt, _ = _render_short_story_task_prompt(
+                "quality_check",
+                QUALITY_CHECK_PROMPT_TEMPLATE,
                 character_table=state["character_table"] or "待补充",
                 timeline=state["timeline"] or "待补充",
                 full_outline=state["outline_text"] or "待补充",
@@ -2622,7 +3211,9 @@ class ShortStoryCreatorService:
             batch_start = batch_chapters[0]["chapter_number"]
             batch_end = batch_chapters[-1]["chapter_number"]
             
-            batch_prompt = BATCH_QUALITY_CHECK_PROMPT_TEMPLATE.format(
+            batch_prompt, _ = _render_short_story_task_prompt(
+                "batch_quality_check",
+                BATCH_QUALITY_CHECK_PROMPT_TEMPLATE,
                 character_table=state["character_table"] or "待补充",
                 timeline=state["timeline"] or "待补充",
                 full_outline=state["outline_text"] or "待补充",
@@ -2678,14 +3269,18 @@ class ShortStoryCreatorService:
         
         # 如果章节数少于等于batch_size，或者不使用分批，则使用完整复审
         if not use_batch or total_chapters <= batch_size:
-            prompt = COHERENCE_REVIEW_PROMPT_TEMPLATE.format(
+            selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+            prompt, used_custom_prompt = _render_short_story_task_prompt(
+                "coherence_review",
+                COHERENCE_REVIEW_PROMPT_TEMPLATE,
                 keywords=self._format_keywords(state["keywords"]),
                 category=state.get("category") or "其他",
                 selected_synopsis=state["selected_synopsis"],
                 revised_full_text=self.render_chapters(chapters),
+                selected_fusion=selected_fusion or "无",
             )
-            if state.get("selected_fusion"):
-                prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
+            if selected_fusion and not used_custom_prompt:
+                prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
             return {
                 "success": True,
                 "data": {
@@ -2703,16 +3298,20 @@ class ShortStoryCreatorService:
             batch_start = batch_chapters[0]["chapter_number"]
             batch_end = batch_chapters[-1]["chapter_number"]
             
-            batch_prompt = BATCH_COHERENCE_REVIEW_PROMPT_TEMPLATE.format(
+            selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+            batch_prompt, used_custom_prompt = _render_short_story_task_prompt(
+                "batch_coherence_review",
+                BATCH_COHERENCE_REVIEW_PROMPT_TEMPLATE,
                 keywords=self._format_keywords(state["keywords"]),
                 category=state.get("category") or "其他",
                 selected_synopsis=state["selected_synopsis"],
                 batch_chapters_text=self.render_chapters(batch_chapters),
                 batch_start=batch_start,
                 batch_end=batch_end,
+                selected_fusion=selected_fusion or "无",
             )
-            if state.get("selected_fusion"):
-                batch_prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
+            if selected_fusion and not used_custom_prompt:
+                batch_prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
             
             batches.append({
                 "batch_index": len(batches),
@@ -2751,16 +3350,23 @@ class ShortStoryCreatorService:
         machine._assert_state([ShortStoryStage.GENERATING_TITLES])
         state = machine.snapshot()
         excerpt = (body_excerpt or self.build_excerpt(state["chapters"])).strip() or "待补充"
-        prompt = TITLE_PROMPT_TEMPLATE.format(
+        selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+        feedback_text = (feedback or "").strip()
+        prompt, used_custom_prompt = _render_short_story_task_prompt(
+            "title",
+            TITLE_PROMPT_TEMPLATE,
             keywords=self._format_keywords(state["keywords"]),
             category=state.get("category") or "其他",
             selected_synopsis=state["selected_synopsis"],
             body_excerpt=excerpt,
+            selected_fusion=selected_fusion or "无",
+            feedback=feedback_text,
         )
-        if state.get("selected_fusion"):
-            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
-        if (feedback or "").strip():
-            prompt += f"\n\n【用户对书名的新要求】\n{feedback.strip()}"
+        if not used_custom_prompt:
+            if selected_fusion:
+                prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
+            if feedback_text:
+                prompt += f"\n\n【用户对书名的新要求】\n{feedback_text}"
         return {
             "success": True,
             "data": {
@@ -2870,7 +3476,10 @@ class ShortStoryCreatorService:
         machine = ShortStoryWorkflowStateMachine(workflow)
         machine._assert_state([ShortStoryStage.ASSEMBLING_OUTPUT, ShortStoryStage.COMPLETED])
         state = machine.snapshot()
-        prompt = TAG_SELECTION_PROMPT_TEMPLATE.format(
+        selected_fusion = self._format_selected_fusion(state) if state.get("selected_fusion") else ""
+        prompt, used_custom_prompt = _render_short_story_task_prompt(
+            "story_tags",
+            TAG_SELECTION_PROMPT_TEMPLATE,
             main_categories="、".join(SHORT_STORY_MAIN_CATEGORIES),
             plot_tags="、".join(SHORT_STORY_TAG_GROUPS["plot_tags"]),
             role_tags="、".join(SHORT_STORY_TAG_GROUPS["role_tags"]),
@@ -2881,9 +3490,10 @@ class ShortStoryCreatorService:
             title=state.get("selected_title") or "待定",
             selected_synopsis=state.get("selected_synopsis") or "待补充",
             full_text=self.render_chapters(state.get("chapters", [])),
+            selected_fusion=selected_fusion or "无",
         )
-        if state.get("selected_fusion"):
-            prompt += f"\n\n【已选创意方案】\n{self._format_selected_fusion(state)}"
+        if selected_fusion and not used_custom_prompt:
+            prompt += f"\n\n【已选创意方案】\n{selected_fusion}"
         return {"success": True, "data": {"workflow": state, "prompt": prompt}}
 
     def record_story_tags(self, workflow: Dict[str, Any], story_tags: Dict[str, Any]) -> Dict[str, Any]:
@@ -2970,6 +3580,87 @@ class ShortStoryCreatorService:
                 if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", cleaned):
                     names.add(cleaned)
         return names
+
+    @staticmethod
+    def _parse_quality_issue_line(raw_line: str) -> Optional[Dict[str, Any]]:
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or line.startswith("##") or line.startswith("✅") or "无需修改" in line:
+            return None
+        line = re.sub(r"^[\s>*\-•·\d.、)]+", "", line).strip()
+        line = re.sub(r"^\*\*(.+?)\*\*$", r"\1", line).strip()
+        match = re.match(r"^第\s*([一二三四五六七八九十百零\d]+)\s*章\s*[:：]\s*(.+)$", line)
+        if not match:
+            return None
+        chapter_number = _coerce_chapter_number(match.group(1), 0)
+        issue_text = match.group(2).strip()
+        if chapter_number <= 0 or not issue_text:
+            return None
+        return {"chapter_number": chapter_number, "issue_text": issue_text}
+
+    @staticmethod
+    def _classify_quality_issue_type(issue_text: str) -> str:
+        text = str(issue_text or "").strip()
+        if not text:
+            return "narrative"
+
+        complex_keywords = (
+            "剧情",
+            "上下文",
+            "时间线",
+            "时间顺序",
+            "逻辑",
+            "前后矛盾",
+            "矛盾",
+            "动机",
+            "节奏",
+            "衔接",
+            "伏笔",
+            "大纲",
+            "导语",
+            "情绪",
+            "转折",
+            "结局",
+            "开篇",
+            "收束",
+            "冲突",
+            "不合理",
+            "断裂",
+            "跳跃",
+            "缺失",
+            "字数",
+            "篇幅",
+        )
+        if any(keyword in text for keyword in complex_keywords):
+            return "narrative"
+
+        simple_keywords = ("姓名", "名字", "人名", "称呼", "笔误", "错字", "混用", "误写")
+        if any(keyword in text for keyword in simple_keywords):
+            return "simple"
+
+        return "narrative"
+
+    @staticmethod
+    def _format_chapter_blueprint_for_prompt(blueprint: Dict[str, Any]) -> str:
+        lines = [
+            f"标题：{blueprint.get('title') or '待补充'}",
+            f"摘要：{blueprint.get('summary') or '待补充'}",
+            f"出场角色：{blueprint.get('characters') or '待补充'}",
+            f"核心事件：{blueprint.get('core_event') or '待补充'}",
+            f"叙事功能：{blueprint.get('narrative_function') or '待补充'}",
+        ]
+        emotion_point = str(blueprint.get("emotion_point") or "").strip()
+        if emotion_point:
+            lines.append(f"情绪节点：{emotion_point}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_neighbor_chapter_excerpt(chapter: Optional[Dict[str, Any]]) -> str:
+        if not chapter:
+            return "无"
+        content = str(chapter.get("content") or "").strip()
+        title = str(chapter.get("title") or f"第{chapter.get('chapter_number', '')}章").strip()
+        excerpt = content[:800].strip()
+        return f"{title}\n{excerpt}" if excerpt else "无"
 
     @classmethod
     def _extract_simple_quality_fix_from_line(

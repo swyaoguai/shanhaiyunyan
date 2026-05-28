@@ -81,6 +81,10 @@ class BaseAgent(ABC):
         "Outliner": "outliner",
         "Router": "router",
         "copilot": "copilot",
+        "CharacterBuilder": "CharacterBuilder",
+        "EventlineBuilder": "EventlineBuilder",
+        "DetailOutlineBuilder": "DetailOutlineBuilder",
+        "ChapterSettingBuilder": "ChapterSettingBuilder",
     }
 
     def __init__(

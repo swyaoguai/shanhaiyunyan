@@ -13,6 +13,14 @@ function resolveShortStoryCategoryInput(value, fallback = '其他') {
     return (category || fallbackText).slice(0, 32) || '其他';
 }
 
+function getShortStoryCategoryControlValue(fallback = shortStoryState?.draftCategory || '其他') {
+    const selectValue = document.getElementById('short-story-category')?.value || '';
+    if (selectValue === '__custom__') {
+        return resolveShortStoryCategoryInput(document.getElementById('short-story-category-custom')?.value, fallback);
+    }
+    return resolveShortStoryCategoryInput(selectValue, fallback);
+}
+
 function syncShortStoryLoadingHeartbeat() {
     if (shortStoryLoadingHeartbeatTimer) {
         clearInterval(shortStoryLoadingHeartbeatTimer);
@@ -52,7 +60,7 @@ async function ensureShortStoryWorkflowForSourceInput() {
     const totalWords = parseInt(document.getElementById('short-story-total-words')?.value || '5000', 10);
     const recommendedChapterWords = getRecommendedShortStoryChapterWords(totalWords);
     const chapterWords = parseInt(document.getElementById('short-story-chapter-words')?.value || `${recommendedChapterWords}`, 10);
-    const category = resolveShortStoryCategoryInput(document.getElementById('short-story-category')?.value);
+    const category = getShortStoryCategoryControlValue();
 
     shortStoryState.draftSourceInput = sourceInput;
     shortStoryState.draftKeywords = sourceInput;
@@ -219,7 +227,25 @@ function bindShortStoryDraftAutosave() {
     }, 'change');
 
     bindInput('#short-story-category', (element) => {
-        shortStoryState.draftCategory = resolveShortStoryCategoryInput(element.value);
+        const customInput = document.getElementById('short-story-category-custom');
+        if (customInput) {
+            customInput.hidden = element.value !== '__custom__';
+            if (element.value === '__custom__') {
+                customInput.focus();
+            } else {
+                customInput.value = '';
+            }
+        }
+        shortStoryState.draftCategory = getShortStoryCategoryControlValue();
+        const workflow = getCurrentShortStoryWorkflow();
+        if (workflow) {
+            workflow.category = shortStoryState.draftCategory;
+            workflow.tone = shortStoryState.draftCategory;
+        }
+    }, 'change');
+
+    bindInput('#short-story-category-custom', () => {
+        shortStoryState.draftCategory = getShortStoryCategoryControlValue();
         const workflow = getCurrentShortStoryWorkflow();
         if (workflow) {
             workflow.category = shortStoryState.draftCategory;
@@ -366,6 +392,37 @@ function bindShortStoryEvents() {
         await resetShortStoryProjectState();
         await renderShortStoryInterface();
         showToast('当前流程已清空');
+    });
+
+    document.querySelectorAll('.short-story-rollback-step').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const targetStep = button.dataset.rollbackTarget || 'previous';
+            const targetLabel = getShortStoryRollbackLabel(targetStep) || '上一项';
+            if (!(await window.showConfirmDialog(`确定回到${targetLabel}步骤吗？\n\n当前步骤之后的结果会被清空，保留前面已确认的内容。`))) {
+                return;
+            }
+            syncShortStoryWorkflowDrafts();
+            let resolvedTarget = '';
+            let resultMessage = '';
+            await withShortStoryLoading(`rollback-${targetStep}`, async () => {
+                const result = await rollbackShortStoryWorkflow(
+                    targetStep,
+                    targetStep === 'outline' ? (shortStoryState.outlineRevisionFeedback || '') : ''
+                );
+                if (!result) return;
+                resolvedTarget = result?.data?.target_step || targetStep;
+                resultMessage = result?.data?.message || `已回到${targetLabel}步骤`;
+                resetShortStoryArtifactsForRollback(resolvedTarget);
+            });
+            if (resolvedTarget) {
+                shortStoryState.highlightSection = resolvedTarget;
+                shortStoryState.collapsedSections[resolvedTarget] = false;
+                saveShortStoryData();
+                await renderShortStoryInterface();
+                scrollToShortStorySection(resolvedTarget);
+                showToast(resultMessage);
+            }
+        });
     });
 
     document.getElementById('short-story-generate-fusion')?.addEventListener('click', async (event) => {
@@ -606,6 +663,7 @@ function bindShortStoryEvents() {
             shortStoryState.qualityPassedDraft = Boolean(result?.data?.passed);
             shortStoryState.qualitySuggestedChapters = Array.isArray(result?.data?.revised_chapters) ? result.data.revised_chapters : [];
             shortStoryState.qualitySimpleFixes = Array.isArray(result?.data?.simple_fixes) ? result.data.simple_fixes : [];
+            shortStoryState.qualityRewriteTargets = Array.isArray(result?.data?.rewrite_targets) ? result.data.rewrite_targets : [];
             saveShortStoryData();
             await renderShortStoryInterface();
         });
@@ -626,9 +684,33 @@ function bindShortStoryEvents() {
             shortStoryState.qualityPassedDraft = false;
             shortStoryState.qualitySuggestedChapters = [];
             shortStoryState.qualitySimpleFixes = [];
+            shortStoryState.qualityRewriteTargets = [];
             saveShortStoryData();
             await renderShortStoryInterface();
             showToast(`已自动修复 ${fixedCount} 条简单问题，共替换 ${replacementCount} 处内容，请重新生成质检报告`);
+        });
+    });
+
+    document.getElementById('short-story-rewrite-quality-issues')?.addEventListener('click', async () => {
+        await withShortStoryLoading('rewrite-quality-issues', async () => {
+            const report = document.getElementById('short-story-quality-report')?.value || shortStoryState.qualityReportDraft;
+            const result = await callShortStoryApi('/api/short-story/quality-check/rewrite-issue-chapters', {
+                workflow: getCurrentShortStoryWorkflow(),
+                report,
+                chapters: collectShortStoryChaptersFromEditor(),
+                api_config_id: getSelectedApiConfigIdForShortStory(),
+                model: document.getElementById('short-story-model')?.value || shortStoryState.selectedModel
+            }, '');
+            if (!result) return;
+            const rewrittenCount = Number(result?.data?.rewritten_count || 0);
+            shortStoryState.qualityReportDraft = '';
+            shortStoryState.qualityPassedDraft = false;
+            shortStoryState.qualitySuggestedChapters = [];
+            shortStoryState.qualitySimpleFixes = [];
+            shortStoryState.qualityRewriteTargets = [];
+            saveShortStoryData();
+            await renderShortStoryInterface();
+            showToast(`已重写 ${rewrittenCount} 个问题章节，请重新生成质检报告`);
         });
     });
 
@@ -645,6 +727,7 @@ function bindShortStoryEvents() {
             }, '已进入复审阶段');
             shortStoryState.qualitySuggestedChapters = [];
             shortStoryState.qualitySimpleFixes = [];
+            shortStoryState.qualityRewriteTargets = [];
         });
     });
 

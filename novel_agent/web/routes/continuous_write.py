@@ -304,6 +304,33 @@ def _apply_continuous_write_model_config(writer, model_config: Any, model_name: 
     )
 
 
+def _sync_writer_from_session(writer: Any, state: Any) -> None:
+    """Ensure a runtime writer has the persisted session data loaded."""
+    if state is None:
+        return
+    writer._session_state = state
+    writer._story_beginning = state.story_beginning
+    writer._current_chapter = state.current_chapter
+    writer._written_chapters = state.chapters.copy()
+    writer._dead_characters = state.dead_characters.copy()
+    writer._user_inspirations = state.inspirations.copy()
+    writer._corrections = state.corrections.copy()
+    try:
+        from ...agents.continuous_writer import CharacterState, PlotPoint
+
+        writer._characters = {
+            name: CharacterState(**payload) if isinstance(payload, dict) else CharacterState(name=name)
+            for name, payload in (state.character_states or {}).items()
+        }
+        writer._plot_points = [
+            PlotPoint(**item)
+            for item in (state.plot_points or [])
+            if isinstance(item, dict)
+        ]
+    except Exception as exc:
+        logger.warning(f"[ContinuousWrite] Failed to restore writer memory details: {exc}")
+
+
 async def _refresh_infinite_memory(
     project_id: str,
     session_id: str,
@@ -323,6 +350,74 @@ async def _refresh_infinite_memory(
         )
     except Exception as exc:
         logger.warning(f"[ContinuousWrite] Failed to refresh isolated memory: {exc}")
+
+
+def _chapter_numbers_from_payload(chapters: Any) -> List[int]:
+    numbers: set[int] = set()
+    if not isinstance(chapters, list):
+        return []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        try:
+            number = int(chapter.get("chapter_number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if number > 0:
+            numbers.add(number)
+    return sorted(numbers)
+
+
+def _clear_continuous_write_session_memory(state: Any) -> None:
+    """Clear hidden continuity fields when the visible chapter list is empty."""
+    state.story_beginning = ""
+    state.inspirations = []
+    state.corrections = []
+    state.dead_characters = []
+    state.character_states = {}
+    state.plot_points = []
+    state.is_running = False
+
+
+def _delete_project_knowledge_chapters(
+    project_id: str,
+    data_dir: Path | None,
+    chapter_numbers: List[int],
+) -> int:
+    numbers = sorted({int(num) for num in chapter_numbers if isinstance(num, int) and num > 0})
+    if not numbers or not project_id:
+        return 0
+
+    deleted = 0
+    try:
+        from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE
+        from ...knowledge_runtime import create_project_knowledge_base, has_embedding_config, load_knowledge_base_settings
+
+        if not CHROMA_AVAILABLE:
+            return 0
+
+        kb_settings = load_knowledge_base_settings(data_dir)
+        if not has_embedding_config(kb_settings):
+            return 0
+
+        kb = create_project_knowledge_base(
+            project_id,
+            data_dir=data_dir,
+            use_mock_embeddings=False,
+        )
+        try:
+            for num in numbers:
+                try:
+                    if kb.delete_chapter(f"chapter_{num}"):
+                        deleted += 1
+                except Exception as e:
+                    logger.warning(f"[ContinuousWrite] 删除知识库章节失败: chapter_{num}, {e}")
+        finally:
+            kb.close()
+    except Exception as e:
+        logger.warning(f"[ContinuousWrite] 同步知识库失败: {e}")
+
+    return deleted
 
 
 @router.post("/continuous-write/import")
@@ -543,8 +638,8 @@ async def continue_continuous_write(request: ContinuousWriteContinueRequest):
     writer_key = _writer_key(project_id, session_id)
     lock = await _get_writer_lock(writer_key)
     async with lock:
+        session_store = get_session_store()
         if writer_key not in continuous_writers:
-            session_store = get_session_store()
             existing_session = await session_store.aload(session_id, project_id)
             
             if existing_session and existing_session.chapters:
@@ -567,11 +662,36 @@ async def continue_continuous_write(request: ContinuousWriteContinueRequest):
                 if pm.current_project_id:
                     _wire_character_manager(writer, pm)
 
+                _sync_writer_from_session(writer, existing_session)
                 continuous_writers[writer_key] = writer
             else:
                 raise HTTPException(status_code=404, detail="续写会话不存在，请先开始新故事")
         
         writer = continuous_writers[writer_key]
+
+        if not getattr(writer, "_written_chapters", None):
+            existing_session = await session_store.aload(session_id, project_id)
+            if existing_session and existing_session.chapters:
+                logger.info(
+                    f"[ContinuousWrite] 运行态会话为空，已从持久化存储恢复 {len(existing_session.chapters)} 章"
+                )
+                _sync_writer_from_session(writer, existing_session)
+            elif request.chapters:
+                logger.info(
+                    f"[ContinuousWrite] 运行态会话为空，已从客户端章节快照恢复 {len(request.chapters)} 章"
+                )
+                current_chapter = request.current_chapter
+                if current_chapter <= 0:
+                    current_chapter = max(
+                        [int(ch.get("chapter_number", 0) or 0) for ch in request.chapters if isinstance(ch, dict)]
+                        or [0]
+                    )
+                writer._apply_client_sync(request.chapters, current_chapter, [])
+            else:
+                return JSONResponse(
+                    {"success": False, "error": "未找到可续写的章节数据，请刷新页面或重新同步会话后再试。"},
+                    status_code=409,
+                )
 
         if request.model or request.api_config_id:
             model_config, model_to_use = resolve_continuous_write_model_config(
@@ -832,7 +952,12 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
     async with lock:
         if writer_key in continuous_writers:
             writer = continuous_writers[writer_key]
-            result = writer._apply_client_sync(request.chapters, request.current_chapter, deleted_numbers)
+            existing_numbers = _chapter_numbers_from_payload(writer.get_all_chapters())
+            effective_deleted_numbers = deleted_numbers
+            if not effective_deleted_numbers and not request.chapters and request.current_chapter <= 0:
+                effective_deleted_numbers = existing_numbers
+
+            result = writer._apply_client_sync(request.chapters, request.current_chapter, effective_deleted_numbers)
             await _refresh_infinite_memory(
                 project_id=project_id,
                 session_id=session_id,
@@ -840,6 +965,8 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
                 source_file="runtime_sync",
                 data_dir=pm.data_dir,
             )
+            if effective_deleted_numbers and not getattr(writer, "knowledge_base", None):
+                _delete_project_knowledge_chapters(project_id, pm.data_dir, effective_deleted_numbers)
             return JSONResponse(result)
     
     session_store = get_session_store()
@@ -847,6 +974,7 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
     if not state:
         state = SessionState(session_id=session_id, project_id=project_id)
     
+    existing_numbers = _chapter_numbers_from_payload(state.chapters)
     state.chapters = request.chapters
     if request.current_chapter > 0:
         state.current_chapter = request.current_chapter
@@ -855,6 +983,9 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
         if request.chapters:
             last_num = max([c.get("chapter_number", 0) for c in request.chapters if isinstance(c, dict)] or [0])
         state.current_chapter = last_num
+
+    if not request.chapters and state.current_chapter == 0:
+        _clear_continuous_write_session_memory(state)
     
     await session_store.asave(state)
     await _refresh_infinite_memory(
@@ -865,32 +996,21 @@ async def sync_continuous_write(request: ContinuousWriteSyncRequest):
         data_dir=pm.data_dir,
     )
     
-    # 清理被删除章节的知识库数据
-    if deleted_numbers and pm.current_project_id:
-        try:
-            from ...knowledge_base.data_layer.vector_store import CHROMA_AVAILABLE
-            from ...knowledge_runtime import create_project_knowledge_base, has_embedding_config, load_knowledge_base_settings
-            if CHROMA_AVAILABLE:
-                kb_settings = load_knowledge_base_settings(pm.data_dir)
-                if has_embedding_config(kb_settings):
-                    kb = create_project_knowledge_base(
-                        pm.current_project_id,
-                        data_dir=pm.data_dir,
-                        use_mock_embeddings=False,
-                    )
-                    for num in deleted_numbers:
-                        try:
-                            kb.delete_chapter(f"chapter_{num}")
-                        except Exception as e:
-                            logger.warning(f"[ContinuousWrite] 删除知识库章节失败: chapter_{num}, {e}")
-                    kb.close()
-        except Exception as e:
-            logger.warning(f"[ContinuousWrite] 同步知识库失败: {e}")
+    # 清理被删除章节的知识库数据；清空章节列表时，即使前端没带 deleted_chapters，也清理旧章节向量。
+    effective_deleted_numbers = deleted_numbers
+    if not effective_deleted_numbers and not request.chapters and state.current_chapter == 0:
+        effective_deleted_numbers = existing_numbers
+    deleted_knowledge_chapters = _delete_project_knowledge_chapters(
+        project_id,
+        pm.data_dir,
+        effective_deleted_numbers,
+    )
     
     return JSONResponse({
         "success": True,
         "message": "会话已同步",
-        "current_chapter": state.current_chapter
+        "current_chapter": state.current_chapter,
+        "deleted_knowledge_chapters": deleted_knowledge_chapters,
     })
 
 
@@ -1072,11 +1192,17 @@ async def delete_continuous_write_session(session_id: str = "default"):
     writer_key = _writer_key(project_id, session_id)
     lock = await _get_writer_lock(writer_key)
     async with lock:
+        deleted_chapter_numbers: List[int] = []
         if writer_key in continuous_writers:
+            writer = continuous_writers[writer_key]
+            deleted_chapter_numbers.extend(_chapter_numbers_from_payload(writer.get_all_chapters()))
             del continuous_writers[writer_key]
             deleted_memory = True
         
         session_store = get_session_store()
+        state = await session_store.aload(session_id, project_id)
+        if state:
+            deleted_chapter_numbers.extend(_chapter_numbers_from_payload(state.chapters))
         if await session_store.aexists(session_id, project_id):
             await session_store.adelete(session_id, project_id)
             deleted_storage = True
@@ -1084,6 +1210,12 @@ async def delete_continuous_write_session(session_id: str = "default"):
         if deleted_memory and not deleted_storage:
             # 仅内存态时，释放锁容器项
             _continuous_writer_locks.pop(writer_key, None)
+
+    deleted_knowledge_chapters = _delete_project_knowledge_chapters(
+        project_id,
+        pm.data_dir,
+        deleted_chapter_numbers,
+    )
 
     try:
         from ...novel_import_service import get_novel_import_service
@@ -1097,7 +1229,8 @@ async def delete_continuous_write_session(session_id: str = "default"):
             "success": True,
             "message": "会话已删除",
             "deleted_from_memory": deleted_memory,
-            "deleted_from_storage": deleted_storage
+            "deleted_from_storage": deleted_storage,
+            "deleted_knowledge_chapters": deleted_knowledge_chapters
         })
     
     return JSONResponse({"success": False, "message": "会话不存在"})

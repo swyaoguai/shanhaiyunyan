@@ -215,12 +215,22 @@ async function loadAgentList() {
  */
 function getAgentIcon(agentName) {
     const icons = {
+        'router': 'ri-route-line',
+        'Router': 'ri-route-line',
+        'communicator': 'ri-chat-3-line',
         'worldbuilder': 'ri-earth-line',
         'outliner': 'ri-file-list-3-line',
+        'CharacterBuilder': 'ri-user-star-line',
+        'EventlineBuilder': 'ri-route-line',
+        'DetailOutlineBuilder': 'ri-node-tree',
+        'ChapterSettingBuilder': 'ri-book-open-line',
+        'short_story': 'ri-draft-line',
         'chapter_writer': 'ri-quill-pen-line',
         'polisher': 'ri-magic-line',
         'evaluator': 'ri-checkbox-circle-line',
         'continuous_writer': 'ri-infinity-line',
+        'ContentExpansion': 'ri-text-spacing',
+        'SummaryOrchestrator': 'ri-list-ordered',
         'copilot': 'ri-sparkling-fill'
     };
     return icons[agentName] || 'ri-robot-line';
@@ -347,11 +357,9 @@ function renderSystemPromptTab(systemPrompt, agentType, isCustom) {
                     ${isCustom ? '<span style="color: #f59e0b; margin-left: 8px;">✎ 已自定义</span>' : ''}
                 </label>
                 <div style="display: flex; gap: 8px;">
-                    ${isCustom ? `
-                        <button id="reset-system-prompt" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
-                            <i class="ri-arrow-go-back-line"></i> 恢复默认
-                        </button>
-                    ` : ''}
+                    <button id="reset-system-prompt" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                        <i class="ri-arrow-go-back-line"></i> 恢复默认提示词
+                    </button>
                     <button id="save-system-prompt" style="padding: 6px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;">
                         <i class="ri-save-line"></i> 保存
                     </button>
@@ -379,14 +387,24 @@ function renderTasksPromptTab(tasks, agentType, hasCustomMap) {
                 <p style="margin-top: 16px;">该Agent没有定义任务提示词</p>
             </div>
         `
-        : taskList.map(task => `
+        : taskList.map(task => {
+            const hasDefault = task.has_default !== false;
+            const hasCustom = Boolean(hasCustomMap && hasCustomMap[task.name]);
+            const resetButton = hasDefault || hasCustom
+                ? `
+                    <button class="reset-task-btn" data-reset-label="${hasDefault ? '恢复默认提示词' : '删除自定义提示词'}" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                        <i class="ri-arrow-go-back-line"></i> ${hasDefault ? '恢复默认提示词' : '删除自定义提示词'}
+                    </button>
+                `
+                : '';
+            return `
             <div class="task-prompt-card" data-task="${escapeAttributeValue(task.name)}"
                 style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden;">
                 <div style="padding: 14px 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleTaskCard(this)">
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <i class="ri-arrow-right-s-line task-arrow" style="transition: transform 0.2s;"></i>
                         <span style="font-weight: 500; color: var(--text-primary);">${escapeHtml(task.display_name || task.name)}</span>
-                        ${hasCustomMap && hasCustomMap[task.name] ? '<span style="color: #f59e0b; font-size: 11px; margin-left: 8px;">✎ 已自定义</span>' : ''}
+                        ${hasCustom ? '<span style="color: #f59e0b; font-size: 11px; margin-left: 8px;">✎ 已自定义</span>' : ''}
                     </div>
                     <span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(task.description || '')}</span>
                 </div>
@@ -395,23 +413,20 @@ function renderTasksPromptTab(tasks, agentType, hasCustomMap) {
                         style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 12px; color: var(--text-primary); border-radius: 6px; font-size: 13px; line-height: 1.5; resize: vertical; font-family: 'Consolas', 'Monaco', monospace;"
                         placeholder="输入任务提示词...">${escapeHtml(task.prompt || '')}</textarea>
                     <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
-                        ${hasCustomMap && hasCustomMap[task.name] ? `
-                            <button class="reset-task-btn" style="padding: 6px 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; border-radius: 6px; cursor: pointer; font-size: 12px;">
-                                <i class="ri-arrow-go-back-line"></i> 恢复默认
-                            </button>
-                        ` : ''}
+                        ${resetButton}
                         <button class="save-task-btn" style="padding: 6px 16px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;">
                             <i class="ri-save-line"></i> 保存
                         </button>
                     </div>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
 
     return `
         <div style="display: flex; flex-direction: column; gap: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
-                <div style="font-size: 13px; color: var(--text-secondary);">自定义任务提示词</div>
+                <div style="font-size: 13px; color: var(--text-secondary);">任务提示词</div>
                 <button id="add-task-prompt-btn" style="padding: 8px 14px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap;">
                     <i class="ri-add-line"></i> 新增任务提示词
                 </button>
@@ -499,7 +514,7 @@ function bindSystemPromptEvents(agentType) {
             } catch (e) {
                 showToast('恢复失败: ' + e.message, 'error');
             } finally {
-                resetBtn.innerHTML = '<i class="ri-arrow-go-back-line"></i> 恢复默认';
+                resetBtn.innerHTML = '<i class="ri-arrow-go-back-line"></i> 恢复默认提示词';
                 resetBtn.disabled = false;
             }
         });
@@ -552,7 +567,12 @@ function bindTasksPromptEvents(agentType, tasks) {
         
         if (resetBtn) {
             resetBtn.addEventListener('click', async () => {
-                if (!(await window.showConfirmDialog(`确定要恢复默认提示词「${taskName}」吗？\n\n您的自定义修改将被删除。`))) {
+                const resetLabel = resetBtn.dataset.resetLabel || '恢复默认提示词';
+                const isRestore = resetLabel.includes('恢复');
+                const confirmText = isRestore
+                    ? `确定要恢复默认提示词「${taskName}」吗？\n\n您的自定义修改将被删除。`
+                    : `确定要删除自定义提示词「${taskName}」吗？`;
+                if (!(await window.showConfirmDialog(confirmText))) {
                     return;
                 }
                 
@@ -566,7 +586,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                     const data = await response.json();
                     
                     if (data.success) {
-                        showToast(`已恢复默认提示词「${taskName}」`);
+                        showToast(isRestore ? `已恢复默认提示词「${taskName}」` : `已删除自定义提示词「${taskName}」`);
                         loadAgentPrompts(agentType);
                     } else {
                         throw new Error(data.error || '恢复失败');
@@ -574,7 +594,7 @@ function bindTasksPromptEvents(agentType, tasks) {
                 } catch (e) {
                     showToast('恢复失败: ' + e.message, 'error');
                 } finally {
-                    resetBtn.innerHTML = '<i class="ri-arrow-go-back-line"></i> 恢复默认';
+                    resetBtn.innerHTML = `<i class="ri-arrow-go-back-line"></i> ${resetLabel}`;
                     resetBtn.disabled = false;
                 }
             });
@@ -674,12 +694,20 @@ function showAddTaskPromptDialog(agentType) {
  */
 function getAgentDisplayName(agentType) {
     const names = {
-        'worldbuilder': '世界观构建器',
-        'outliner': '大纲生成器',
-        'chapter_writer': '章节写作器',
-        'polisher': '内容润色器',
-        'evaluator': '质量评估器',
-        'continuous_writer': '无限续写器',
+        'communicator': '创作沟通助手',
+        'worldbuilder': '世界观设定师',
+        'outliner': '全书大纲规划师',
+        'CharacterBuilder': '角色构建师',
+        'EventlineBuilder': '事件线构建师',
+        'DetailOutlineBuilder': '细纲构建师',
+        'ChapterSettingBuilder': '章纲设定师',
+        'short_story': '短篇创作流程',
+        'chapter_writer': '章节正文写手',
+        'polisher': '正文润色师',
+        'evaluator': '质检评估师',
+        'continuous_writer': '无限续写正文写手',
+        'ContentExpansion': '正文扩写师',
+        'SummaryOrchestrator': '摘要编排器',
         'copilot': '山海·云烟创作助手'
     };
     return names[agentType] || agentType;

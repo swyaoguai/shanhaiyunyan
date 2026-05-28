@@ -46,27 +46,27 @@ AUTO_TOOL_PATTERNS = {
 _USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
     "Worldbuilder那边": "后续世界观设定流程这边",
     "WorldBuilder那边": "后续世界观设定流程这边",
-    "WorldbuilderAgent": "世界观构建师",
-    "WorldBuilderAgent": "世界观构建师",
-    "Worldbuilder": "世界观构建师",
-    "WorldBuilder": "世界观构建师",
-    "OutlinerAgent": "大纲规划师",
-    "Outliner": "大纲规划师",
-    "ChapterWriter": "章节写作助手",
-    "Communicator": "沟通助手",
+    "WorldbuilderAgent": "世界观设定师",
+    "WorldBuilderAgent": "世界观设定师",
+    "Worldbuilder": "世界观设定师",
+    "WorldBuilder": "世界观设定师",
+    "OutlinerAgent": "全书大纲规划师",
+    "Outliner": "全书大纲规划师",
+    "ChapterWriter": "章节正文写手",
+    "Communicator": "创作沟通助手",
     "Coordinator": "创作协调器",
     "Router": "智能路由",
     "CharacterBuilder": "角色构建师",
     "EventlineBuilder": "事件线构建师",
     "DetailOutlineBuilder": "细纲构建师",
-    "ChapterSettingBuilder": "章纲构建师",
-    "ContinuousWriter": "续写助手",
-    "Polisher": "润色助手",
-    "Evaluator": "质量评估师",
-    "SummaryOrchestrator": "摘要编排助手",
+    "ChapterSettingBuilder": "章纲设定师",
+    "ContinuousWriter": "无限续写正文写手",
+    "Polisher": "正文润色师",
+    "Evaluator": "质检评估师",
+    "SummaryOrchestrator": "摘要编排师",
     "ContextStrategy": "上下文策略助手",
     "ContentReader": "内容读取助手",
-    "ContentExpansion": "内容扩展助手",
+    "ContentExpansion": "正文扩写师",
     "FileNaming": "文件命名助手",
     "WebSearch": "网络搜索助手",
     "TrendsSearch": "热点搜索助手",
@@ -720,15 +720,19 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
             
             try:
                 results = await self.web_search(query, limit=5)
-                return {
+                payload = {
                     "success": True,
                     "tool": "web_search",
                     "query": query,
                     "data": results
                 }
+                self._record_auto_tool_usage("web_search", {"query": query, "limit": 5}, payload, True)
+                return payload
             except Exception as e:
                 logger.warning(f"[{self.name}] 自动网络搜索失败: {e}")
-                return {"success": False, "tool": "web_search", "error": str(e)}
+                payload = {"success": False, "tool": "web_search", "error": str(e)}
+                self._record_auto_tool_usage("web_search", {"query": query, "limit": 5}, payload, False)
+                return payload
         
         # 检查热点搜索模式（保留简单正则匹配）
         for pattern in AUTO_TOOL_PATTERNS.get("trends_search", []):
@@ -738,17 +742,39 @@ class CommunicatorAgent(BaseAgent, KnowledgeBaseMixin):
                 
                 try:
                     trends = await self.search_trends(platform, limit=10)
-                    return {
+                    payload = {
                         "success": True,
                         "tool": "trends_search",
                         "platform": platform,
                         "data": trends
                     }
+                    self._record_auto_tool_usage("trends_search", {"platform": platform, "limit": 10}, payload, True)
+                    return payload
                 except Exception as e:
                     logger.warning(f"[{self.name}] 自动热点搜索失败: {e}")
-                    return {"success": False, "tool": "trends_search", "error": str(e)}
+                    payload = {"success": False, "tool": "trends_search", "error": str(e)}
+                    self._record_auto_tool_usage("trends_search", {"platform": platform, "limit": 10}, payload, False)
+                    return payload
         
         return None
+
+    def _record_auto_tool_usage(self, tool_name: str, args: Dict[str, Any], result: Dict[str, Any], success: bool) -> None:
+        try:
+            from ..utils.token_stats import estimate_tokens_from_text, record_token_usage
+
+            payload_in = json.dumps({"tool": tool_name, "args": args}, ensure_ascii=False, default=str)
+            payload_out = json.dumps(result or {}, ensure_ascii=False, default=str)
+            record_token_usage(
+                agent_name=self.name,
+                model=tool_name,
+                tokens_in=estimate_tokens_from_text(payload_in),
+                tokens_out=estimate_tokens_from_text(payload_out),
+                success=bool(success),
+                method=f"tool_call:{tool_name}",
+                duration=0,
+            )
+        except Exception as exc:
+            logger.debug(f"[{self.name}] record auto tool usage skipped: {exc}")
     
     async def _retrieve_knowledge_context(self, message: str) -> List[Dict[str, Any]]:
         """

@@ -18,7 +18,9 @@
     const HIDDEN_BODY_HEADINGS = new Set([
         'id', 'uuid', 'slug', 'thread_id', 'thread_title', 'thread_type',
         'created_at', 'updated_at', 'created', 'updated', 'metadata',
-        'source', 'sources', 'raw', 'raw_data', 'status', 'name'
+        'source', 'sources', 'source_mode', 'source_type', 'source_session_id',
+        'sync_source', 'content_hash', 'synced_at', 'raw', 'raw_data', 'status',
+        'name', 'file_path', 'path'
     ]);
     const TYPE_LABELS = {
         character: '角色',
@@ -57,8 +59,12 @@
         description: '简介',
         summary: '摘要',
         conflict: '冲突',
+        conflicts: '冲突',
         goal: '目标',
         goals: '目标',
+        novel_title: '作品名',
+        selling_points: '看点',
+        volumes: '分卷计划',
         participants: '相关角色',
         key_events: '关键事件',
         appearing_characters: '出场角色',
@@ -69,6 +75,17 @@
         abilities: '技能/能力',
         inventory: '持有物/道具',
         development_history: '成长记录',
+    };
+    const BODY_VALUE_LABELS = {
+        title: '标题',
+        name: '名称',
+        description: '说明',
+        summary: '摘要',
+        content: '内容',
+        goal: '目标',
+        theme: '主题',
+        volume_number: '卷数',
+        chapters: '章节',
     };
     const GRAPH_CATEGORIES = {
         all: { label: '全部', color: '#8aa4ff' },
@@ -749,6 +766,11 @@
     }
 
     function renderGraphNodes(nodes, layout) {
+        const rankedIds = new Set(nodes
+            .slice()
+            .sort((a, b) => Number(b.degree || 0) - Number(a.degree || 0))
+            .slice(0, 18)
+            .map(node => node.id));
         return nodes.map(node => {
             const pos = layout.get(node.id);
             if (!pos) return '';
@@ -756,6 +778,7 @@
             const meta = GRAPH_CATEGORIES[category] || GRAPH_CATEGORIES.clue;
             const active = wikiState.selectedGraphNode === node.id;
             const size = Math.max(42, Math.min(70, 42 + Number(node.degree || 0) * 4));
+            const showLabel = active || rankedIds.has(node.id) || Number(node.degree || 0) >= 2;
             return `
                 <div data-wiki-graph-node="${escapeAttributeValue(node.id)}"
                     oncontextmenu="WikiModule.openGraphNodeMenu(event, '${escapeJsString(node.id)}')"
@@ -765,7 +788,7 @@
                         style="width: ${size}px; height: ${size}px; border-radius: 999px; border: ${active ? '3px' : '2px'} solid ${active ? '#ffffff' : meta.color};
                         background: ${meta.color}; box-shadow: ${active ? `0 0 0 8px ${meta.color}33` : `0 10px 24px ${meta.color}22`};
                         cursor: pointer; color: white;"></button>
-                    <div style="max-width: 104px; margin-top: 6px; color: var(--text-primary, #fff); font-size: 12px; font-weight: 650; line-height: 1.25; text-shadow: 0 2px 8px rgba(0,0,0,0.45);">
+                    <div style="display: ${showLabel ? 'block' : 'none'}; max-width: 112px; margin-top: 6px; color: var(--text-primary, #fff); font-size: 12px; font-weight: 650; line-height: 1.25; text-shadow: 0 2px 8px rgba(0,0,0,0.45); word-break: break-word;">
                         ${escapeHtml(node.label || node.id)}
                     </div>
                 </div>
@@ -1184,19 +1207,112 @@
         return getPageTypeLabel(tag) !== tag ? getPageTypeLabel(tag) : String(tag || '');
     }
 
+    function decodeHtmlEntities(text) {
+        return String(text || '')
+            .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+                const codePoint = parseInt(hex, 16);
+                return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+                    ? String.fromCodePoint(codePoint)
+                    : _;
+            })
+            .replace(/&#(\d+);/g, (_, decimal) => {
+                const codePoint = parseInt(decimal, 10);
+                return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+                    ? String.fromCodePoint(codePoint)
+                    : _;
+            })
+            .replace(/&quot;/g, '"')
+            .replace(/&apos;|&#39;/g, "'")
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&');
+    }
+
+    function parseLooseStructuredValue(text) {
+        const trimmed = String(text || '').trim();
+        if (!/^[\[{]/.test(trimmed)) return null;
+
+        try {
+            return JSON.parse(trimmed);
+        } catch (_) {
+            // Fall through to the Python-repr-like format emitted by some older generators.
+        }
+
+        try {
+            const jsonish = trimmed
+                .replace(/\bNone\b/g, 'null')
+                .replace(/\bTrue\b/g, 'true')
+                .replace(/\bFalse\b/g, 'false')
+                .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, value) => (
+                    JSON.stringify(String(value).replace(/\\'/g, "'"))
+                ));
+            return JSON.parse(jsonish);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function compactWikiValue(value) {
+        if (Array.isArray(value)) {
+            return value.map(compactWikiValue).filter(Boolean).join('、');
+        }
+        if (value && typeof value === 'object') {
+            return Object.entries(value)
+                .filter(([, item]) => item !== null && item !== undefined && String(item).trim() !== '')
+                .map(([key, item]) => `${BODY_VALUE_LABELS[normalizeKey(key)] || key}：${compactWikiValue(item)}`)
+                .join('；');
+        }
+        return String(value ?? '').trim();
+    }
+
+    function formatWikiStructuredLine(line, sectionKey) {
+        const parsed = parseLooseStructuredValue(line);
+        if (parsed === null) return line;
+
+        const rows = Array.isArray(parsed) ? parsed : [parsed];
+        if (!rows.length) return '';
+
+        return rows.map((row, index) => {
+            if (row && typeof row === 'object' && !Array.isArray(row)) {
+                const title = String(
+                    row.title || row.name || row.volume_title || row.label || (
+                        sectionKey === 'volumes' && row.volume_number
+                            ? `第${row.volume_number}卷`
+                            : ''
+                    ) || ''
+                ).trim();
+                const details = Object.entries(row)
+                    .filter(([key, value]) => {
+                        const normalized = normalizeKey(key);
+                        return !['title', 'name', 'volume_title', 'label'].includes(normalized)
+                            && value !== null
+                            && value !== undefined
+                            && String(value).trim() !== '';
+                    })
+                    .map(([key, value]) => `${BODY_VALUE_LABELS[normalizeKey(key)] || key}：${compactWikiValue(value)}`)
+                    .join('；');
+                const fallbackTitle = sectionKey === 'volumes' ? `第${index + 1}卷` : '';
+                return `- ${title || fallbackTitle || details}${title || fallbackTitle ? (details ? `：${details}` : '') : ''}`;
+            }
+            const text = compactWikiValue(row);
+            return text ? `- ${text}` : '';
+        }).filter(Boolean).join('\n');
+    }
+
     function cleanWikiBodyForReading(page) {
         const title = normalizeText(page?.title || '');
-        const body = String(page?.body || '').replace(/\r\n/g, '\n');
+        const body = decodeHtmlEntities(page?.body || '').replace(/\r\n/g, '\n');
         const lines = body.split('\n');
         const result = [];
         let skipping = false;
         let skipLevel = 0;
+        let activeSectionKey = '';
 
         for (const line of lines) {
             const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
             if (heading) {
                 const level = heading[1].length;
-                const rawLabel = stripMarkdown(heading[2]).trim();
+                const rawLabel = decodeHtmlEntities(stripMarkdown(heading[2])).trim();
                 const key = normalizeKey(rawLabel);
                 const isDuplicateTitle = level === 1 && normalizeText(rawLabel) === title;
                 const shouldHide = HIDDEN_BODY_HEADINGS.has(key) || isDuplicateTitle;
@@ -1204,6 +1320,7 @@
                 if (shouldHide) {
                     skipping = true;
                     skipLevel = level;
+                    activeSectionKey = '';
                     continue;
                 }
                 if (skipping && level <= skipLevel) {
@@ -1211,12 +1328,13 @@
                 }
                 if (!skipping) {
                     result.push(`${heading[1]} ${BODY_HEADING_LABELS[key] || rawLabel}`);
+                    activeSectionKey = key;
                 }
                 continue;
             }
 
             if (skipping) continue;
-            result.push(line);
+            result.push(formatWikiStructuredLine(decodeHtmlEntities(line), activeSectionKey));
         }
 
         return result.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -1431,6 +1549,7 @@
         deletePage,
         __test: {
             cleanWikiBodyForReading,
+            decodeHtmlEntities,
             getPageTypeLabel,
             getPageSourceMode,
             getGraphCategory,

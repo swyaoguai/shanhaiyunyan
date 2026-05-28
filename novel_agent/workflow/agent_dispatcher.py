@@ -28,6 +28,7 @@ from .runtime_state import RuntimeStateStore
 from .task_pool import TaskPool, TaskStatus
 from .contracts import TaskDefinition
 from .workflow_context import AgentHandoff
+from .collab_run_state import CollabRunStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class AgentDispatcher:
         allow_ephemeral_agent_provider: Optional[Callable[[], bool]] = None,
         ephemeral_agent_factory: Optional[Callable[[Any, str], Any]] = None,
         runtime_state_store: Optional[RuntimeStateStore] = None,
+        collab_run_state_store: Optional[CollabRunStateStore] = None,
     ) -> None:
         self.routing_policy = routing_policy
         self.capability_registry_provider = capability_registry_provider
@@ -122,6 +124,7 @@ class AgentDispatcher:
         self.allow_ephemeral_agent_provider = allow_ephemeral_agent_provider or (lambda: False)
         self.ephemeral_agent_factory = ephemeral_agent_factory
         self.runtime_state_store = runtime_state_store
+        self.collab_run_state_store = collab_run_state_store
         # 13.5 批量写入：延迟持久化缓存
         self._deferred_events: List[Dict[str, Any]] = []
         self._deferred_snapshots: List[Dict[str, Any]] = []
@@ -136,6 +139,113 @@ class AgentDispatcher:
 
     def _get_project_dir(self) -> Path:
         return Path(self.project_dir_provider())
+
+    def _ensure_run_state(self) -> None:
+        if self.collab_run_state_store is None:
+            return
+        try:
+            self.collab_run_state_store.ensure_run(status="running")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] ensure collab run state failed: {exc}")
+
+    def _append_run_runtime_event(self, runtime_event: Dict[str, Any]) -> None:
+        if self.collab_run_state_store is None or not isinstance(runtime_event, dict):
+            return
+        try:
+            self.collab_run_state_store.append_runtime_event(runtime_event)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] append collab runtime event failed: {exc}")
+
+    def _record_run_checkpoint(
+        self,
+        *,
+        node: str,
+        status: str,
+        task_id: str = "",
+        task_type: str = "",
+        agent_name: str = "",
+        context: Optional[Dict[str, Any]] = None,
+        task_pool: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self.collab_run_state_store is None:
+            return
+        try:
+            self.collab_run_state_store.record_checkpoint(
+                node=node,
+                status=status,
+                task_id=task_id,
+                task_type=task_type,
+                agent_name=agent_name,
+                context=context,
+                task_pool=task_pool,
+                metadata=metadata,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] record collab checkpoint failed: {exc}")
+
+    def _merge_run_context_overlay(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        if self.collab_run_state_store is None:
+            return dict(context or {})
+        try:
+            return self.collab_run_state_store.merge_context_overlay(context)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] merge collab shared memory failed: {exc}")
+            return dict(context or {})
+
+    def _append_run_handoff(self, handoff: Dict[str, Any]) -> None:
+        if self.collab_run_state_store is None:
+            return
+        try:
+            self.collab_run_state_store.append_handoff(handoff)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] append collab handoff failed: {exc}")
+
+    def _append_run_artifact(
+        self,
+        *,
+        task_id: str,
+        task_type: str,
+        agent_name: str,
+        artifact_refs: List[str],
+        result_keys: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self.collab_run_state_store is None:
+            return
+        try:
+            self.collab_run_state_store.append_artifact(
+                task_id=task_id,
+                task_type=task_type,
+                agent_name=agent_name,
+                artifact_refs=artifact_refs,
+                result_keys=result_keys,
+                metadata=metadata,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] append collab artifact failed: {exc}")
+
+    def _sync_run_memory(
+        self,
+        *,
+        context: Dict[str, Any],
+        task_id: str,
+        task_type: str,
+        agent_name: str,
+        context_delta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self.collab_run_state_store is None:
+            return
+        try:
+            self.collab_run_state_store.upsert_memory_from_context(
+                context=context,
+                task_id=task_id,
+                task_type=task_type,
+                agent_name=agent_name,
+                context_delta=context_delta,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[AgentDispatcher] sync collab shared memory failed: {exc}")
 
     @staticmethod
     def _unique_strings(values: List[Any]) -> List[str]:
@@ -218,6 +328,7 @@ class AgentDispatcher:
         trace["updated_at"] = event_payload["timestamp"]
         project_manager.save_project_state("collab_execution_trace", trace)
         RuntimeEventLog(self._get_project_dir()).safe_append_event(runtime_event)
+        self._append_run_runtime_event(runtime_event)
         return trace
 
     def _prepare_execution_payload(
@@ -507,8 +618,10 @@ class AgentDispatcher:
             return
         if defer_persist:
             self._deferred_handoffs.append(dict(handoff))
+            self._append_run_handoff(handoff)
             return
         self._append_state_item("collab_handoffs", handoff, max_items=300)
+        self._append_run_handoff(handoff)
 
     @staticmethod
     def _extract_artifact_refs(task: TaskDefinition, result: Dict[str, Any]) -> List[str]:
@@ -789,6 +902,10 @@ class AgentDispatcher:
                 for event in flushed_events
                 if isinstance(event.get("runtime_event"), dict)
             )
+            for event in flushed_events:
+                runtime_event = event.get("runtime_event") if isinstance(event, dict) else None
+                if isinstance(runtime_event, dict):
+                    self._append_run_runtime_event(runtime_event)
             self._deferred_events.clear()
 
     async def dispatch(
@@ -802,6 +919,11 @@ class AgentDispatcher:
         fallback_agent: Any = None,
         defer_persist: bool = False,
     ) -> DispatchResult:
+        self._ensure_run_state()
+        envelope.context = CollabExecutionContext.from_legacy_context(
+            self._merge_run_context_overlay(envelope.context.to_dict()),
+            stage=envelope.stage,
+        )
         fallback_agent_name = str(
             envelope.fallback_agent_name or getattr(fallback_agent, "name", "") or ""
         ).strip()
@@ -824,6 +946,19 @@ class AgentDispatcher:
                 "source_of_truth_summary": source_of_truth_summary,
             },
             defer_persist=defer_persist,
+        )
+        self._record_run_checkpoint(
+            node="route_start",
+            status="running",
+            task_id=runtime_task.task_id,
+            task_type=envelope.task_type,
+            context=envelope.context.to_dict(),
+            task_pool=runtime_pool.to_dict(),
+            metadata={
+                "title": envelope.title,
+                "required_context_keys": required_context_keys,
+                "missing_context_keys": missing_context_keys,
+            },
         )
         await self._run_runtime_hooks(
             "before_route",
@@ -1017,6 +1152,21 @@ class AgentDispatcher:
             },
             defer_persist=defer_persist,
         )
+        self._record_run_checkpoint(
+            node="route_end",
+            status="running",
+            task_id=runtime_task.task_id,
+            task_type=envelope.task_type,
+            agent_name=selected_agent_name,
+            context=envelope.context.to_dict(),
+            task_pool=runtime_pool.to_dict(),
+            metadata={
+                "candidate_agents": candidate_names,
+                "candidate_source": candidate_source,
+                "route_reason": route_reason,
+                "context_snapshot_id": context_snapshot_id,
+            },
+        )
         await self._run_runtime_hooks(
             "after_route",
             {
@@ -1104,6 +1254,20 @@ class AgentDispatcher:
             })
         else:
             self._append_execution_event("task_started", _task_started_event)
+        self._record_run_checkpoint(
+            node="task_start",
+            status="running",
+            task_id=runtime_task.task_id,
+            task_type=envelope.task_type,
+            agent_name=claimed_by,
+            context=envelope.context.to_dict(),
+            task_pool=runtime_pool.to_dict(),
+            metadata={
+                "context_snapshot_id": context_snapshot_id,
+                "candidate_source": candidate_source,
+                "route_reason": route_reason,
+            },
+        )
 
         await self.notify_progress(
             {
@@ -1276,6 +1440,7 @@ class AgentDispatcher:
 
             artifact_refs = self._extract_artifact_refs(task, result)
             if artifact_refs or isinstance(result, dict):
+                result_keys = sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else []
                 self._emit_execution_event(
                     "artifact_created",
                     {
@@ -1284,9 +1449,17 @@ class AgentDispatcher:
                         "assigned_agent": claimed_by,
                         "context_snapshot_id": context_snapshot_id,
                         "artifact_refs": artifact_refs,
-                        "result_keys": sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else [],
+                        "result_keys": result_keys,
                     },
                     defer_persist=defer_persist,
+                )
+                self._append_run_artifact(
+                    task_id=runtime_task.task_id,
+                    task_type=envelope.task_type,
+                    agent_name=claimed_by,
+                    artifact_refs=artifact_refs,
+                    result_keys=result_keys,
+                    metadata={"context_snapshot_id": context_snapshot_id},
                 )
 
             before_context = current_context.to_dict()
@@ -1299,6 +1472,13 @@ class AgentDispatcher:
                 agent_name=claimed_by,
             ).to_dict()
             self._persist_context_delta(context_delta_payload, defer_persist=defer_persist)
+            self._sync_run_memory(
+                context=current_context.to_dict(),
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                context_delta=context_delta_payload,
+            )
             self._emit_execution_event(
                 "context_delta_created",
                 {
@@ -1410,6 +1590,21 @@ class AgentDispatcher:
                 })
             else:
                 self._append_execution_event("task_completed", _task_completed_event)
+            self._record_run_checkpoint(
+                node="task_end",
+                status="completed",
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                context=current_context.to_dict(),
+                task_pool=runtime_pool.to_dict(),
+                metadata={
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "fallback_used": fallback_used,
+                },
+            )
             await self.notify_progress(
                 {
                     "type": "sub_agent_completed",
@@ -1465,6 +1660,20 @@ class AgentDispatcher:
                     "current_model": selected_model,
                     "active_model": selected_model,
                     "model_used": selected_model,
+                },
+            )
+            self._record_run_checkpoint(
+                node="task_failed",
+                status="failed",
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=claimed_by,
+                context=current_context.to_dict(),
+                task_pool=runtime_pool.to_dict(),
+                metadata={
+                    "error": autonomous_error,
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
                 },
             )
             await self.notify_progress(
@@ -1676,6 +1885,7 @@ class AgentDispatcher:
 
             artifact_refs = self._extract_artifact_refs(retry_task, result)
             if artifact_refs or isinstance(result, dict):
+                result_keys = sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else []
                 self._emit_execution_event(
                     "artifact_created",
                     {
@@ -1685,9 +1895,17 @@ class AgentDispatcher:
                         "fallback_used": True,
                         "context_snapshot_id": context_snapshot_id,
                         "artifact_refs": artifact_refs,
-                        "result_keys": sorted(str(key) for key in (result or {}).keys()) if isinstance(result, dict) else [],
+                        "result_keys": result_keys,
                     },
                     defer_persist=defer_persist,
+                )
+                self._append_run_artifact(
+                    task_id=runtime_task.task_id,
+                    task_type=envelope.task_type,
+                    agent_name=retry_claimed_by,
+                    artifact_refs=artifact_refs,
+                    result_keys=result_keys,
+                    metadata={"context_snapshot_id": context_snapshot_id, "fallback_used": True},
                 )
 
             current_context = envelope.context.clone()
@@ -1701,6 +1919,13 @@ class AgentDispatcher:
                 agent_name=retry_claimed_by,
             ).to_dict()
             self._persist_context_delta(context_delta_payload, defer_persist=defer_persist)
+            self._sync_run_memory(
+                context=current_context.to_dict(),
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=retry_claimed_by,
+                context_delta=context_delta_payload,
+            )
             self._emit_execution_event(
                 "context_delta_created",
                 {
@@ -1802,6 +2027,22 @@ class AgentDispatcher:
                     "model_used": retry_model,
                 },
             )
+            self._record_run_checkpoint(
+                node="task_end",
+                status="completed",
+                task_id=runtime_task.task_id,
+                task_type=envelope.task_type,
+                agent_name=retry_claimed_by,
+                context=current_context.to_dict(),
+                task_pool=runtime_pool.to_dict(),
+                metadata={
+                    "context_snapshot_id": context_snapshot_id,
+                    "output_validation": output_validation,
+                    "context_delta_id": context_delta_payload.get("delta_id", ""),
+                    "fallback_used": True,
+                    "fallback_from": claimed_by,
+                },
+            )
             claimed_by = retry_claimed_by
 
         if ephemeral_agent_name:
@@ -1846,6 +2087,7 @@ class AgentDispatcher:
         from .contracts import TaskDefinition
         from .execution_context import CollabExecutionContext, TaskExecutionEnvelope
 
+        self._ensure_run_state()
         task_pool = TaskPool()
         task = task_pool.create_task(
             task_type=task_type,
@@ -2066,9 +2308,18 @@ class AgentDispatcher:
         13.5 修复：使用 defer_persist=True 延迟持久化，循环结束后统一刷盘，
         将每章 30+ 次磁盘 IO 降低到 1 次批量写入。
         """
+        self._ensure_run_state()
         working_context = dict(base_context or {})
         execution_results: Dict[str, Dict[str, Any]] = {}
         loop_guard = 0
+        self._record_run_checkpoint(
+            node="chapter_market_start",
+            status="running",
+            task_type="chapter_market",
+            context=working_context,
+            task_pool=task_pool.to_dict(),
+            metadata={"chapter_number": chapter_num},
+        )
 
         while True:
             ready_tasks = task_pool.get_ready_tasks()
@@ -2195,6 +2446,17 @@ class AgentDispatcher:
         # 13.5 修复：循环结束后统一持久化任务池状态和缓存的事件/快照
         self.save_runtime_task_pool(task_pool)
         self.flush_deferred_persistence()
+        self._record_run_checkpoint(
+            node="chapter_market_end",
+            status="completed",
+            task_type="chapter_market",
+            context=working_context,
+            task_pool=task_pool.to_dict(),
+            metadata={
+                "chapter_number": chapter_num,
+                "result_keys": sorted(execution_results.keys()),
+            },
+        )
 
         return {
             "task_pool": task_pool.to_dict(),

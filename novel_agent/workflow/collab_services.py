@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..agents.base_agent import AgentCapability
+from ..agents.enhanced_prompts import AGENT_COORDINATION_PROTOCOL
 from .context_bundle import load_confirmed_context_bundles_from_project_dir
 
 CallbackHandler = Callable[[Dict[str, Any]], Awaitable[Optional[Any]]]
@@ -241,13 +242,15 @@ class ContentExpansionService(BaseCollabService):
         system_prompt = (
             "你是一位专业的小说扩写编辑。你的任务是在不改变原文结构和情节走向的前提下，"
             "对给定的章节内容进行扩写，使其达到目标字数。\n"
+            f"{AGENT_COORDINATION_PROTOCOL}\n"
             "扩写要求：\n"
             "1. 保持原文的叙事风格和节奏\n"
             "2. 补充场景细节、人物心理、环境描写\n"
             "3. 增强对话的自然感和信息量\n"
             "4. 不要添加与大纲无关的新情节\n"
             "5. 不要使用省略号、破折号等标点符号过度\n"
-            "6. 直接输出扩写后的完整章节内容，不要添加任何解释或标注"
+            "6. 不要把系统进度、Agent 名称、交接字段、保存状态或错误提示写入正文\n"
+            "7. 直接输出扩写后的完整章节内容，不要添加任何解释或标注"
         )
         user_prompt = (
             f"章节标题：{chapter_title}\n"
@@ -329,13 +332,15 @@ class SummaryService(BaseCollabService):
 
         system_prompt = (
             "你是一位专业的小说剧情分析师。请对以下章节内容进行总结，生成一份简洁的剧情梗概。\n"
+            f"{AGENT_COORDINATION_PROTOCOL}\n"
             "总结要求：\n"
             "1. 提炼每章的核心剧情事件和转折点\n"
             "2. 标注主要人物的行动和变化\n"
             "3. 指出伏笔、悬念和未解之谜\n"
             "4. 保持客观叙述，不添加个人评价\n"
             "5. 每章总结控制在100-200字\n"
-            "6. 最后给出整体剧情走向的简要分析"
+            "6. 最后给出整体剧情走向的简要分析\n"
+            "7. 只总结正文事实，不把系统进度、Agent 名称、任务日志或保存状态写成剧情"
         )
         user_prompt = (
             f"请总结第{start_chapter}章到第{end_chapter}章的剧情：\n\n"

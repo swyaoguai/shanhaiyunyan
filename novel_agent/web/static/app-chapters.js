@@ -8,6 +8,51 @@
 let currentEditingChapterIndex = null;
 let autoSaveTimer = null;
 
+function getChapterVolumes() {
+    if (!Array.isArray(store.projectData.chapter_volumes)) {
+        store.projectData.chapter_volumes = [];
+    }
+    return store.projectData.chapter_volumes;
+}
+
+function normalizeChapterVolumeId(value) {
+    return String(value || '').trim();
+}
+
+function getChapterVolumeById(volumeId) {
+    const normalizedId = normalizeChapterVolumeId(volumeId);
+    return getChapterVolumes().find((volume) => normalizeChapterVolumeId(volume.id) === normalizedId) || null;
+}
+
+function getVolumeChapterCount(volumeId) {
+    const normalizedId = normalizeChapterVolumeId(volumeId);
+    if (!normalizedId) return 0;
+    return getVisibleStoredChapters()
+        .filter((chapter) => normalizeChapterVolumeId(chapter.volume_id) === normalizedId)
+        .length;
+}
+
+function getChapterVolumeLabel(volume) {
+    const order = Number(volume?.order || volume?.volume_number || 0);
+    const fallback = order > 0 ? `第${order}卷` : '未命名卷';
+    return String(volume?.title || volume?.name || fallback).trim() || fallback;
+}
+
+function makeChapterVolumeId() {
+    return `vol_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getSelectedChapterRecords(indexes) {
+    const selected = Array.isArray(indexes) ? indexes : [];
+    return Array.from(new Set(selected.map((index) => Number(index))))
+        .filter((index) => Number.isInteger(index) && index >= 0)
+        .map((index) => ({
+            visibleIndex: index,
+            storedIndex: getStoredChapterIndexFromVisibleIndex(index)
+        }))
+        .filter((item) => item.storedIndex >= 0);
+}
+
 function getStoredChapters() {
     if (!Array.isArray(store.projectData.chapters)) {
         store.projectData.chapters = [];
@@ -73,6 +118,53 @@ function getMultiAgentChapters() {
     return getVisibleStoredChapters();
 }
 
+function assignChaptersToVolume(indexes, volumeId) {
+    const normalizedId = normalizeChapterVolumeId(volumeId);
+    if (normalizedId && !getChapterVolumeById(normalizedId)) {
+        showToast('目标卷不存在，已取消移动', 'error');
+        return 0;
+    }
+
+    const chapters = getStoredChapters();
+    const records = getSelectedChapterRecords(indexes);
+    records.forEach(({ storedIndex }) => {
+        if (normalizedId) {
+            chapters[storedIndex].volume_id = normalizedId;
+        } else {
+            delete chapters[storedIndex].volume_id;
+        }
+    });
+    return records.length;
+}
+
+async function moveChaptersToVolume(indexes, volumeId) {
+    const count = assignChaptersToVolume(indexes, volumeId);
+    if (count <= 0) {
+        showToast('请先选择要移动的章节', 'warning');
+        return;
+    }
+
+    await saveChaptersData();
+    renderNavPanel('write');
+    const volume = getChapterVolumeById(volumeId);
+    showToast(volume ? `已移入「${getChapterVolumeLabel(volume)}」` : `已释放 ${count} 章`);
+}
+
+async function saveChapterVolumesData() {
+    try {
+        await apiCall('/api/project-data/chapter_volumes', 'POST', {
+            data: getChapterVolumes()
+        });
+    } catch (e) {
+        console.error('Failed to save chapter volumes:', e);
+    }
+}
+
+async function saveChapterOrganizationData() {
+    await saveChapterVolumesData();
+    await saveChaptersData();
+}
+
 function ensureChapterRecord(index) {
     const chapters = getStoredChapters();
     const storedIndex = getStoredChapterIndexFromVisibleIndex(index);
@@ -85,6 +177,122 @@ function ensureChapterRecord(index) {
 
 function addNewChapter() {
     showAddChapterDialog();
+}
+
+function showAddChapterVolumeDialog() {
+    const modal = document.getElementById('modal-container');
+    if (!modal) {
+        const title = prompt('新建卷名称：', `第${getChapterVolumes().length + 1}卷`);
+        if (title && title.trim()) {
+            createChapterVolume(title.trim(), 0);
+        }
+        return;
+    }
+
+    const nextOrder = getChapterVolumes().length + 1;
+    modal.classList.remove('hidden');
+    modal.innerHTML = `
+        <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.62); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
+            <div style="background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 14px; width: 520px; max-width: 100%; padding: 24px;">
+                <h3 style="margin: 0 0 16px; color: var(--text-primary); font-size: 18px; display: flex; align-items: center; gap: 8px;">
+                    <i class="ri-book-2-line"></i>
+                    新增卷
+                </h3>
+                <div style="margin-bottom: 14px;">
+                    <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">卷名称</label>
+                    <input id="new-volume-title" type="text" value="第${nextOrder}卷"
+                        style="width: 100%; background: rgba(0,0,0,0.28); border: 1px solid var(--border-color); border-radius: 8px; padding: 11px; color: var(--text-primary);">
+                </div>
+                <div style="margin-bottom: 18px;">
+                    <label style="display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary);">自动收入前 N 个未分卷章节（可选）</label>
+                    <input id="new-volume-count" type="number" min="0" step="1" value="0"
+                        style="width: 100%; background: rgba(0,0,0,0.28); border: 1px solid var(--border-color); border-radius: 8px; padding: 11px; color: var(--text-primary);">
+                    <p style="margin: 8px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">填 0 会创建空卷，之后可勾选或拖动章节移入。</p>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button id="cancel-add-volume" style="flex: 1; padding: 11px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.08); color: var(--text-primary); cursor: pointer;">取消</button>
+                    <button id="confirm-add-volume" style="flex: 1; padding: 11px; border-radius: 8px; border: none; background: var(--accent-color); color: #fff; font-weight: 600; cursor: pointer;">创建卷</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const closeModal = () => {
+        modal.classList.add('hidden');
+        modal.innerHTML = '';
+    };
+
+    document.getElementById('cancel-add-volume')?.addEventListener('click', closeModal);
+    document.getElementById('confirm-add-volume')?.addEventListener('click', async () => {
+        const title = document.getElementById('new-volume-title')?.value?.trim();
+        const count = Number(document.getElementById('new-volume-count')?.value || 0);
+        if (!title) {
+            showToast('请输入卷名称', 'warning');
+            return;
+        }
+        await createChapterVolume(title, count);
+        closeModal();
+    });
+
+    setTimeout(() => {
+        const input = document.getElementById('new-volume-title');
+        input?.focus();
+        input?.select();
+    }, 50);
+}
+
+async function createChapterVolume(title, chapterCount = 0) {
+    const volumes = getChapterVolumes();
+    const volume = {
+        id: makeChapterVolumeId(),
+        title: String(title || '').trim(),
+        order: volumes.length + 1,
+        created_at: new Date().toISOString()
+    };
+    volumes.push(volume);
+
+    const count = Math.max(0, Math.floor(Number(chapterCount) || 0));
+    if (count > 0) {
+        const unassigned = getVisibleStoredChapters()
+            .map((chapter, index) => ({ chapter, index }))
+            .filter((entry) => !normalizeChapterVolumeId(entry.chapter.volume_id))
+            .slice(0, count)
+            .map((entry) => entry.index);
+        assignChaptersToVolume(unassigned, volume.id);
+    }
+
+    await saveChapterOrganizationData();
+    renderNavPanel('write');
+    showToast(`卷「${volume.title}」已创建`);
+}
+
+async function deleteChapterVolume(volumeId) {
+    const normalizedId = normalizeChapterVolumeId(volumeId);
+    const volumes = getChapterVolumes();
+    const volumeIndex = volumes.findIndex((volume) => normalizeChapterVolumeId(volume.id) === normalizedId);
+    if (volumeIndex < 0) return;
+
+    const volume = volumes[volumeIndex];
+    const count = getVolumeChapterCount(normalizedId);
+    const confirmed = await window.showConfirmDialog(
+        `确定删除「${getChapterVolumeLabel(volume)}」吗？\n\n卷内 ${count} 个章节会被释放出来，章节正文不会删除。`,
+        '删除卷'
+    );
+    if (!confirmed) return;
+
+    getVisibleStoredChapters().forEach((chapter) => {
+        if (normalizeChapterVolumeId(chapter.volume_id) === normalizedId) {
+            delete chapter.volume_id;
+        }
+    });
+    volumes.splice(volumeIndex, 1);
+    volumes.forEach((item, index) => {
+        item.order = index + 1;
+    });
+
+    await saveChapterOrganizationData();
+    renderNavPanel('write');
+    showToast('卷已删除，章节已释放');
 }
 
 function showCollaborativeImportDialog() {
@@ -483,13 +691,21 @@ window.currentEditingChapterIndex = currentEditingChapterIndex;
 window.addNewChapter = addNewChapter;
 window.showCollaborativeImportDialog = showCollaborativeImportDialog;
 window.showAddChapterDialog = showAddChapterDialog;
+window.showAddChapterVolumeDialog = showAddChapterVolumeDialog;
+window.createChapterVolume = createChapterVolume;
+window.deleteChapterVolume = deleteChapterVolume;
+window.moveChaptersToVolume = moveChaptersToVolume;
 window.editChapterTitle = editChapterTitle;
 window.deleteChapter = deleteChapter;
 window.openChapterEditor = openChapterEditor;
 window.saveCurrentChapter = saveCurrentChapter;
 window.saveOutlineData = saveOutlineData;
 window.saveChaptersData = saveChaptersData;
+window.saveChapterVolumesData = saveChapterVolumesData;
 window.getMultiAgentChapters = getMultiAgentChapters;
 window.getChapterDisplayNumber = getChapterDisplayNumber;
+window.getChapterVolumes = getChapterVolumes;
+window.getChapterVolumeLabel = getChapterVolumeLabel;
+window.normalizeChapterVolumeId = normalizeChapterVolumeId;
 
 console.log('[app-chapters.js] 章节管理模块已加载');

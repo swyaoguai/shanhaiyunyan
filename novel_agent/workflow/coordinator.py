@@ -57,6 +57,7 @@ from .contracts import (
     TaskDefinition,
     build_default_creation_contract,
     build_default_task_graph,
+    normalize_creation_length_plan,
 )
 from .agent_dispatcher import AgentDispatcher
 from .checkpoint_manager import CheckpointManager
@@ -74,6 +75,7 @@ from .memory_sync import MemorySyncManager
 from .routing_policy import RoutingPolicy
 from .runtime_state import RuntimeStateStore
 from .task_pool import TaskPool, TaskStatus
+from .collab_run_state import CollabRunStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,10 @@ class NovelCoordinator:
             project_dir_provider=lambda: self.project_dir,
             project_manager_provider=lambda: self.project_manager,
         )
+        self.collab_run_state_store = CollabRunStateStore(
+            project_dir_provider=lambda: self.project_dir,
+            project_manager_provider=lambda: self.project_manager,
+        )
         self.memory_sync_manager = MemorySyncManager(
             project_dir_provider=lambda: self.project_dir,
             project_scope_provider=lambda: self.project_manager.current_project_id or (self.project.id if self.project else ""),
@@ -280,6 +286,7 @@ class NovelCoordinator:
             fallback_to_orchestrated_provider=lambda: self.fallback_to_orchestrated,
             allow_ephemeral_agent_provider=lambda: self.allow_ephemeral_agents,
             runtime_state_store=self.runtime_state_store,
+            collab_run_state_store=self.collab_run_state_store,
         )
 
         # 问题9修复：为需要 LLM 的 Service 创建共享 LLMClient 并注入
@@ -1033,6 +1040,8 @@ class NovelCoordinator:
         contract.metadata["draft"] = not bool(approved)
         contract.metadata["confirmed_at"] = contract.updated_at if approved else ""
         pause_after_chapter_settings = bool(contract.metadata.get("pause_after_chapter_settings", True))
+        if normalize_creation_length_plan(contract.scope, contract.metadata):
+            contract.task_graph = build_default_task_graph(contract)
 
         task_pool = TaskPool()
         created_tasks: List[TaskDefinition] = []

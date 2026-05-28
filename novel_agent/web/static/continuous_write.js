@@ -47,6 +47,7 @@ const infiniteWriteState = {
     showTrends: true,
     ...createInfiniteWriteProjectState()
 };
+window.infiniteWriteState = infiniteWriteState;
 
 function normalizeInfiniteWriteChapterTitle(title, chapterNumber) {
     let cleanTitle = String(title || '').trim()
@@ -178,6 +179,64 @@ function loadInfiniteWriteDataForCurrentProject() {
 function clearInfiniteWriteDataForProject(projectId = store?.currentProjectId || '') {
     localStorage.removeItem(getInfiniteWriteStorageKey(projectId));
     localStorage.removeItem(getInfiniteWriteModelStorageKey(projectId));
+}
+
+async function deleteInfiniteWriteBackendSession(sessionId) {
+    const normalizedSessionId = String(sessionId || '').trim();
+    if (!normalizedSessionId || typeof apiCall !== 'function') return false;
+
+    try {
+        await apiCall(`/api/continuous-write/session?session_id=${encodeURIComponent(normalizedSessionId)}`, 'DELETE');
+        return true;
+    } catch (e) {
+        console.warn('[InfiniteWrite] 删除后端会话失败:', e);
+        return false;
+    }
+}
+
+function resetInfiniteWriteLocalState(options = {}) {
+    const nextState = createInfiniteWriteProjectState();
+    const keepSelection = options.keepSelection !== false;
+    const selectedModel = infiniteWriteState.selectedModel;
+    const selectedApiConfigId = infiniteWriteState.selectedApiConfigId;
+    const lastActiveApiConfigId = infiniteWriteState.lastActiveApiConfigId;
+    const config = { ...infiniteWriteState.config };
+    const enableTrendsFusion = Boolean(infiniteWriteState.enableTrendsFusion);
+    const selectedTrendsPlatforms = Array.isArray(infiniteWriteState.selectedTrendsPlatforms)
+        ? [...infiniteWriteState.selectedTrendsPlatforms]
+        : nextState.selectedTrendsPlatforms;
+    const summaryInterval = infiniteWriteState.summaryInterval || nextState.summaryInterval;
+
+    infiniteWriteState.sessionId = options.sessionId || nextState.sessionId;
+    infiniteWriteState.chapters = [];
+    infiniteWriteState.currentChapter = 0;
+    infiniteWriteState.totalWords = 0;
+    infiniteWriteState.pendingSummaries = [];
+    infiniteWriteState.continuationContext = null;
+    infiniteWriteState.showMemoryPreview = false;
+    infiniteWriteState.activeView = 'panel';
+    infiniteWriteState.activeChapterNumber = null;
+    infiniteWriteState.chapterSearchQuery = '';
+    infiniteWriteState.chapterSortDescending = false;
+    infiniteWriteState.isRunning = false;
+
+    if (keepSelection) {
+        infiniteWriteState.selectedModel = selectedModel;
+        infiniteWriteState.selectedApiConfigId = selectedApiConfigId;
+        infiniteWriteState.lastActiveApiConfigId = lastActiveApiConfigId;
+        infiniteWriteState.config = config;
+        infiniteWriteState.enableTrendsFusion = enableTrendsFusion;
+        infiniteWriteState.selectedTrendsPlatforms = selectedTrendsPlatforms;
+        infiniteWriteState.summaryInterval = summaryInterval;
+    } else {
+        infiniteWriteState.selectedModel = nextState.selectedModel;
+        infiniteWriteState.selectedApiConfigId = nextState.selectedApiConfigId;
+        infiniteWriteState.lastActiveApiConfigId = nextState.lastActiveApiConfigId;
+        infiniteWriteState.config = nextState.config;
+        infiniteWriteState.enableTrendsFusion = nextState.enableTrendsFusion;
+        infiniteWriteState.selectedTrendsPlatforms = nextState.selectedTrendsPlatforms;
+        infiniteWriteState.summaryInterval = nextState.summaryInterval;
+    }
 }
 
 function setInfiniteWriteActiveView(view, chapterNumber = null) {
@@ -467,6 +526,7 @@ function renderInfiniteWriteTrendPlatformOptions() {
 }
 
 function renderInfiniteWriteNavPanel() {
+    if (window.store?.currentModule && !isInfiniteWriteRenderCurrent()) return;
     loadInfiniteWriteDataForCurrentProject();
 
     const navList = document.getElementById('nav-list-container');
@@ -693,6 +753,7 @@ const multiAgentWriteState = {
     activeView: 'chapters',
     chapterSearchQuery: '',
     chapterSortDescending: false,
+    selectedChapterIndexes: [],
     collabTraceFilters: {
         stage: 'all',
         type: 'all'
@@ -701,6 +762,12 @@ const multiAgentWriteState = {
 };
 
 window.multiAgentWriteState = multiAgentWriteState;
+
+function isWriteModuleCurrent() {
+    return !window.store
+        || !Object.prototype.hasOwnProperty.call(window.store, 'currentModule')
+        || window.store.currentModule === 'write';
+}
 
 function setMultiAgentWriteActiveView(view) {
     const normalized = String(view || '').trim();
@@ -788,6 +855,55 @@ function normalizeCollabExecutionTrace(trace) {
     };
 }
 
+function normalizeCollabRunState(runState) {
+    if (!runState || typeof runState !== 'object') {
+        return {
+            runId: '',
+            projectId: '',
+            sessionId: '',
+            status: 'idle',
+            currentNode: '',
+            currentTaskId: '',
+            currentTaskType: '',
+            updatedAt: '',
+            checkpoints: [],
+            messages: [],
+            handoffs: [],
+            artifacts: [],
+            memoryItems: []
+        };
+    }
+    const sharedMemory = runState.shared_memory && typeof runState.shared_memory === 'object'
+        ? runState.shared_memory
+        : {};
+    const rawItems = sharedMemory.items && typeof sharedMemory.items === 'object'
+        ? Object.values(sharedMemory.items)
+        : [];
+    return {
+        runId: String(runState.run_id || '').trim(),
+        projectId: String(runState.project_id || '').trim(),
+        sessionId: String(runState.session_id || '').trim(),
+        status: String(runState.status || 'idle').trim() || 'idle',
+        currentNode: String(runState.current_node || '').trim(),
+        currentTaskId: String(runState.current_task_id || '').trim(),
+        currentTaskType: String(runState.current_task_type || '').trim(),
+        updatedAt: String(runState.updated_at || '').trim(),
+        checkpoints: Array.isArray(runState.checkpoints)
+            ? runState.checkpoints.filter((item) => item && typeof item === 'object')
+            : [],
+        messages: Array.isArray(runState.messages)
+            ? runState.messages.filter((item) => item && typeof item === 'object')
+            : [],
+        handoffs: Array.isArray(runState.handoffs)
+            ? runState.handoffs.filter((item) => item && typeof item === 'object')
+            : [],
+        artifacts: Array.isArray(runState.artifacts)
+            ? runState.artifacts.filter((item) => item && typeof item === 'object')
+            : [],
+        memoryItems: rawItems.filter((item) => item && typeof item === 'object')
+    };
+}
+
 function getCollabTraceEventTypeLabel(type) {
     const key = String(type || '').trim();
     const labels = {
@@ -801,6 +917,52 @@ function getCollabTraceEventTypeLabel(type) {
         project_ready_execution_cycle: '项目调度批次'
     };
     return labels[key] || (key || '未知事件');
+}
+
+function getCollabRunNodeLabel(node) {
+    const key = String(node || '').trim();
+    const labels = {
+        route_start: '路由开始',
+        route_end: '路由完成',
+        task_start: '任务开始',
+        task_end: '任务完成',
+        task_failed: '任务失败',
+        chapter_market_start: '章节协作开始',
+        chapter_market_end: '章节协作完成',
+        workflow_end: '工作流完成',
+        completed: '已完成',
+        failed: '失败'
+    };
+    return labels[key] || (key || '未记录');
+}
+
+function getCollabMemoryKeyLabel(key) {
+    const normalized = String(key || '').trim();
+    const labels = {
+        permanent_memory: '长期记忆',
+        aux_memory: '辅助记忆',
+        loaded_context: '加载上下文',
+        context_strategy: '上下文策略',
+        latest_chapter_content: '最新正文',
+        latest_word_count: '最新字数',
+        latest_polished_content: '最新润色稿',
+        latest_expanded_content: '最新扩写稿',
+        latest_summary: '最新摘要',
+        latest_summary_payload: '摘要载荷',
+        latest_evaluation: '最新评估'
+    };
+    return labels[normalized] || (normalized || '未命名记忆');
+}
+
+function compactCollabPreview(value, limit = 120) {
+    let text = '';
+    if (value && typeof value === 'object') {
+        text = String(value.preview || value.summary || value.type || JSON.stringify(value));
+    } else {
+        text = String(value || '');
+    }
+    const compact = text.replace(/\s+/g, ' ').trim();
+    return compact.length > limit ? `${compact.slice(0, limit).trim()}...` : compact;
 }
 
 function getCollabTraceStageMeta(event) {
@@ -1337,6 +1499,543 @@ function renderCollabExecutionTimeline(events, filters = {}) {
     `;
 }
 
+function renderCollabRunStatePanel(runState) {
+    const state = normalizeCollabRunState(runState);
+    const recentCheckpoints = state.checkpoints.slice().reverse().slice(0, 8);
+    const recentMessages = state.messages.slice().reverse().slice(0, 6);
+    const recentHandoffs = state.handoffs.slice().reverse().slice(0, 6);
+    const recentArtifacts = state.artifacts.slice().reverse().slice(0, 6);
+    const memoryItems = state.memoryItems.slice().reverse().slice(0, 8);
+    const hasRunData = Boolean(
+        state.runId
+        || state.checkpoints.length
+        || state.messages.length
+        || state.handoffs.length
+        || state.artifacts.length
+        || state.memoryItems.length
+    );
+    const checkpointHtml = recentCheckpoints.length
+        ? recentCheckpoints.map((checkpoint) => {
+            const taskType = String(checkpoint.task_type || '').trim();
+            const agentName = String(checkpoint.agent_name || '').trim();
+            const status = String(checkpoint.status || '').trim();
+            return `
+                <div style="padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getCollabRunNodeLabel(checkpoint.node))}</div>
+                        <span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(status || '未记录')}</span>
+                    </div>
+                    <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                        ${taskType ? `任务：${escapeHtml(getProjectReadyTaskTypeLabel(taskType))}` : '任务：未绑定'}
+                        ${agentName ? ` · ${escapeHtml(getAgentDisplayName(agentName) || agentName)}` : ''}
+                    </div>
+                    <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary); opacity: 0.82;">${escapeHtml(String(checkpoint.created_at || '未记录'))}</div>
+                </div>
+            `;
+        }).join('')
+        : '<div style="padding: 14px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font-size: 12px;">还没有检查点。</div>';
+    const handoffHtml = recentHandoffs.length
+        ? recentHandoffs.map((handoff) => {
+            const consumed = Array.isArray(handoff.consumed_context_keys) ? handoff.consumed_context_keys : [];
+            const produced = Array.isArray(handoff.produced_context_keys) ? handoff.produced_context_keys : [];
+            const summary = compactCollabPreview(handoff.next_context_summary || handoff.summary || '', 100);
+            return `
+                <div style="padding: 10px 12px; border-radius: 10px; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.22);">
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getProjectReadyTaskTypeLabel(handoff.task_type))}</div>
+                    <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                        输入：${escapeHtml(formatCollabDetailList(consumed))}
+                        <br>产出：${escapeHtml(formatCollabDetailList(produced))}
+                        ${summary ? `<br>交接：${escapeHtml(summary)}` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<div style="padding: 14px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font-size: 12px;">还没有交接记录。</div>';
+    const artifactHtml = recentArtifacts.length
+        ? recentArtifacts.map((artifact) => {
+            const refs = Array.isArray(artifact.artifact_refs) ? artifact.artifact_refs : [];
+            const resultKeys = Array.isArray(artifact.result_keys) ? artifact.result_keys : [];
+            return `
+                <div style="padding: 10px 12px; border-radius: 10px; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.24);">
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getProjectReadyTaskTypeLabel(artifact.task_type))}</div>
+                    <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7; word-break: break-word;">
+                        ${refs.length ? refs.map((ref) => escapeHtml(getCollabResultDisplayLabel(ref, artifact.task_type))).join('<br>') : '未记录文件位置'}
+                        ${resultKeys.length ? `<br>结果字段：${escapeHtml(formatCollabDetailList(resultKeys))}` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<div style="padding: 14px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font-size: 12px;">还没有产物登记。</div>';
+    const memoryHtml = memoryItems.length
+        ? memoryItems.map((item) => {
+            const key = String(item.key || '').trim();
+            const summary = compactCollabPreview(item.summary || item.metadata?.value_summary || item.value, 110);
+            return `
+                <div style="padding: 10px 12px; border-radius: 10px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.22);">
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getCollabMemoryKeyLabel(key))}</div>
+                    <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                        ${escapeHtml(summary || '已记录，但暂无摘要')}
+                    </div>
+                    <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary); opacity: 0.82;">
+                        ${escapeHtml(item.source_agent || '系统')} · ${escapeHtml(String(item.updated_at || '未记录'))}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<div style="padding: 14px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font-size: 12px;">共享记忆还没有写入。</div>';
+    const messageHtml = recentMessages.length
+        ? recentMessages.map((message) => `
+            <div style="padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getCollabTraceEventTypeLabel(message.type) || message.type || '运行消息')}</div>
+                    <span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(String(message.created_at || '未记录'))}</span>
+                </div>
+                <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">${escapeHtml(compactCollabPreview(message.content, 140) || '无消息内容')}</div>
+            </div>
+        `).join('')
+        : '<div style="padding: 14px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font-size: 12px;">还没有运行消息。</div>';
+
+    return `
+        <div style="padding: 18px; border-radius: 14px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;">
+                <div>
+                    <div style="font-size: 15px; color: var(--text-primary); font-weight: 600;">本地闭环账本</div>
+                    <div style="margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
+                        ${hasRunData ? `Run ${escapeHtml(state.runId || '未分配')} · ${escapeHtml(state.status)}` : '等待协作运行写入第一条状态。'}
+                    </div>
+                </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    <span style="padding: 6px 10px; border-radius: 999px; background: rgba(99, 102, 241, 0.12); color: #c7d2fe; font-size: 12px;">检查点 ${state.checkpoints.length}</span>
+                    <span style="padding: 6px 10px; border-radius: 999px; background: rgba(34, 197, 94, 0.12); color: #bbf7d0; font-size: 12px;">交接 ${state.handoffs.length}</span>
+                    <span style="padding: 6px 10px; border-radius: 999px; background: rgba(245, 158, 11, 0.12); color: #fde68a; font-size: 12px;">共享记忆 ${state.memoryItems.length}</span>
+                </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px;">
+                <div style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 5px;">当前节点</div>
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getCollabRunNodeLabel(state.currentNode))}</div>
+                </div>
+                <div style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 5px;">当前任务</div>
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(getProjectReadyTaskTypeLabel(state.currentTaskType))}</div>
+                </div>
+                <div style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 5px;">运行消息</div>
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${state.messages.length}</div>
+                </div>
+                <div style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 5px;">最近更新</div>
+                    <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(state.updatedAt || '未记录')}</div>
+                </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;">
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">恢复检查点</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${checkpointHtml}</div>
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">最近运行消息</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${messageHtml}</div>
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">Agent 交接</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${handoffHtml}</div>
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">产物与共享记忆</div>
+                    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+                        <div style="display: flex; flex-direction: column; gap: 8px;">${artifactHtml}</div>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">${memoryHtml}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function normalizeCollabDiagnostics(diagnostics) {
+    const source = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
+    const recovery = source.recovery && typeof source.recovery === 'object' ? source.recovery : {};
+    return {
+        health: String(source.health || 'idle').trim() || 'idle',
+        summary: String(source.summary || '').trim(),
+        stopReason: String(source.stop_reason || '').trim(),
+        stoppedOnTaskType: String(source.stopped_on_task_type || '').trim(),
+        currentNode: String(source.current_node || '').trim(),
+        runStatus: String(source.run_status || 'idle').trim() || 'idle',
+        taskCount: Number(source.task_count || 0) || 0,
+        eventCount: Number(source.event_count || 0) || 0,
+        checkpointCount: Number(source.checkpoint_count || 0) || 0,
+        handoffCount: Number(source.handoff_count || 0) || 0,
+        artifactCount: Number(source.artifact_count || 0) || 0,
+        memoryItemCount: Number(source.memory_item_count || 0) || 0,
+        warnings: Array.isArray(source.warnings) ? source.warnings.map((item) => String(item || '').trim()).filter(Boolean) : [],
+        runningTasks: Array.isArray(source.running_tasks) ? source.running_tasks : [],
+        failedTasks: Array.isArray(source.failed_tasks) ? source.failed_tasks : [],
+        blockedTasks: Array.isArray(source.blocked_tasks) ? source.blocked_tasks : [],
+        reviewTasks: Array.isArray(source.review_tasks) ? source.review_tasks : [],
+        readyTasks: Array.isArray(source.ready_tasks) ? source.ready_tasks : [],
+        recovery: {
+            canResume: Boolean(recovery.can_resume),
+            requiresReview: Boolean(recovery.requires_review),
+            recommendedAction: String(recovery.recommended_action || '').trim(),
+            resumePayload: recovery.resume_payload && typeof recovery.resume_payload === 'object'
+                ? recovery.resume_payload
+                : {},
+            actions: Array.isArray(recovery.actions)
+                ? recovery.actions.filter((item) => item && typeof item === 'object')
+                : []
+        }
+    };
+}
+
+function getCollabHealthMeta(health) {
+    const key = String(health || 'idle').trim();
+    const meta = {
+        failed: { label: '失败', color: '#fca5a5', bg: 'rgba(239, 68, 68, 0.14)' },
+        needs_review: { label: '待确认', color: '#fbcfe8', bg: 'rgba(244, 114, 182, 0.14)' },
+        blocked: { label: '阻塞', color: '#fde68a', bg: 'rgba(245, 158, 11, 0.14)' },
+        paused: { label: '可续跑', color: '#c7d2fe', bg: 'rgba(99, 102, 241, 0.14)' },
+        running: { label: '执行中', color: '#bbf7d0', bg: 'rgba(34, 197, 94, 0.14)' },
+        ready: { label: '已就绪', color: '#bfdbfe', bg: 'rgba(96, 165, 250, 0.14)' },
+        completed: { label: '已完成', color: '#bbf7d0', bg: 'rgba(34, 197, 94, 0.14)' },
+        idle: { label: '待启动', color: 'var(--text-secondary)', bg: 'rgba(255,255,255,0.06)' }
+    };
+    return meta[key] || meta.idle;
+}
+
+function getCollabRecommendedActionLabel(action) {
+    const key = String(action || '').trim();
+    const labels = {
+        approve_and_resume: '确认后继续正文',
+        resume_next_batch: '继续下一批任务',
+        resume_ready_tasks: '继续就绪任务',
+        review_failed_task: '查看失败任务',
+        review_blocker: '检查阻塞条件',
+        wait_or_refresh: '等待或刷新状态',
+        review_outputs: '检查产物',
+        start_or_confirm_contract: '发起或确认合同'
+    };
+    return labels[key] || (key || '暂无建议动作');
+}
+
+function getCollabRecoveryActionLabel(action) {
+    const key = String(action || '').trim();
+    const labels = {
+        retry_failed_task: '重试失败任务',
+        acknowledge_review: '确认审阅并继续',
+        unblock_task: '解除阻塞',
+        resume_next_batch: '继续下一批任务',
+        resume_ready_tasks: '继续就绪任务'
+    };
+    return labels[key] || getCollabRecommendedActionLabel(key);
+}
+
+function getCollabRecoveryActionHint(action) {
+    const key = String(action || '').trim();
+    const hints = {
+        retry_failed_task: '会把失败任务恢复为待处理，保留恢复记录，之后可再次调度。',
+        acknowledge_review: '会确认审阅断点，并沿用现有任务池继续执行。',
+        unblock_task: '会清除阻塞原因，把任务放回待处理队列。',
+        resume_next_batch: '会沿用已完成产物继续下一批任务。',
+        resume_ready_tasks: '会从当前就绪任务继续调度。'
+    };
+    return hints[key] || '会记录本次恢复动作并刷新协作诊断。';
+}
+
+function renderCollabRecoveryActionButtons(actions) {
+    const normalizedActions = Array.isArray(actions)
+        ? actions.filter((item) => item && typeof item === 'object' && String(item.action || '').trim())
+        : [];
+    if (normalizedActions.length === 0) {
+        return '';
+    }
+    return `
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 12px;">
+            ${normalizedActions.slice(0, 3).map((action, index) => {
+                const actionName = String(action.action || '').trim();
+                const taskId = String(action.task_id || '').trim();
+                const taskTitle = String(action.task_title || '').trim();
+                const resumePayload = action.resume_payload && typeof action.resume_payload === 'object'
+                    ? action.resume_payload
+                    : {};
+                return `
+                    <button type="button" class="collab-recovery-action-btn"
+                        data-action-index="${index}"
+                        data-action="${escapeHtml(actionName)}"
+                        data-task-id="${escapeHtml(taskId)}"
+                        data-run-after="${action.run_after ? 'true' : 'false'}"
+                        data-max-tasks="${escapeHtml(String(resumePayload.max_tasks || 7))}"
+                        data-max-chapter-tasks="${escapeHtml(String(resumePayload.max_chapter_tasks ?? 2))}"
+                        data-approve-chapter-settings="${resumePayload.approve_chapter_settings ? 'true' : 'false'}"
+                        style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid rgba(99, 102, 241, 0.42); background: rgba(99, 102, 241, 0.14); color: #c7d2fe; cursor: pointer; font-size: 12px; font-weight: 700;">
+                        <i class="ri-tools-line"></i>
+                        ${escapeHtml(action.label || getCollabRecoveryActionLabel(actionName))}
+                    </button>
+                    <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.55;">
+                        ${taskTitle ? `任务：${escapeHtml(taskTitle)} · ` : ''}${escapeHtml(getCollabRecoveryActionHint(actionName))}
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderCollabDiagnosticTaskList(title, tasks, emptyText) {
+    const normalizedTasks = Array.isArray(tasks) ? tasks.filter((item) => item && typeof item === 'object') : [];
+    if (normalizedTasks.length === 0) {
+        return `
+            <div style="padding: 12px; border-radius: 10px; border: 1px dashed var(--border-color); color: var(--text-secondary); font-size: 12px;">
+                ${escapeHtml(emptyText)}
+            </div>
+        `;
+    }
+    return `
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+            ${normalizedTasks.slice(0, 4).map((task) => {
+                const statusMeta = getCollabTaskStatusMeta(task.status);
+                const reason = String(task.reason || '').trim();
+                return `
+                    <div style="padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                            <div style="font-size: 13px; color: var(--text-primary); font-weight: 600;">${escapeHtml(task.title || getProjectReadyTaskTypeLabel(task.task_type))}</div>
+                            <span style="padding: 3px 8px; border-radius: 999px; background: ${statusMeta.bg}; color: ${statusMeta.color}; font-size: 11px;">${escapeHtml(statusMeta.label)}</span>
+                        </div>
+                        <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;">
+                            ${escapeHtml(getProjectReadyTaskTypeLabel(task.task_type))}
+                            ${task.assigned_agent ? ` · ${escapeHtml(getAgentDisplayName(task.assigned_agent) || task.assigned_agent)}` : ''}
+                            ${reason ? `<br>${escapeHtml(reason)}` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderCollabDiagnosticsPanel(diagnostics) {
+    const normalized = normalizeCollabDiagnostics(diagnostics);
+    const healthMeta = getCollabHealthMeta(normalized.health);
+    const stopReasonLabel = getProjectReadyStopReasonLabel(normalized.stopReason);
+    const stoppedTaskLabel = getProjectReadyTaskTypeLabel(normalized.stoppedOnTaskType);
+    const resumeHint = normalized.recovery.canResume
+        ? '可以从现有任务池继续，不会重建已完成产物。'
+        : '当前建议先检查状态或等待正在执行的任务结束。';
+    const recoveryActionHtml = renderCollabRecoveryActionButtons(normalized.recovery.actions);
+    const warningHtml = normalized.warnings.length
+        ? normalized.warnings.slice(0, 5).map((warning) => `
+            <div style="padding: 9px 10px; border-radius: 10px; background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.24); color: var(--text-secondary); font-size: 12px; line-height: 1.6;">
+                ${escapeHtml(warning)}
+            </div>
+        `).join('')
+        : `
+            <div style="padding: 12px; border-radius: 10px; border: 1px dashed var(--border-color); color: var(--text-secondary); font-size: 12px;">
+                暂无闭环风险提示。
+            </div>
+        `;
+
+    return `
+        <div style="padding: 18px; border-radius: 14px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03);">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;">
+                <div style="min-width: 0;">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <div style="font-size: 15px; color: var(--text-primary); font-weight: 700;">协作诊断</div>
+                        <span style="padding: 5px 10px; border-radius: 999px; background: ${healthMeta.bg}; color: ${healthMeta.color}; font-size: 12px; font-weight: 700;">
+                            ${escapeHtml(healthMeta.label)}
+                        </span>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 13px; color: var(--text-secondary); line-height: 1.7;">
+                        ${escapeHtml(normalized.summary || '暂无诊断结论。')}
+                    </div>
+                </div>
+                <div style="padding: 10px 12px; border-radius: 12px; background: rgba(99, 102, 241, 0.10); border: 1px solid rgba(99, 102, 241, 0.24); min-width: 220px;">
+                    <div style="font-size: 12px; color: #c7d2fe; margin-bottom: 5px;">推荐动作</div>
+                    <div style="font-size: 14px; color: var(--text-primary); font-weight: 700;">${escapeHtml(getCollabRecommendedActionLabel(normalized.recovery.recommendedAction))}</div>
+                    <div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary); line-height: 1.6;">${escapeHtml(resumeHint)}</div>
+                    ${recoveryActionHtml}
+                </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px;">
+                ${[
+                    ['任务', normalized.taskCount],
+                    ['事件', normalized.eventCount],
+                    ['检查点', normalized.checkpointCount],
+                    ['交接', normalized.handoffCount],
+                    ['产物', normalized.artifactCount],
+                    ['共享记忆', normalized.memoryItemCount]
+                ].map(([label, value]) => `
+                    <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color);">
+                        <div style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(label)}</div>
+                        <div style="margin-top: 4px; font-size: 17px; color: var(--text-primary); font-weight: 700;">${value}</div>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="display: grid; grid-template-columns: 0.9fr 1.1fr 1fr; gap: 14px;">
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">卡点判断</div>
+                    <div style="padding: 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); color: var(--text-secondary); font-size: 12px; line-height: 1.8;">
+                        <div>停止原因：<strong style="color: var(--text-primary);">${escapeHtml(stopReasonLabel)}</strong></div>
+                        <div>卡在任务：<strong style="color: var(--text-primary);">${escapeHtml(stoppedTaskLabel)}</strong></div>
+                        <div>当前节点：<strong style="color: var(--text-primary);">${escapeHtml(getCollabRunNodeLabel(normalized.currentNode))}</strong></div>
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">需要关注的任务</div>
+                    ${normalized.failedTasks.length
+                        ? renderCollabDiagnosticTaskList('失败任务', normalized.failedTasks, '暂无失败任务。')
+                        : normalized.blockedTasks.length
+                            ? renderCollabDiagnosticTaskList('阻塞任务', normalized.blockedTasks, '暂无阻塞任务。')
+                            : normalized.reviewTasks.length
+                                ? renderCollabDiagnosticTaskList('待确认任务', normalized.reviewTasks, '暂无待确认任务。')
+                                : renderCollabDiagnosticTaskList('就绪任务', normalized.readyTasks, '暂无就绪任务。')}
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">闭环风险</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${warningHtml}</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function normalizeCollabHandoff(handoff) {
+    const source = handoff && typeof handoff === 'object' ? handoff : {};
+    const sharedMemory = source.shared_memory && typeof source.shared_memory === 'object' ? source.shared_memory : {};
+    return {
+        handoffId: String(source.handoff_id || '').trim(),
+        generatedAt: String(source.generated_at || '').trim(),
+        runId: String(source.run_id || '').trim(),
+        contractId: String(source.contract_id || '').trim(),
+        health: String(source.health || 'idle').trim() || 'idle',
+        summary: String(source.summary || '').trim(),
+        recommendedAction: String(source.recommended_action || '').trim(),
+        taskCount: Number(source.task_count || 0) || 0,
+        statusCounts: source.status_counts && typeof source.status_counts === 'object' ? source.status_counts : {},
+        stopReason: String(source.stop_reason || '').trim(),
+        stoppedOnTaskType: String(source.stopped_on_task_type || '').trim(),
+        warnings: Array.isArray(source.warnings) ? source.warnings.map((item) => String(item || '').trim()).filter(Boolean) : [],
+        focusTasks: Array.isArray(source.focus_tasks) ? source.focus_tasks.filter((item) => item && typeof item === 'object') : [],
+        recentCheckpoints: Array.isArray(source.recent_checkpoints) ? source.recent_checkpoints.filter((item) => item && typeof item === 'object') : [],
+        recentHandoffs: Array.isArray(source.recent_handoffs) ? source.recent_handoffs.filter((item) => item && typeof item === 'object') : [],
+        recentArtifacts: Array.isArray(source.recent_artifacts) ? source.recent_artifacts.filter((item) => item && typeof item === 'object') : [],
+        memoryItems: Array.isArray(sharedMemory.items) ? sharedMemory.items.filter((item) => item && typeof item === 'object') : [],
+        handoffNote: String(source.handoff_note || '').trim()
+    };
+}
+
+function getCollabHandoffCopyText(handoff) {
+    const normalized = normalizeCollabHandoff(handoff);
+    if (normalized.handoffNote) {
+        return normalized.handoffNote;
+    }
+    return [
+        '多Agent协作交接包',
+        `Run: ${normalized.runId || '未记录'}`,
+        `健康状态: ${normalized.health} - ${normalized.summary || '暂无摘要'}`,
+        `推荐动作: ${getCollabRecommendedActionLabel(normalized.recommendedAction)}`,
+        `任务总数: ${normalized.taskCount}`
+    ].join('\n');
+}
+
+async function copyCollabHandoffToClipboard(handoff) {
+    const text = getCollabHandoffCopyText(handoff);
+    if (!text) {
+        throw new Error('暂无可复制的交接包');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return text;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return text;
+}
+
+function renderCollabHandoffPanel(handoff) {
+    const normalized = normalizeCollabHandoff(handoff);
+    const hasHandoff = Boolean(normalized.handoffId || normalized.handoffNote || normalized.taskCount || normalized.summary);
+    if (!hasHandoff) {
+        return '';
+    }
+    const healthMeta = getCollabHealthMeta(normalized.health);
+    const focusTaskHtml = normalized.focusTasks.length
+        ? normalized.focusTasks.slice(0, 4).map((task) => {
+            const statusMeta = getCollabTaskStatusMeta(task.status);
+            return `
+                <div style="padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.04);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <span style="font-size: 12px; color: var(--text-primary); font-weight: 700;">${escapeHtml(task.title || getProjectReadyTaskTypeLabel(task.task_type))}</span>
+                        <span style="font-size: 11px; color: ${statusMeta.color};">${escapeHtml(statusMeta.label)}</span>
+                    </div>
+                    <div style="margin-top: 5px; font-size: 11px; color: var(--text-secondary);">${escapeHtml(task.task_id || task.task_type || '')}</div>
+                </div>
+            `;
+        }).join('')
+        : '<div style="padding: 12px; border-radius: 10px; border: 1px dashed var(--border-color); color: var(--text-secondary); font-size: 12px;">暂无重点任务。</div>';
+    const memoryHtml = normalized.memoryItems.length
+        ? normalized.memoryItems.slice(0, 4).map((item) => `
+            <div style="padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.04);">
+                <div style="font-size: 12px; color: var(--text-primary); font-weight: 700;">${escapeHtml(getCollabMemoryKeyLabel(item.key))}</div>
+                <div style="margin-top: 5px; font-size: 11px; color: var(--text-secondary); line-height: 1.55;">${escapeHtml(item.summary || '暂无摘要')}</div>
+            </div>
+        `).join('')
+        : '<div style="padding: 12px; border-radius: 10px; border: 1px dashed var(--border-color); color: var(--text-secondary); font-size: 12px;">共享记忆还没有可交接摘要。</div>';
+    const checkpointText = normalized.recentCheckpoints.length
+        ? normalized.recentCheckpoints.slice(-3).map((item) => getCollabRunNodeLabel(item.node)).join(' / ')
+        : '未记录';
+
+    return `
+        <div style="padding: 18px; border-radius: 14px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03);">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;">
+                <div style="min-width: 0;">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <div style="font-size: 15px; color: var(--text-primary); font-weight: 700;">跨对话交接包</div>
+                        <span style="padding: 5px 10px; border-radius: 999px; background: ${healthMeta.bg}; color: ${healthMeta.color}; font-size: 12px; font-weight: 700;">${escapeHtml(healthMeta.label)}</span>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 13px; color: var(--text-secondary); line-height: 1.7;">
+                        ${escapeHtml(normalized.summary || '暂无交接摘要。')}
+                    </div>
+                </div>
+                <button type="button" id="collab-handoff-copy-btn"
+                    style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 12px; border-radius: 8px; border: 1px solid rgba(96, 165, 250, 0.42); background: rgba(96, 165, 250, 0.14); color: #bfdbfe; cursor: pointer; font-size: 12px; font-weight: 700;">
+                    <i class="ri-file-copy-line"></i>
+                    复制交接包
+                </button>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px;">
+                ${[
+                    ['Run', normalized.runId || '未记录'],
+                    ['合同', normalized.contractId || '未记录'],
+                    ['推荐动作', getCollabRecommendedActionLabel(normalized.recommendedAction)],
+                    ['最近检查点', checkpointText]
+                ].map(([label, value]) => `
+                    <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); min-width: 0;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(label)}</div>
+                        <div style="margin-top: 5px; font-size: 12px; color: var(--text-primary); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(String(value || ''))}</div>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">接手重点</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${focusTaskHtml}</div>
+                </div>
+                <div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">共享记忆摘要</div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">${memoryHtml}</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function normalizeProjectReadyExecution(projectReadyExecution) {
     if (!projectReadyExecution || typeof projectReadyExecution !== 'object') {
         return {
@@ -1492,8 +2191,66 @@ async function resumeCollabCreationFlow(options = {}) {
     if (response && response.collab_execution_trace) {
         window.store.collabExecutionTrace = response.collab_execution_trace;
     }
+    if (response && response.collab_run_state) {
+        window.store.collabRunState = response.collab_run_state;
+    }
+    if (response && response.collab_diagnostics) {
+        window.store.collabDiagnostics = response.collab_diagnostics;
+    }
+    if (response && response.collab_handoff) {
+        window.store.collabHandoff = response.collab_handoff;
+    }
     if (response && response.creation_contract) {
         window.store.pendingCreationContract = response.creation_contract;
+    }
+    const projectReadyExecution = response?.project_ready_execution
+        || response?.project_ready_task_execution?.project_ready_execution
+        || null;
+    if (projectReadyExecution) {
+        window.store.projectReadyExecution = projectReadyExecution;
+    }
+    if (typeof window.loadCurrentProjectData === 'function') {
+        await window.loadCurrentProjectData();
+    }
+    if (typeof window.renderNavPanel === 'function') {
+        window.renderNavPanel(window.store.currentModule || 'write');
+    }
+    if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+        window.renderMultiAgentWriteNavPanel();
+    }
+    return response;
+}
+
+async function applyCollabRecoveryAction(options = {}) {
+    const action = String(options.action || '').trim();
+    if (!action) {
+        throw new Error('缺少恢复动作');
+    }
+    const response = await apiCall('/api/v1/contract/recovery-action', 'POST', {
+        session_id: typeof getCurrentCopilotSessionId === 'function' ? getCurrentCopilotSessionId() : '',
+        action,
+        task_id: String(options.taskId || '').trim(),
+        task_ids: Array.isArray(options.taskIds) ? options.taskIds : [],
+        note: String(options.note || '').trim(),
+        run_after: Boolean(options.runAfter),
+        max_tasks: Math.max(1, Number(options.maxTasks || 7) || 7),
+        max_chapter_tasks: Math.max(0, Number(options.maxChapterTasks ?? 2) || 0),
+        approve_chapter_settings: Boolean(options.approveChapterSettings)
+    });
+    if (response && response.task_pool) {
+        window.store.currentTaskPool = response.task_pool;
+    }
+    if (response && response.collab_execution_trace) {
+        window.store.collabExecutionTrace = response.collab_execution_trace;
+    }
+    if (response && response.collab_run_state) {
+        window.store.collabRunState = response.collab_run_state;
+    }
+    if (response && response.collab_diagnostics) {
+        window.store.collabDiagnostics = response.collab_diagnostics;
+    }
+    if (response && response.collab_handoff) {
+        window.store.collabHandoff = response.collab_handoff;
     }
     const projectReadyExecution = response?.project_ready_execution
         || response?.project_ready_task_execution?.project_ready_execution
@@ -1623,6 +2380,7 @@ function buildCollabInfoChainHtml(metadata, inputs, assignedAgent, resultText) {
 }
 
 function showCollabTaskDetail(task) {
+    if (!isWriteModuleCurrent()) return;
     const modal = document.getElementById('modal-container');
     if (!modal || !task || typeof task !== 'object') return;
 
@@ -1657,6 +2415,7 @@ function showCollabTaskDetail(task) {
     const summaryText = summaryHints.length ? summaryHints.join('；') : '这一步主要围绕当前任务素材继续往下推进。';
     const infoChainHtml = buildCollabInfoChainHtml(metadata, inputs, assignedAgent, resultText);
 
+    markWriteModuleModal(modal);
     modal.classList.remove('hidden');
     modal.innerHTML = `
         <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.68); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
@@ -1718,8 +2477,7 @@ function showCollabTaskDetail(task) {
     `;
 
     const close = () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeWriteModuleModal(modal);
     };
     modal.querySelector('#collab-task-detail-close')?.addEventListener('click', close);
     modal.firstElementChild?.addEventListener('click', (event) => {
@@ -1729,13 +2487,22 @@ function showCollabTaskDetail(task) {
     });
 }
 
-function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool, collabExecutionTrace = window.store?.collabExecutionTrace, projectReadyExecution = window.store?.projectReadyExecution) {
+function renderCollabTaskPoolWorkspace(
+    taskPool = window.store?.currentTaskPool,
+    collabExecutionTrace = window.store?.collabExecutionTrace,
+    projectReadyExecution = window.store?.projectReadyExecution,
+    collabRunState = window.store?.collabRunState,
+    collabDiagnostics = window.store?.collabDiagnostics,
+    collabHandoff = window.store?.collabHandoff
+) {
+    if (!isWriteModuleCurrent()) return null;
     const workspace = document.getElementById('main-view');
     if (!workspace) return null;
 
     const normalizedPool = normalizeCollabRuntimeTaskPool(taskPool);
     const normalizedTrace = normalizeCollabExecutionTrace(collabExecutionTrace);
     const normalizedProjectReady = normalizeProjectReadyExecution(projectReadyExecution);
+    const normalizedRunState = normalizeCollabRunState(collabRunState);
     const currentFilters = getCollabTraceFilters();
     const filterOptions = buildCollabTraceFilterOptions(normalizedTrace.events);
     const filteredEvents = filterCollabExecutionEvents(normalizedTrace.events, currentFilters);
@@ -1918,9 +2685,15 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                 </div>
                 <div style="padding: 16px; border-radius: 14px; background: rgba(244, 114, 182, 0.10); border: 1px solid rgba(244, 114, 182, 0.24);">
                     <div style="font-size: 12px; color: #fbcfe8; margin-bottom: 6px;">当前轨迹状态</div>
-                    <div style="font-size: 20px; font-weight: 700; color: var(--text-primary);">${escapeHtml(normalizedTrace.status || 'idle')}</div>
+                    <div style="font-size: 20px; font-weight: 700; color: var(--text-primary);">${escapeHtml(normalizedRunState.status || normalizedTrace.status || 'idle')}</div>
                 </div>
             </div>
+
+            ${renderCollabDiagnosticsPanel(collabDiagnostics)}
+
+            ${renderCollabHandoffPanel(collabHandoff)}
+
+            ${renderCollabRunStatePanel(collabRunState)}
 
             <div style="padding: 18px; border-radius: 14px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03);">
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
@@ -2047,7 +2820,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
         button.addEventListener('click', () => {
             const expandId = String(button.dataset.traceExpandId || '').trim();
             toggleCollabTraceExpandedEventId(expandId);
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
@@ -2058,32 +2831,32 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                 type: String(button.dataset.type || 'all')
             });
             clearCollabTraceExpandedEventIds();
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
     workspace.querySelector('#collab-trace-stage-filter')?.addEventListener('change', (event) => {
         setCollabTraceFilters({ stage: event.target.value, type: getCollabTraceFilters().type });
         clearCollabTraceExpandedEventIds();
-        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
     });
 
     workspace.querySelector('#collab-trace-type-filter')?.addEventListener('change', (event) => {
         setCollabTraceFilters({ stage: getCollabTraceFilters().stage, type: event.target.value });
         clearCollabTraceExpandedEventIds();
-        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
     });
 
     workspace.querySelector('#collab-trace-reset-btn')?.addEventListener('click', () => {
         setCollabTraceFilters({ stage: 'all', type: 'all' });
         clearCollabTraceExpandedEventIds();
-        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
     });
 
     workspace.querySelector('#collab-status-refresh-btn')?.addEventListener('click', async () => {
         if (typeof window.refreshNovelCollabRuntime === 'function') {
             const runtime = await window.refreshNovelCollabRuntime({ force: true });
-            renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution);
+            renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution, runtime.collabRunState, runtime.collabDiagnostics, runtime.collabHandoff);
             if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
                 window.renderMultiAgentWriteNavPanel();
             }
@@ -2091,6 +2864,54 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
                 showToast('协作状态已刷新', 'success');
             }
         }
+    });
+
+    workspace.querySelector('#collab-handoff-copy-btn')?.addEventListener('click', async () => {
+        try {
+            await copyCollabHandoffToClipboard(collabHandoff);
+            if (typeof showToast === 'function') {
+                showToast('交接包已复制', 'success');
+            }
+        } catch (error) {
+            if (typeof showToast === 'function') {
+                showToast(`复制交接包失败: ${error.message}`, 'error');
+            }
+        }
+    });
+
+    workspace.querySelectorAll('.collab-recovery-action-btn').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+            const target = event.currentTarget;
+            const previousHtml = target.innerHTML;
+            target.disabled = true;
+            target.innerHTML = '<i class="ri-loader-4-line"></i> 处理中...';
+            try {
+                const response = await applyCollabRecoveryAction({
+                    action: target.dataset.action,
+                    taskId: target.dataset.taskId,
+                    runAfter: target.dataset.runAfter === 'true',
+                    maxTasks: Number(target.dataset.maxTasks || 7) || 7,
+                    maxChapterTasks: Number(target.dataset.maxChapterTasks || 2) || 2,
+                    approveChapterSettings: target.dataset.approveChapterSettings === 'true'
+                });
+                renderCollabTaskPoolWorkspace(window.store.currentTaskPool, window.store.collabExecutionTrace, window.store.projectReadyExecution, window.store.collabRunState, window.store.collabDiagnostics, window.store.collabHandoff);
+                if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
+                    window.renderMultiAgentWriteNavPanel();
+                }
+                if (typeof appendMessage === 'function' && response?.message) {
+                    appendMessage(response.message, 'ai');
+                }
+                if (typeof showToast === 'function') {
+                    showToast('协作恢复动作已执行', 'success');
+                }
+            } catch (error) {
+                target.disabled = false;
+                target.innerHTML = previousHtml;
+                if (typeof showToast === 'function') {
+                    showToast(`恢复动作失败: ${error.message}`, 'error');
+                }
+            }
+        });
     });
 
     workspace.querySelector('#collab-resume-creation-flow-btn')?.addEventListener('click', async (event) => {
@@ -2102,7 +2923,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
             const response = await resumeCollabCreationFlow({
                 approveChapterSettings: Boolean(resumeAction?.approveChapterSettings)
             });
-            renderCollabTaskPoolWorkspace(window.store.currentTaskPool, window.store.collabExecutionTrace, window.store.projectReadyExecution);
+            renderCollabTaskPoolWorkspace(window.store.currentTaskPool, window.store.collabExecutionTrace, window.store.projectReadyExecution, window.store.collabRunState, window.store.collabDiagnostics, window.store.collabHandoff);
             if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
                 window.renderMultiAgentWriteNavPanel();
             }
@@ -2131,7 +2952,7 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
             return;
         }
         saveCollabTraceNamedFilter(templateName, getCollabTraceFilters());
-        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+        renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
     });
 
     workspace.querySelectorAll('.collab-trace-template-apply-btn').forEach((button) => {
@@ -2141,14 +2962,14 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
             if (!template) return;
             setCollabTraceFilters(template.filters);
             clearCollabTraceExpandedEventIds();
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
     workspace.querySelectorAll('.collab-trace-template-delete-btn').forEach((button) => {
         button.addEventListener('click', () => {
             deleteCollabTraceNamedFilter(String(button.dataset.templateId || '').trim());
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
@@ -2164,36 +2985,40 @@ function renderCollabTaskPoolWorkspace(taskPool = window.store?.currentTaskPool,
             if (renamed === null && typeof showToast === 'function') {
                 showToast('模板名称已存在', 'warning');
             }
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
     workspace.querySelectorAll('.collab-trace-template-move-up-btn').forEach((button) => {
         button.addEventListener('click', () => {
             moveCollabTraceNamedFilter(String(button.dataset.templateId || '').trim(), 'up');
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
     workspace.querySelectorAll('.collab-trace-template-move-down-btn').forEach((button) => {
         button.addEventListener('click', () => {
             moveCollabTraceNamedFilter(String(button.dataset.templateId || '').trim(), 'down');
-            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution);
+            renderCollabTaskPoolWorkspace(taskPool, collabExecutionTrace, projectReadyExecution, collabRunState, collabDiagnostics, collabHandoff);
         });
     });
 
     return {
         taskPool: normalizedPool,
         collabExecutionTrace: normalizedTrace,
-        projectReadyExecution: normalizedProjectReady
+        projectReadyExecution: normalizedProjectReady,
+        collabRunState: normalizedRunState,
+        collabDiagnostics: normalizeCollabDiagnostics(collabDiagnostics),
+        collabHandoff: normalizeCollabHandoff(collabHandoff)
     };
 }
 
 async function openCollabTaskPoolWorkspace() {
+    if (!isWriteModuleCurrent()) return null;
     setMultiAgentWriteActiveView('status');
     if (typeof window.refreshNovelCollabRuntime === 'function') {
         const runtime = await window.refreshNovelCollabRuntime({ force: true });
-        renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution);
+        renderCollabTaskPoolWorkspace(runtime.taskPool, runtime.collabExecutionTrace, runtime.projectReadyExecution, runtime.collabRunState, runtime.collabDiagnostics, runtime.collabHandoff);
         if (typeof window.renderMultiAgentWriteNavPanel === 'function') {
             window.renderMultiAgentWriteNavPanel();
         }
@@ -2203,6 +3028,7 @@ async function openCollabTaskPoolWorkspace() {
 }
 
 function openMultiAgentKnowledgeWorkspace() {
+    if (!isWriteModuleCurrent()) return;
     setMultiAgentWriteActiveView('knowledge');
     if (typeof showEmptyWorld === 'function') {
         showEmptyWorld();
@@ -2213,6 +3039,7 @@ function openMultiAgentKnowledgeWorkspace() {
 }
 
 function renderMultiAgentWriteNavPanel() {
+    if (!isWriteModuleCurrent()) return;
     const navList = document.getElementById('nav-list-container');
     if (!navList) return;
 
@@ -2261,104 +3088,282 @@ function renderMultiAgentWriteNavPanel() {
         ? window.getMultiAgentChapters()
         : ((window.store && window.store.projectData && window.store.projectData.chapters) || []);
 
-    if (chapters.length === 0) {
-        const emptyHint = document.createElement('div');
-        emptyHint.className = 'nav-empty-hint';
-        emptyHint.innerHTML = `
-            <p>暂无章节</p>
-            <p class="hint-sub">点击上方 + 添加章节</p>
-        `;
-        chaptersContent.appendChild(emptyHint);
-    } else {
-        const chapterTools = document.createElement('div');
-        chapterTools.className = 'chapter-nav-tools';
-        chapterTools.id = 'collab-chapter-tools';
-        chapterTools.innerHTML = `
-            <label class="chapter-nav-search" for="collab-chapter-search">
-                <i class="ri-search-line" aria-hidden="true"></i>
-                <input id="collab-chapter-search" class="chapter-nav-search-input" type="search"
-                    value="${escapeChapterNavHtml(multiAgentWriteState.chapterSearchQuery)}"
-                    placeholder="搜索章节名或章节号" autocomplete="off">
-            </label>
-            <button id="collab-chapter-order-toggle" type="button" class="chapter-nav-order-toggle"
-                aria-pressed="${multiAgentWriteState.chapterSortDescending ? 'true' : 'false'}"
-                title="${multiAgentWriteState.chapterSortDescending ? '切换为正序查看章节' : '切换为倒序查看章节'}">
-                <i class="ri-sort-desc" aria-hidden="true"></i>
-                <span>${multiAgentWriteState.chapterSortDescending ? '倒序' : '正序'}</span>
-            </button>
-            <div id="collab-chapter-search-meta" class="chapter-nav-result-meta"></div>
-        `;
-        chaptersContent.appendChild(chapterTools);
+    const volumeControls = document.createElement('div');
+    volumeControls.className = 'chapter-volume-controls';
+    volumeControls.innerHTML = `
+        <button id="collab-add-volume" type="button" class="chapter-volume-action">
+            <i class="ri-book-2-line" aria-hidden="true"></i>
+            <span>新增卷</span>
+        </button>
+        <button id="collab-release-selected" type="button" class="chapter-volume-action secondary" disabled>
+            <i class="ri-logout-box-r-line" aria-hidden="true"></i>
+            <span>释放</span>
+        </button>
+    `;
+    chaptersContent.appendChild(volumeControls);
+    volumeControls.querySelector('#collab-add-volume')?.addEventListener('click', () => {
+        if (typeof window.showAddChapterVolumeDialog === 'function') {
+            window.showAddChapterVolumeDialog();
+        }
+    });
+    volumeControls.querySelector('#collab-release-selected')?.addEventListener('click', () => {
+        if (typeof window.moveChaptersToVolume === 'function') {
+            window.moveChaptersToVolume(multiAgentWriteState.selectedChapterIndexes, '');
+        }
+    });
 
-        const chapterList = document.createElement('div');
-        chapterList.className = 'chapter-nav-list';
-        chapterList.id = 'collab-chapter-list';
-        chaptersContent.appendChild(chapterList);
+    const chapterTools = document.createElement('div');
+    chapterTools.className = 'chapter-nav-tools';
+    chapterTools.id = 'collab-chapter-tools';
+    chapterTools.innerHTML = `
+        <label class="chapter-nav-search" for="collab-chapter-search">
+            <i class="ri-search-line" aria-hidden="true"></i>
+            <input id="collab-chapter-search" class="chapter-nav-search-input" type="search"
+                value="${escapeChapterNavHtml(multiAgentWriteState.chapterSearchQuery)}"
+                placeholder="搜索章节名或章节号" autocomplete="off">
+        </label>
+        <button id="collab-chapter-order-toggle" type="button" class="chapter-nav-order-toggle"
+            aria-pressed="${multiAgentWriteState.chapterSortDescending ? 'true' : 'false'}"
+            title="${multiAgentWriteState.chapterSortDescending ? '切换为正序查看章节' : '切换为倒序查看章节'}">
+            <i class="ri-sort-desc" aria-hidden="true"></i>
+            <span>${multiAgentWriteState.chapterSortDescending ? '倒序' : '正序'}</span>
+        </button>
+        <div id="collab-chapter-search-meta" class="chapter-nav-result-meta"></div>
+    `;
+    chaptersContent.appendChild(chapterTools);
 
-        const renderCollabChapterRows = () => {
-            const chapterEntries = getChapterNavEntries(chapters, {
-                query: multiAgentWriteState.chapterSearchQuery,
-                descending: multiAgentWriteState.chapterSortDescending
-            });
-            updateChapterNavControls(chaptersContent, multiAgentWriteState, chapterEntries.length, chapters.length);
+    const chapterList = document.createElement('div');
+    chapterList.className = 'chapter-nav-list';
+    chapterList.id = 'collab-chapter-list';
+    chaptersContent.appendChild(chapterList);
 
-            if (chapterEntries.length === 0) {
-                chapterList.innerHTML = renderChapterNavNoMatch(multiAgentWriteState.chapterSearchQuery);
-                return;
+    const renderDropHint = (text) => `
+        <div class="chapter-volume-empty">${escapeChapterNavHtml(text)}</div>
+    `;
+
+    const normalizeVolumeId = (value) => (
+        typeof window.normalizeChapterVolumeId === 'function'
+            ? window.normalizeChapterVolumeId(value)
+            : String(value || '').trim()
+    );
+    const getVolumes = () => (
+        typeof window.getChapterVolumes === 'function'
+            ? window.getChapterVolumes()
+            : (Array.isArray(window.store?.projectData?.chapter_volumes) ? window.store.projectData.chapter_volumes : [])
+    );
+    const getVolumeLabel = (volume) => (
+        typeof window.getChapterVolumeLabel === 'function'
+            ? window.getChapterVolumeLabel(volume)
+            : String(volume?.title || volume?.name || '未命名卷')
+    );
+    const getDragIndexes = (fallbackIndex) => {
+        const selected = Array.isArray(multiAgentWriteState.selectedChapterIndexes)
+            ? multiAgentWriteState.selectedChapterIndexes
+            : [];
+        if (selected.includes(fallbackIndex)) return selected;
+        return [fallbackIndex];
+    };
+    const moveSelectionToVolume = (indexes, volumeId) => {
+        if (typeof window.moveChaptersToVolume === 'function') {
+            window.moveChaptersToVolume(indexes, volumeId);
+        }
+    };
+
+    const renderCollabChapterRows = () => {
+        const chapterEntries = getChapterNavEntries(chapters, {
+            query: multiAgentWriteState.chapterSearchQuery,
+            descending: multiAgentWriteState.chapterSortDescending
+        });
+        updateChapterNavControls(chaptersContent, multiAgentWriteState, chapterEntries.length, chapters.length);
+
+        const validIndexes = new Set(chapters.map((_, index) => index));
+        multiAgentWriteState.selectedChapterIndexes = (Array.isArray(multiAgentWriteState.selectedChapterIndexes) ? multiAgentWriteState.selectedChapterIndexes : [])
+            .filter((index) => validIndexes.has(index));
+        const selectedCount = multiAgentWriteState.selectedChapterIndexes.length;
+        const releaseBtn = chaptersContent.querySelector('#collab-release-selected');
+        if (releaseBtn) {
+            releaseBtn.disabled = selectedCount === 0;
+            releaseBtn.querySelector('span').textContent = selectedCount > 0 ? `释放(${selectedCount})` : '释放';
+        }
+
+        if (chapters.length === 0) {
+            chapterList.innerHTML = `
+                <div class="nav-empty-hint">
+                    <p>暂无章节</p>
+                    <p class="hint-sub">点击上方 + 添加章节</p>
+                </div>
+            `;
+            return;
+        }
+        if (chapterEntries.length === 0) {
+            chapterList.innerHTML = renderChapterNavNoMatch(multiAgentWriteState.chapterSearchQuery);
+            return;
+        }
+
+        const entriesByVolume = new Map();
+        const unassignedEntries = [];
+        chapterEntries.forEach((entry) => {
+            const volumeId = normalizeVolumeId(entry.chapter?.volume_id);
+            if (volumeId) {
+                if (!entriesByVolume.has(volumeId)) entriesByVolume.set(volumeId, []);
+                entriesByVolume.get(volumeId).push(entry);
+            } else {
+                unassignedEntries.push(entry);
             }
+        });
 
-            chapterList.innerHTML = '';
-            chapterEntries.forEach((entry) => {
-                const index = entry.index;
-                const chapterItem = document.createElement('div');
-                chapterItem.className = 'nav-chapter-item';
-                chapterItem.innerHTML = `
-                    <i class="ri-file-text-line chapter-icon"></i>
-                    <span class="chapter-title"></span>
-                    <div class="chapter-actions">
-                        <button class="edit-btn" title="编辑"><i class="ri-edit-line"></i></button>
-                        <button class="delete-btn" title="删除"><i class="ri-delete-bin-line"></i></button>
-                    </div>
-                `;
-                chapterItem.querySelector('.chapter-title').textContent = entry.displayText;
+        const makeChapterItem = (entry) => {
+            const index = entry.index;
+            const isSelected = multiAgentWriteState.selectedChapterIndexes.includes(index);
+            const chapterItem = document.createElement('div');
+            chapterItem.className = `nav-chapter-item${isSelected ? ' selected' : ''}`;
+            chapterItem.draggable = true;
+            chapterItem.dataset.chapterIndex = String(index);
+            chapterItem.innerHTML = `
+                <label class="chapter-select" title="选择章节">
+                    <input type="checkbox" ${isSelected ? 'checked' : ''} aria-label="选择${escapeChapterNavHtml(entry.displayText)}">
+                </label>
+                <i class="ri-file-text-line chapter-icon"></i>
+                <span class="chapter-title"></span>
+                <div class="chapter-actions">
+                    <button class="edit-btn" title="编辑"><i class="ri-edit-line"></i></button>
+                    <button class="delete-btn" title="删除"><i class="ri-delete-bin-line"></i></button>
+                </div>
+            `;
+            chapterItem.querySelector('.chapter-title').textContent = entry.displayText;
 
-                chapterItem.querySelector('.edit-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (typeof editChapterTitle === 'function') {
-                        editChapterTitle(index);
-                    }
-                });
+            chapterItem.querySelector('.chapter-select input')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const selected = new Set(multiAgentWriteState.selectedChapterIndexes);
+                if (e.target.checked) {
+                    selected.add(index);
+                } else {
+                    selected.delete(index);
+                }
+                multiAgentWriteState.selectedChapterIndexes = Array.from(selected);
+                renderCollabChapterRows();
+            });
+            chapterItem.querySelector('.edit-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (typeof editChapterTitle === 'function') editChapterTitle(index);
+            });
+            chapterItem.querySelector('.delete-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (typeof deleteChapter === 'function') deleteChapter(index);
+            });
+            chapterItem.addEventListener('dragstart', (event) => {
+                const indexes = getDragIndexes(index);
+                event.dataTransfer?.setData('text/plain', JSON.stringify(indexes));
+                event.dataTransfer?.setData('application/x-chapter-indexes', JSON.stringify(indexes));
+                if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+                chapterItem.classList.add('dragging');
+            });
+            chapterItem.addEventListener('dragend', () => {
+                chapterItem.classList.remove('dragging');
+            });
+            chapterItem.addEventListener('click', () => {
+                setMultiAgentWriteActiveView('chapters');
+                document.querySelectorAll('.nav-chapter-item').forEach(el => el.classList.remove('active'));
+                chapterItem.classList.add('active');
+                if (typeof openChapterEditor === 'function') openChapterEditor(index);
+            });
+            return chapterItem;
+        };
 
-                chapterItem.querySelector('.delete-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (typeof deleteChapter === 'function') {
-                        deleteChapter(index);
-                    }
-                });
-
-                chapterItem.addEventListener('click', () => {
-                    setMultiAgentWriteActiveView('chapters');
-                    document.querySelectorAll('.nav-chapter-item').forEach(el => el.classList.remove('active'));
-                    chapterItem.classList.add('active');
-                    if (typeof openChapterEditor === 'function') {
-                        openChapterEditor(index);
-                    }
-                });
-
-                chapterList.appendChild(chapterItem);
+        const attachDropTarget = (target, volumeId) => {
+            target.addEventListener('dragover', (event) => {
+                event.preventDefault();
+                target.classList.add('drag-over');
+                if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+            });
+            target.addEventListener('dragleave', () => {
+                target.classList.remove('drag-over');
+            });
+            target.addEventListener('drop', (event) => {
+                event.preventDefault();
+                target.classList.remove('drag-over');
+                let indexes = [];
+                try {
+                    indexes = JSON.parse(
+                        event.dataTransfer?.getData('application/x-chapter-indexes')
+                        || event.dataTransfer?.getData('text/plain')
+                        || '[]'
+                    );
+                } catch (_) {
+                    indexes = [];
+                }
+                moveSelectionToVolume(indexes, volumeId);
             });
         };
 
-        chapterTools.querySelector('#collab-chapter-search')?.addEventListener('input', (event) => {
-            multiAgentWriteState.chapterSearchQuery = event.target.value.trim();
-            renderCollabChapterRows();
+        chapterList.innerHTML = '';
+        getVolumes().forEach((volume) => {
+            const volumeId = normalizeVolumeId(volume.id);
+            if (!volumeId) return;
+            const volumeEntries = entriesByVolume.get(volumeId) || [];
+            const volumeBlock = document.createElement('div');
+            volumeBlock.className = 'chapter-volume-block';
+            volumeBlock.dataset.volumeId = volumeId;
+            volumeBlock.innerHTML = `
+                <div class="chapter-volume-header">
+                    <div class="chapter-volume-title">
+                        <i class="ri-book-2-line"></i>
+                        <span>${escapeChapterNavHtml(getVolumeLabel(volume))}</span>
+                        <small>${volumeEntries.length}章</small>
+                    </div>
+                    <button type="button" class="chapter-volume-delete" title="删除卷并释放章节">
+                        <i class="ri-delete-bin-line"></i>
+                    </button>
+                </div>
+                <div class="chapter-volume-body"></div>
+            `;
+            volumeBlock.querySelector('.chapter-volume-delete')?.addEventListener('click', (event) => {
+                event.stopPropagation();
+                if (typeof window.deleteChapterVolume === 'function') {
+                    window.deleteChapterVolume(volumeId);
+                }
+            });
+            const body = volumeBlock.querySelector('.chapter-volume-body');
+            attachDropTarget(volumeBlock, volumeId);
+            if (volumeEntries.length > 0) {
+                volumeEntries.forEach((entry) => body.appendChild(makeChapterItem(entry)));
+            } else {
+                body.innerHTML = renderDropHint('拖动章节到这里');
+            }
+            chapterList.appendChild(volumeBlock);
         });
-        chapterTools.querySelector('#collab-chapter-order-toggle')?.addEventListener('click', () => {
-            multiAgentWriteState.chapterSortDescending = !multiAgentWriteState.chapterSortDescending;
-            renderCollabChapterRows();
-        });
+
+        const unassignedBlock = document.createElement('div');
+        unassignedBlock.className = 'chapter-volume-block chapter-volume-unassigned';
+        unassignedBlock.innerHTML = `
+            <div class="chapter-volume-header">
+                <div class="chapter-volume-title">
+                    <i class="ri-inbox-unarchive-line"></i>
+                    <span>未分卷章节</span>
+                    <small>${unassignedEntries.length}章</small>
+                </div>
+            </div>
+            <div class="chapter-volume-body"></div>
+        `;
+        attachDropTarget(unassignedBlock, '');
+        const unassignedBody = unassignedBlock.querySelector('.chapter-volume-body');
+        if (unassignedEntries.length > 0) {
+            unassignedEntries.forEach((entry) => unassignedBody.appendChild(makeChapterItem(entry)));
+        } else {
+            unassignedBody.innerHTML = renderDropHint('没有未分卷章节');
+        }
+        chapterList.appendChild(unassignedBlock);
+    };
+
+    chapterTools.querySelector('#collab-chapter-search')?.addEventListener('input', (event) => {
+        multiAgentWriteState.chapterSearchQuery = event.target.value.trim();
         renderCollabChapterRows();
-    }
+    });
+    chapterTools.querySelector('#collab-chapter-order-toggle')?.addEventListener('click', () => {
+        multiAgentWriteState.chapterSortDescending = !multiAgentWriteState.chapterSortDescending;
+        renderCollabChapterRows();
+    });
+    renderCollabChapterRows();
 
     chaptersPanel.appendChild(chaptersContent);
     navList.appendChild(chaptersPanel);
@@ -2517,7 +3522,6 @@ async function loadInfiniteWriteChapterList() {
 
 // ===== 无限续写界面 =====
 function isInfiniteWriteRenderCurrent(renderToken) {
-    if (!renderToken) return true;
     const guard = window.NovelAgentApp?.core?.isCurrentModuleRender;
     if (typeof guard === 'function') {
         return guard('infinite-write', renderToken);
@@ -2525,7 +3529,55 @@ function isInfiniteWriteRenderCurrent(renderToken) {
     return window.store?.currentModule === 'infinite-write';
 }
 
+function markInfiniteWriteModal(modal) {
+    const marker = window.NovelAgentApp?.core?.markModuleModalOwner;
+    if (typeof marker === 'function') {
+        marker('infinite-write');
+    } else if (modal) {
+        modal.dataset.moduleOwner = 'infinite-write';
+    }
+}
+
+function markWriteModuleModal(modal) {
+    const marker = window.NovelAgentApp?.core?.markModuleModalOwner;
+    if (typeof marker === 'function') {
+        marker('write');
+    } else if (modal) {
+        modal.dataset.moduleOwner = 'write';
+    }
+}
+
+function closeWriteModuleModal(modal) {
+    const closer = window.NovelAgentApp?.core?.clearModuleModalOwner;
+    if (typeof closer === 'function') {
+        closer('write');
+        return;
+    }
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.innerHTML = '';
+    if (modal.dataset?.moduleOwner === 'write') {
+        delete modal.dataset.moduleOwner;
+    }
+}
+
+function closeInfiniteWriteModal(modal) {
+    const closer = window.NovelAgentApp?.core?.clearModuleModalOwner;
+    if (typeof closer === 'function') {
+        closer('infinite-write');
+        return;
+    }
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.innerHTML = '';
+    if (modal.dataset?.moduleOwner === 'infinite-write') {
+        delete modal.dataset.moduleOwner;
+    }
+}
+
 async function renderInfiniteWriteInterface(renderToken = null) {
+    if (!isInfiniteWriteRenderCurrent(renderToken)) return;
+
     loadInfiniteWriteDataForCurrentProject();
     setInfiniteWriteActiveView('panel');
 
@@ -3280,18 +4332,24 @@ async function startInfiniteWrite() {
         });
 
         if (result.success && result.chapter) {
-            showToast('第一章创作完成！请预览后确认是否保留 ✨');
-
-            // 先显示预览，让用户确认后才保存到章节列表
-            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, true);
+            handleGeneratedInfiniteWriteChapter(result.chapter, true);
         } else {
             // 显示详细错误信息
             const errorMsg = result.error || '未知错误';
-            showInfiniteWriteError('创作失败', errorMsg);
+            if (isInfiniteWriteRenderCurrent()) {
+                showInfiniteWriteError('创作失败', errorMsg);
+            } else {
+                showToast(`无限续写创作失败：${errorMsg}`, 'error');
+            }
         }
     } catch (e) {
         console.error('[InfiniteWrite] 开始创作失败:', e);
-        showInfiniteWriteError('请求失败', e.message || '未知错误');
+        const errorMsg = e.message || '未知错误';
+        if (isInfiniteWriteRenderCurrent()) {
+            showInfiniteWriteError('请求失败', errorMsg);
+        } else {
+            showToast(`无限续写请求失败：${errorMsg}`, 'error');
+        }
     } finally {
         // 恢复运行状态
         infiniteWriteState.isRunning = false;
@@ -3307,10 +4365,12 @@ async function startInfiniteWrite() {
 }
 
 function showInfiniteWriteImportDialog() {
+    if (!isInfiniteWriteRenderCurrent()) return;
     const modal = document.getElementById('modal-container');
     if (!modal) return;
 
     const hasExisting = Array.isArray(infiniteWriteState.chapters) && infiniteWriteState.chapters.length > 0;
+    markInfiniteWriteModal(modal);
     modal.classList.remove('hidden');
     modal.innerHTML = `
         <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;">
@@ -3342,8 +4402,7 @@ function showInfiniteWriteImportDialog() {
     `;
 
     const closeModal = () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
     };
 
     document.getElementById('iw-import-cancel')?.addEventListener('click', closeModal);
@@ -3381,7 +4440,9 @@ function showInfiniteWriteImportDialog() {
 
             saveInfiniteWriteData();
             closeModal();
-            renderInfiniteWriteInterface();
+            if (isInfiniteWriteRenderCurrent()) {
+                renderInfiniteWriteInterface();
+            }
             const supplement = response.material_supplement || {};
             const added = Number(supplement.total_added || 0);
             const suffix = added > 0 ? `，补全 ${added} 条资料` : '，资料已检查';
@@ -3400,9 +4461,17 @@ async function continueInfiniteWrite() {
     const inspiration = document.getElementById('iw-inspiration')?.value.trim() || '';
     const correction = document.getElementById('iw-correction')?.value.trim() || '';
     const model = getSelectedModelForInfiniteWrite();
+    const clientChapters = Array.isArray(infiniteWriteState.chapters)
+        ? infiniteWriteState.chapters.map((chapter, index) => normalizeInfiniteWriteChapter(chapter, index + 1))
+        : [];
 
     if (!model) {
         showToast('请先在设置中配置全局API，或选择一个模型', 'error');
+        return;
+    }
+
+    if (clientChapters.length === 0) {
+        showToast('请先开始一个新故事', 'error');
         return;
     }
 
@@ -3446,7 +4515,9 @@ async function continueInfiniteWrite() {
                 model: model,
                 api_config_id: apiConfigId,
                 enable_trends: infiniteWriteState.enableTrendsFusion,
-                trends_platforms: infiniteWriteState.selectedTrendsPlatforms
+                trends_platforms: infiniteWriteState.selectedTrendsPlatforms,
+                chapters: clientChapters,
+                current_chapter: infiniteWriteState.currentChapter || clientChapters.length
             });
         } catch (continueError) {
             // 如果会话不存在，尝试重新初始化
@@ -3497,24 +4568,30 @@ async function continueInfiniteWrite() {
         }
 
         if (result.success && result.chapter) {
-            showToast(`第${result.chapter.chapter_number}章创作完成！请预览后确认是否保留 ✨`);
-
             // 清空输入框
             const inspirationEl = document.getElementById('iw-inspiration');
             const correctionEl = document.getElementById('iw-correction');
             if (inspirationEl) inspirationEl.value = '';
             if (correctionEl) correctionEl.value = '';
 
-            // 先显示预览，让用户确认后才保存到章节列表
-            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, false);
+            handleGeneratedInfiniteWriteChapter(result.chapter, false);
         } else {
             // 显示详细错误信息
             const errorMsg = result.error || '未知错误';
-            showInfiniteWriteError('续写失败', errorMsg);
+            if (isInfiniteWriteRenderCurrent()) {
+                showInfiniteWriteError('续写失败', errorMsg);
+            } else {
+                showToast(`无限续写失败：${errorMsg}`, 'error');
+            }
         }
     } catch (e) {
         console.error('[InfiniteWrite] 续写失败:', e);
-        showInfiniteWriteError('请求失败', e.message || '未知错误');
+        const errorMsg = e.message || '未知错误';
+        if (isInfiniteWriteRenderCurrent()) {
+            showInfiniteWriteError('请求失败', errorMsg);
+        } else {
+            showToast(`无限续写请求失败：${errorMsg}`, 'error');
+        }
     } finally {
         // 恢复运行状态
         infiniteWriteState.isRunning = false;
@@ -3612,6 +4689,8 @@ function showPendingSummary(summary) {
         infiniteWriteState.pendingSummaries.push(summary);
     }
     saveInfiniteWriteData();
+
+    if (!isInfiniteWriteRenderCurrent()) return;
 
     const container = document.getElementById('iw-pending-summaries');
     const contentEl = document.getElementById('iw-summary-content');
@@ -3751,27 +4830,28 @@ function editSummary(summary) {
 }
 
 // ===== 重置无限续写 =====
-function resetInfiniteWrite() {
-    window.showConfirmDialog('确定要重置吗？\n\n这将清除所有已创作的章节，此操作不可撤销。').then(confirmed => {
-        if (!confirmed) return;
+async function resetInfiniteWrite() {
+    const confirmed = await window.showConfirmDialog('确定要重置吗？\n\n这将清除所有已创作的章节和本轮续写记忆，此操作不可撤销。');
+    if (!confirmed) return;
 
-        // 重置状态
-        infiniteWriteState.sessionId = 'infinite_' + Date.now();
-        infiniteWriteState.chapters = [];
-        infiniteWriteState.currentChapter = 0;
-        infiniteWriteState.totalWords = 0;
-        infiniteWriteState.pendingSummaries = [];
+    const previousSessionId = infiniteWriteState.sessionId;
+    await deleteInfiniteWriteBackendSession(previousSessionId);
 
-        // 清除本地存储
-        clearInfiniteWriteDataForProject();
-        setInfiniteWriteActiveView('panel');
+    resetInfiniteWriteLocalState();
 
-        showToast('已重置，可以开始新故事');
+    // 清除本地存储
+    clearInfiniteWriteDataForProject();
+    saveInfiniteWriteData();
+    setInfiniteWriteActiveView('panel');
 
-        // 刷新界面
+    showToast('已重置，可以开始新故事');
+
+    // 刷新界面
+    if (isInfiniteWriteRenderCurrent()) {
         renderInfiniteWriteInterface();
         loadInfiniteWriteChapterList();
-    });
+        loadInfiniteWriteNavChapterList();
+    }
 }
 
 // ===== 更新界面状态 =====
@@ -3868,6 +4948,50 @@ function recomputeInfiniteWriteStats() {
     infiniteWriteState.currentChapter = maxChapter;
 }
 
+function saveGeneratedInfiniteWriteChapter(chapter, options = {}) {
+    const normalizedChapter = normalizeInfiniteWriteChapter(
+        chapter,
+        chapter?.chapter_number || infiniteWriteState.chapters.length + 1
+    );
+    const existingIndex = infiniteWriteState.chapters.findIndex(
+        item => Number(item.chapter_number) === Number(normalizedChapter.chapter_number)
+    );
+
+    if (existingIndex >= 0) {
+        infiniteWriteState.chapters[existingIndex] = normalizedChapter;
+    } else {
+        infiniteWriteState.chapters.push(normalizedChapter);
+    }
+
+    setInfiniteWriteActiveView('chapter', normalizedChapter.chapter_number);
+    recomputeInfiniteWriteStats();
+    saveInfiniteWriteData();
+
+    if (options.sync !== false) {
+        syncInfiniteWriteSession().catch(() => {});
+    }
+
+    return normalizedChapter;
+}
+
+function handleGeneratedInfiniteWriteChapter(chapter, isFirstChapter = false) {
+    const normalizedChapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
+    if (isInfiniteWriteRenderCurrent()) {
+        showToast(`第${normalizedChapter.chapter_number}章创作完成！请预览后确认是否保留 ✨`);
+        showInfiniteWriteChapterPreviewWithConfirm(normalizedChapter, isFirstChapter);
+        return normalizedChapter;
+    }
+
+    const savedChapter = saveGeneratedInfiniteWriteChapter(normalizedChapter);
+    showToast(`无限续写第${savedChapter.chapter_number}章已完成并保存，可返回无限续写查看`, 'success');
+
+    if (!isFirstChapter) {
+        checkAndGenerateSummary();
+    }
+
+    return savedChapter;
+}
+
 async function syncInfiniteWriteSession(deletedChapters = []) {
     try {
         await apiCall('/api/continuous-write/sync', 'POST', {
@@ -3888,11 +5012,20 @@ async function deleteInfiniteWriteChapterFrom(chapterNumber) {
         return;
     }
 
+    const previousSessionId = infiniteWriteState.sessionId;
     const removed = infiniteWriteState.chapters.slice(idx);
     const removedNumbers = removed.map(ch => ch.chapter_number).filter(n => typeof n === 'number');
 
     infiniteWriteState.chapters = infiniteWriteState.chapters.slice(0, idx);
     recomputeInfiniteWriteStats();
+    const deletedAllChapters = infiniteWriteState.chapters.length === 0;
+
+    if (deletedAllChapters) {
+        await syncInfiniteWriteSession(removedNumbers);
+        await deleteInfiniteWriteBackendSession(previousSessionId);
+        resetInfiniteWriteLocalState();
+    }
+
     saveInfiniteWriteData();
 
     updateInfiniteWriteUI();
@@ -3900,9 +5033,14 @@ async function deleteInfiniteWriteChapterFrom(chapterNumber) {
     loadInfiniteWriteChapterList();
     loadInfiniteWriteNavChapterList();
 
-    await syncInfiniteWriteSession(removedNumbers);
+    if (!deletedAllChapters) {
+        await syncInfiniteWriteSession(removedNumbers);
+    }
 
-    showToast(`已删除第${chapterNumber}章及之后的章节`);
+    showToast(deletedAllChapters
+        ? '已删除全部章节并清空本轮续写记忆，可以开始新故事'
+        : `已删除第${chapterNumber}章及之后的章节`
+    );
 }
 
 async function regenerateInfiniteWriteChapter(chapterNumber) {
@@ -3953,9 +5091,14 @@ async function regenerateInfiniteWriteChapter(chapterNumber) {
         });
 
         if (result.success && result.chapter) {
-            showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
             const isFirst = chapterNumber === 1;
-            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirst);
+            if (isInfiniteWriteRenderCurrent()) {
+                showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
+                showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirst);
+            } else {
+                const savedChapter = saveGeneratedInfiniteWriteChapter(result.chapter);
+                showToast(`无限续写第${savedChapter.chapter_number}章已重新生成并保存，可返回无限续写查看`, 'success');
+            }
             return;
         }
 
@@ -3971,7 +5114,11 @@ async function regenerateInfiniteWriteChapter(chapterNumber) {
         loadInfiniteWriteChapterList();
         loadInfiniteWriteNavChapterList();
 
-        showInfiniteWriteError('重新生成失败', e.message);
+        if (isInfiniteWriteRenderCurrent()) {
+            showInfiniteWriteError('重新生成失败', e.message);
+        } else {
+            showToast(`无限续写重新生成失败：${e.message}`, 'error');
+        }
     }
 }
 
@@ -3997,19 +5144,33 @@ async function regeneratePreviewChapter(chapterNumber, isFirstChapter) {
         });
 
         if (result.success && result.chapter) {
-            showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
-            showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirstChapter);
+            if (isInfiniteWriteRenderCurrent()) {
+                showToast(`第${chapterNumber}章已重新生成，请确认后保留✨`);
+                showInfiniteWriteChapterPreviewWithConfirm(result.chapter, isFirstChapter);
+            } else {
+                const savedChapter = saveGeneratedInfiniteWriteChapter(result.chapter);
+                showToast(`无限续写第${savedChapter.chapter_number}章已重新生成并保存，可返回无限续写查看`, 'success');
+            }
             return;
         }
 
         throw new Error(result.error || '重新生成失败');
     } catch (e) {
-        showInfiniteWriteError('重新生成失败', e.message);
+        if (isInfiniteWriteRenderCurrent()) {
+            showInfiniteWriteError('重新生成失败', e.message);
+        } else {
+            showToast(`无限续写重新生成失败：${e.message}`, 'error');
+        }
     }
 }
 
 // ===== 显示章节预览（带确认选项，用于新创作的章节） =====
 function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = false) {
+    if (!isInfiniteWriteRenderCurrent()) {
+        saveGeneratedInfiniteWriteChapter(chapter);
+        return;
+    }
+
     chapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
     console.log('[InfiniteWrite] preview confirm open:', {
         chapterNumber: chapter.chapter_number,
@@ -4018,6 +5179,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
     const modal = document.getElementById('modal-container');
     if (!modal) return;
 
+    markInfiniteWriteModal(modal);
     modal.classList.remove('hidden');
 
     modal.innerHTML = `
@@ -4069,8 +5231,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
     // 放弃本章
     document.getElementById('iw-discard-btn')?.addEventListener('click', async () => {
         if (await window.showConfirmDialog('确定要放弃这一章吗？内容将不会被保存。')) {
-            modal.classList.add('hidden');
-            modal.innerHTML = '';
+            closeInfiniteWriteModal(modal);
             showToast('已放弃本章，可以重新创作');
         }
     });
@@ -4078,11 +5239,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
     // 保留到列表
     document.getElementById('iw-keep-btn')?.addEventListener('click', () => {
         // 保存章节到无限续写列表
-        infiniteWriteState.chapters.push(chapter);
-        infiniteWriteState.currentChapter = chapter.chapter_number;
-        infiniteWriteState.totalWords += chapter.word_count || 0;
-        setInfiniteWriteActiveView('chapter', chapter.chapter_number);
-        saveInfiniteWriteData();
+        chapter = saveGeneratedInfiniteWriteChapter(chapter);
 
         // 更新界面
         updateInfiniteWriteUI();
@@ -4094,8 +5251,7 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
             checkAndGenerateSummary();
         }
 
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
         showToast(`第${chapter.chapter_number}章已保留到列表 ✓`);
 
         if (typeof window.showInfiniteWriteChapterEditor === 'function') {
@@ -4110,18 +5266,20 @@ function showInfiniteWriteChapterPreviewWithConfirm(chapter, isFirstChapter = fa
             chapterNumber: chapterNumber,
             isFirstChapter: isFirstChapter
         });
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
         await regeneratePreviewChapter(chapterNumber, isFirstChapter);
     });
 }
 
 // ===== 显示章节预览（用于查看已保存的章节） =====
 function showInfiniteWriteChapterPreview(chapter) {
+    if (!isInfiniteWriteRenderCurrent()) return;
+
     chapter = normalizeInfiniteWriteChapter(chapter, chapter?.chapter_number || 1);
     const modal = document.getElementById('modal-container');
     if (!modal) return;
 
+    markInfiniteWriteModal(modal);
     modal.classList.remove('hidden');
 
     modal.innerHTML = `
@@ -4162,8 +5320,7 @@ function showInfiniteWriteChapterPreview(chapter) {
     `;
 
     document.getElementById('close-iw-preview')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
     });
 
 
@@ -4171,8 +5328,7 @@ function showInfiniteWriteChapterPreview(chapter) {
     document.getElementById('iw-delete-chapter-btn')?.addEventListener('click', async () => {
         const confirmed = await window.showConfirmDialog(`确定要删除第${chapter.chapter_number}章及之后章节吗？\n\n此操作不可撤销。`);
         if (!confirmed) return;
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
         await deleteInfiniteWriteChapterFrom(chapter.chapter_number);
     });
 
@@ -4180,16 +5336,14 @@ function showInfiniteWriteChapterPreview(chapter) {
     document.getElementById('iw-regenerate-chapter-btn')?.addEventListener('click', async () => {
         const confirmed = await window.showConfirmDialog(`确定要重新生成第${chapter.chapter_number}章吗？\n\n将删除本章及之后章节并重新生成。`);
         if (!confirmed) return;
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
         await regenerateInfiniteWriteChapter(chapter.chapter_number);
     });
 
     // 点击背景关闭
     modal.addEventListener('click', (e) => {
         if (e.target === modal.firstElementChild) {
-            modal.classList.add('hidden');
-            modal.innerHTML = '';
+            closeInfiniteWriteModal(modal);
         }
     });
 }
@@ -4367,11 +5521,15 @@ window.renderMultiAgentWriteNavPanel = renderMultiAgentWriteNavPanel;
 window.renderCollabTaskPoolWorkspace = renderCollabTaskPoolWorkspace;
 window.openCollabTaskPoolWorkspace = openCollabTaskPoolWorkspace;
 window.resumeCollabCreationFlow = resumeCollabCreationFlow;
+window.applyCollabRecoveryAction = applyCollabRecoveryAction;
 window.renderInfiniteWriteNavPanel = renderInfiniteWriteNavPanel;
 window.loadInfiniteWriteChapterList = loadInfiniteWriteChapterList;
 window.loadInfiniteWriteNavChapterList = loadInfiniteWriteNavChapterList;
 window.loadInfiniteWriteDataForCurrentProject = loadInfiniteWriteDataForCurrentProject;
 window.renderInfiniteWriteInterface = renderInfiniteWriteInterface;
+window.continueInfiniteWrite = continueInfiniteWrite;
+window.resetInfiniteWrite = resetInfiniteWrite;
+window.saveGeneratedInfiniteWriteChapter = saveGeneratedInfiniteWriteChapter;
 window.showInfiniteWriteChapterPreview = showInfiniteWriteChapterPreview;
 window.showInfiniteWriteChapterPreviewWithConfirm = showInfiniteWriteChapterPreviewWithConfirm;
 window.deleteInfiniteWriteChapterFrom = deleteInfiniteWriteChapterFrom;
@@ -4385,12 +5543,15 @@ window.showContinuousWriteInterface = renderInfiniteWriteInterface;
 
 // ===== 错误提示对话框 =====
 function showInfiniteWriteError(title, message) {
+    if (!isInfiniteWriteRenderCurrent()) return;
+
     const modal = document.getElementById('modal-container');
     if (!modal) {
         showToast(`${title}: ${message}`, 'error');
         return;
     }
 
+    markInfiniteWriteModal(modal);
     modal.classList.remove('hidden');
 
     // 判断是否是连接错误，给出更详细的提示
@@ -4448,13 +5609,11 @@ function showInfiniteWriteError(title, message) {
     `;
 
     document.getElementById('iw-error-close')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
     });
 
     document.getElementById('iw-error-retry')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
         // 重试创作
         if (infiniteWriteState.chapters.length === 0) {
             startInfiniteWrite();
@@ -4466,6 +5625,7 @@ function showInfiniteWriteError(title, message) {
 
 // ===== 完结故事对话框 =====
 function showFinishStoryDialog() {
+    if (!isInfiniteWriteRenderCurrent()) return;
     if (infiniteWriteState.chapters.length === 0) {
         showToast('还没有创作任何章节，无法完结', 'error');
         return;
@@ -4474,6 +5634,7 @@ function showFinishStoryDialog() {
     const modal = document.getElementById('modal-container');
     if (!modal) return;
 
+    markInfiniteWriteModal(modal);
     modal.classList.remove('hidden');
 
     modal.innerHTML = `
@@ -4596,8 +5757,7 @@ function showFinishStoryDialog() {
 
     // 取消按钮
     document.getElementById('finish-cancel-btn')?.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
     });
 
     // 确认完结按钮
@@ -4620,6 +5780,7 @@ function getDefaultProjectName() {
 
 // 执行完结故事
 async function executeFinishStory() {
+    if (!isInfiniteWriteRenderCurrent()) return;
     const modal = document.getElementById('modal-container');
     const confirmBtn = document.getElementById('finish-confirm-btn');
     const sourceProjectId = typeof getActiveProjectId === 'function'
@@ -4706,8 +5867,7 @@ async function executeFinishStory() {
         updateProjectSelector();
 
         // 关闭弹窗
-        modal.classList.add('hidden');
-        modal.innerHTML = '';
+        closeInfiniteWriteModal(modal);
 
         // 显示成功消息
         showToast(`🎉 已迁移到协作项目！${isNewProject ? `新项目「${projectName}」已创建` : '章节已追加到当前项目'}${clearData ? '，无限续写数据已清空' : '，无限续写数据保留'}`, 'success');
@@ -4722,8 +5882,10 @@ async function executeFinishStory() {
 
         // 刷新无限续写界面，切换到目标项目后加载该项目自己的独立续写数据
         loadInfiniteWriteDataForCurrentProject();
-        renderInfiniteWriteInterface();
-        loadInfiniteWriteNavChapterList();
+        if (isInfiniteWriteRenderCurrent()) {
+            renderInfiniteWriteInterface();
+            loadInfiniteWriteNavChapterList();
+        }
 
     } catch (e) {
         console.error('[InfiniteWrite] 完结故事失败:', e);

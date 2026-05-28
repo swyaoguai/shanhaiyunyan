@@ -34,7 +34,10 @@ from ..agents.new_agent_prompts import (
 )
 
 from ..agents.enhanced_prompts import (
+    AGENT_COORDINATION_PROTOCOL,
     ROUTER_AGENT_PROMPT,
+    ROUTER_DECISION_PROTOCOL,
+    STRUCTURED_DATA_AGENT_PROTOCOL,
     COMMUNICATOR_AGENT_PROMPT,
     CHAPTER_WRITER_PROMPT,
     WORLDBUILDER_PROMPT,
@@ -44,9 +47,42 @@ from ..agents.enhanced_prompts import (
     CONTINUOUS_WRITER_PROMPT,
 )
 
+from ..short_story_service import (
+    BATCH_COHERENCE_REVIEW_PROMPT_TEMPLATE,
+    BATCH_QUALITY_CHECK_PROMPT_TEMPLATE,
+    CHAPTER_PROMPT_TEMPLATE,
+    COHERENCE_REVIEW_PROMPT_TEMPLATE,
+    FUSION_OPTIONS_PROMPT_TEMPLATE,
+    INPUT_ANALYSIS_PROMPT_TEMPLATE,
+    OUTLINE_PROMPT_TEMPLATE,
+    QUALITY_CHECK_PROMPT_TEMPLATE,
+    QUALITY_ISSUE_CHAPTER_REWRITE_PROMPT_TEMPLATE,
+    SHORT_STORY_SYSTEM_PROMPT,
+    SYNOPSIS_PROMPT_TEMPLATE,
+    TAG_SELECTION_PROMPT_TEMPLATE,
+    TITLE_PROMPT_TEMPLATE,
+)
+
 # ===== 默认提示词定义（内置fallback） =====
 
 DEFAULT_PROMPTS = {
+    "router": {
+        "system": ROUTER_AGENT_PROMPT,
+        "analyze_intent": """请根据 Router 意图识别与分发协议分析用户消息，只输出 JSON：
+用户消息：{message}
+
+输出字段：
+- intent：必须是系统支持的意图枚举
+- confidence：0~1
+- fallback_intent：不确定或被执行门控降级时的备选意图，通常为 general_chat
+
+不要解释，不要输出 Markdown。""",
+        "analyze_intents": """请根据 Router 意图识别与分发协议拆分多意图，只输出 JSON 数组：
+用户消息：{message}
+
+每个元素包含 intent、confidence、original_text、fallback_intent。
+只拆分用户明确提出的任务，不要把背景信息拆成执行任务。""",
+    },
     "communicator": {
         "system": COMMUNICATOR_AGENT_PROMPT,
         "collect_requirements": """请基于当前对话补齐需求字段：
@@ -172,6 +208,227 @@ volume_number/volume_title/volume_summary/core_conflict/protagonist_growth/volum
         "apply_correction": """将以下纠正落到下一章：
 纠正：{correction}
 当前上下文：{context}""",
+    },
+    "CharacterBuilder": {
+        "system": """你是专业小说策划中的 CharacterBuilder，专门把零散讨论整理成可用的角色卡草稿。
+你的职责不是写散文说明，而是输出严格可机读的 JSON。
+
+""" + AGENT_COORDINATION_PROTOCOL + """
+
+""" + STRUCTURED_DATA_AGENT_PROTOCOL + """
+
+核心规则：
+1. 只能输出 JSON，不能输出 Markdown、解释、前后缀。
+2. 如果信息不足，不得用“主角/男主/女主/角色”等占位名敷衍生成。
+3. 若关键信息不足，应返回 status='missing_info'，并列出 missing_info。
+4. 角色卡以“草稿”形式生成，不默认表示已保存。
+5. 优先吸收 recent_discussion、collected_info、world_summary 中已经明确给出的事实。
+6. 不要发明与现有讨论冲突的设定；不确定的内容宁可留空或写入 notes。
+7. 如果当前请求包含“那、这个、刚才、按上面”等上下文指代，必须以 discussion_context / recent_discussion 为准。
+8. 不得擅自更换主角名、题材、核心能力、门派/世界背景；信息不足则 missing_info，不要随机补成无关设定。
+9. 输出中的 confidence 必须是 0~1 的数字。
+10. 如果请求模式是 autonomous_draft，或输入声明 ai_autonomy_requested=true，表示用户已经授权助手自主安排未指定内容；此时姓名、身份、关系、动机等空白不是缺失信息，必须在既有题材与讨论方向内主动创作可用角色卡。
+
+输出格式必须为：
+{
+  "status": "ok" | "missing_info",
+  "confidence": 0.0,
+  "missing_info": [],
+  "characters": [
+    {
+      "name": "",
+      "role": "",
+      "identity": "",
+      "description": "",
+      "personality": [],
+      "goals": [],
+      "relationships": {},
+      "notes": ""
+    }
+  ]
+}""",
+        "build_characters": """请基于以下信息生成角色卡草稿：
+
+## 当前请求模式
+{request_mode}
+
+## AI自主创作授权
+{ai_autonomy_note}
+
+## 自主创作说明
+{autonomous_brief}
+
+## 当前用户请求
+{user_request}
+
+## 角色需求摘要
+{character_request}
+
+## 角色类型提示
+{character_role}
+
+## 已识别姓名提示
+{character_name}
+
+## 已确认角色名锁定
+{locked_character_names}
+
+## 完整讨论上下文基准
+{discussion_context}
+
+## 最近讨论摘要
+{recent_discussion}
+
+## 当前 collected_info
+- novel_type: {novel_type}
+- theme: {theme}
+- protagonist: {protagonist}
+- plot_idea: {plot_idea}
+
+## 世界观摘要
+{world_summary}
+
+## 已有角色摘要
+{existing_characters_summary}
+
+要求：
+1. 只生成当前请求最相关的 1~2 个角色卡草稿。
+2. 若信息不足以生成可靠角色卡，返回 status='missing_info'，并明确列出缺什么。
+3. 关系字段使用对象映射，如 {{"角色A": "师徒"}}。
+4. 必须沿用完整讨论上下文基准中的已确认设定；缺失则 missing_info，不得随机换题。
+5. 如果“已确认角色名锁定”列出姓名，主角/男女主必须使用这些姓名，不得改名、替换或另起同定位角色。
+6. 不要输出任何 JSON 以外的内容。
+7. 当 AI自主创作授权 为已授权时，第2条和第4条中的“信息不足”只指题材/篇幅/风格完全缺失；角色姓名、身份、人物关系和剧情细节未指定时，应由你主动补全。""",
+    },
+    "EventlineBuilder": {
+        "system": """你是专业的事件线构建师。
+你只负责把输入的创作信息整理成结构化 JSON。
+""" + AGENT_COORDINATION_PROTOCOL + """
+
+""" + STRUCTURED_DATA_AGENT_PROTOCOL + """
+
+严禁输出 Markdown、解释、前后缀说明。
+输出顶层必须是对象，且包含 `eventlines` 数组字段。
+如果信息不足，也要基于现有大纲给出最小可用结构，而不是返回空数组。
+每条事件线至少包含：name、description、participants、conflict、status。
+优先提炼主线/支线/人物线，禁止只把章节摘要机械复制成空洞条目。""",
+        "build_eventlines": """## 当前任务
+生成事件线
+
+## 用户请求
+{user_request}
+
+## 最近讨论摘要
+{recent_discussion}
+
+## 世界观摘要
+{world_summary}
+
+## 角色资料
+{characters_json}
+
+## 全书/分卷概览（只作一致性约束，不要当成逐章清单复制）
+{outline_overview_json}
+
+## 大纲资料
+{outline_rows_json}
+
+## 事件线资料
+{eventlines_json}
+
+请输出 JSON，对象格式为：{{"eventlines": [...]}}""",
+    },
+    "DetailOutlineBuilder": {
+        "system": """你是专业的细纲设定构建师。
+你只负责把输入的创作信息整理成结构化 JSON。
+""" + AGENT_COORDINATION_PROTOCOL + """
+
+""" + STRUCTURED_DATA_AGENT_PROTOCOL + """
+
+严禁输出 Markdown、解释、前后缀说明。
+输出顶层必须是对象，且包含 `detail_settings` 数组字段。
+如果信息不足，也要基于现有大纲给出最小可用结构，而不是返回空数组。
+每条细纲至少包含：name、description、chapter_number、scene_goal、conflict、notes。
+细纲应体现每章的场景目标与冲突，而不是仅复述标题。""",
+        "build_detail_settings": """## 当前任务
+生成细纲设定
+
+## 用户请求
+{user_request}
+
+## 最近讨论摘要
+{recent_discussion}
+
+## 世界观摘要
+{world_summary}
+
+## 角色资料
+{characters_json}
+
+## 全书/分卷概览（只作一致性约束，不要当成逐章清单复制）
+{outline_overview_json}
+
+## 大纲资料
+{outline_rows_json}
+
+## 事件线资料
+{eventlines_json}
+
+请输出 JSON，对象格式为：{{"detail_settings": [...]}}""",
+    },
+    "ChapterSettingBuilder": {
+        "system": """你是专业的章纲设定师。
+你只负责把输入的创作信息整理成结构化 JSON。
+""" + AGENT_COORDINATION_PROTOCOL + """
+
+""" + STRUCTURED_DATA_AGENT_PROTOCOL + """
+
+严禁输出 Markdown、解释、前后缀说明。
+输出顶层必须是对象，且包含 `chapter_settings` 数组字段。
+如果信息不足，也要基于现有大纲给出最小可用结构，而不是返回空数组。
+每条章纲至少包含：name、description、chapter_number、chapter_goal、key_event、ending_hook。
+章纲应体现可执行写作目标、关键事件和章末钩子。
+如果本章承接事件线资料，必须增加 plot_thread 对象，字段包含 thread_id、thread_title、switch_to、return_by_chapter、max_consecutive_chapters、objective；需要回主线时设置 return_to_main=true。""",
+        "build_chapter_settings": """## 当前任务
+生成章纲设定
+
+## 用户请求
+{user_request}
+
+## 最近讨论摘要
+{recent_discussion}
+
+## 世界观摘要
+{world_summary}
+
+## 角色资料
+{characters_json}
+
+## 全书/分卷概览（只作一致性约束，不要当成逐章清单复制）
+{outline_overview_json}
+
+## 大纲资料
+{outline_rows_json}
+
+## 事件线资料
+{eventlines_json}
+
+请输出 JSON，对象格式为：{{"chapter_settings": [...]}}""",
+    },
+    "short_story": {
+        "system": SHORT_STORY_SYSTEM_PROMPT,
+        "input_analysis": INPUT_ANALYSIS_PROMPT_TEMPLATE,
+        "fusion_options": FUSION_OPTIONS_PROMPT_TEMPLATE,
+        "synopsis": SYNOPSIS_PROMPT_TEMPLATE,
+        "outline": OUTLINE_PROMPT_TEMPLATE,
+        "write_chapter": CHAPTER_PROMPT_TEMPLATE,
+        "quality_check": QUALITY_CHECK_PROMPT_TEMPLATE,
+        "batch_quality_check": BATCH_QUALITY_CHECK_PROMPT_TEMPLATE,
+        "quality_issue_rewrite": QUALITY_ISSUE_CHAPTER_REWRITE_PROMPT_TEMPLATE,
+        "coherence_review": COHERENCE_REVIEW_PROMPT_TEMPLATE,
+        "batch_coherence_review": BATCH_COHERENCE_REVIEW_PROMPT_TEMPLATE,
+        "title": TITLE_PROMPT_TEMPLATE,
+        "story_tags": TAG_SELECTION_PROMPT_TEMPLATE,
     },
     "ProjectScanner": {
         "system": PROJECT_SCANNER_PROMPT,
@@ -335,17 +592,23 @@ volume_number/volume_title/volume_summary/core_conflict/protagonist_growth/volum
 
 # 面向普通用户展示的创作型 Agent（提示词管理）
 USER_VISIBLE_PROMPT_AGENTS = {
+    "router",
     "communicator",
     "worldbuilder",
     "outliner",
     "chapter_writer",
     "polisher",
-    "evaluator",
     "continuous_writer",
+    "CharacterBuilder",
+    "EventlineBuilder",
+    "DetailOutlineBuilder",
+    "ChapterSettingBuilder",
+    "short_story",
 }
 
 # 保留给后续开发者模式的 Agent
 ADVANCED_PROMPT_AGENTS = {
+    "evaluator",
     "ContentExpansion",
     "SummaryOrchestrator",
 }
@@ -384,6 +647,7 @@ class AgentPromptConfig:
 
 
 SYSTEM_PROMPT_FILE_MAP = {
+    "router": "router.md",
     "communicator": "communicator.md",
     "worldbuilder": "worldbuilder.md",
     "outliner": "outliner.md",
@@ -590,24 +854,30 @@ class PromptManager:
         
         # Agent显示名称映射
         display_names = {
-            'communicator': '沟通助手',
-            'worldbuilder': '世界观构建器',
-            'outliner': '大纲生成器',
-            'chapter_writer': '章节写作器',
-            'polisher': '内容润色器',
-            'evaluator': '质量评估器',
-            'continuous_writer': '无限续写器',
+            'router': '智能路由助手',
+            'communicator': '创作沟通助手',
+            'worldbuilder': '世界观设定师',
+            'outliner': '全书大纲规划师',
+            'chapter_writer': '章节正文写手',
+            'polisher': '正文润色师',
+            'evaluator': '质检评估师',
+            'continuous_writer': '无限续写正文写手',
+            'CharacterBuilder': '角色构建师',
+            'EventlineBuilder': '事件线构建师',
+            'DetailOutlineBuilder': '细纲构建师',
+            'ChapterSettingBuilder': '章纲设定师',
+            'short_story': '短篇创作流程',
             'ProjectScanner': '项目扫描器',
             'ContextStrategy': '上下文策略师',
             'ContentReader': '内容读取器',
             'CreativeWriter': '创意写作师',
-            'ContentExpansion': '内容扩展师',
+            'ContentExpansion': '正文扩写师',
             'QualityValidator': '质量验证师',
             'FileNaming': '文件命名器',
             'SummaryOrchestrator': '摘要编排器',
             'ContextCompressor': '上下文压缩器',
             'FileEditor': '文件编辑器',
-            'Router': '路由器',
+            'Router': '智能路由助手',
             'copilot': 'AI写作助手'
         }
         
@@ -665,13 +935,30 @@ class PromptManager:
         
         # 任务显示名称映射
         task_display_names = {
+            'analyze_intent': '识别单一意图',
+            'analyze_intents': '拆分多意图',
             'build_world': '构建世界观',
             'expand_setting': '扩展设定',
-            'create_outline': '创建大纲',
-            'refine_outline': '优化大纲',
-            'write_chapter': '写作章节',
+            'create_outline': '创建全书大纲',
+            'refine_outline': '优化全书大纲',
+            'build_characters': '生成角色档案',
+            'build_eventlines': '生成事件线',
+            'build_detail_settings': '生成细纲设定',
+            'build_chapter_settings': '生成章纲设定',
+            'input_analysis': '识别短篇素材',
+            'fusion_options': '生成短篇创意方案',
+            'synopsis': '生成短篇导语',
+            'outline': '生成短篇大纲',
+            'quality_check': '短篇质量检查',
+            'batch_quality_check': '短篇分批质量检查',
+            'quality_issue_rewrite': '重写短篇问题章节',
+            'coherence_review': '短篇通篇复审',
+            'batch_coherence_review': '短篇分批复审',
+            'title': '生成短篇书名',
+            'story_tags': '生成短篇标签',
+            'write_chapter': '写作章节正文',
             'continue_writing': '续写内容',
-            'polish_chapter': '润色章节',
+            'polish_chapter': '润色正文',
             'evaluate_chapter': '评估章节',
             'write_first_chapter': '写作首章',
             'continue_story': '续写故事',
@@ -690,7 +977,8 @@ class PromptManager:
                 "display_name": task_display_names.get(task_name, task_name),
                 "description": description,
                 "prompt": prompt,
-                "is_custom": is_custom
+                "is_custom": is_custom,
+                "has_default": bool(DEFAULT_PROMPTS.get(agent_type, {}).get(task_name, ""))
             })
         
         return result
@@ -723,7 +1011,7 @@ class PromptManager:
             默认提示词内容
         """
         if task_name == "system":
-            return DEFAULT_PROMPTS.get(agent_type, {}).get("system", "")
+            return self._load_builtin_prompt_file(agent_type) or DEFAULT_PROMPTS.get(agent_type, {}).get("system", "")
         return DEFAULT_PROMPTS.get(agent_type, {}).get(task_name, "")
     
     def save_custom_prompt(self, agent_type: str, task_name: str, content: str) -> None:

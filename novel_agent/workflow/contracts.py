@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 
+DEFAULT_TARGET_WORDS_PER_CHAPTER = 3000
+MAX_AUTO_DERIVED_CHAPTERS = 500
+MIN_LENGTH_PLAN_COVERAGE_RATIO = 0.9
+
 
 def _now_iso() -> str:
     """返回当前 ISO8601 时间。"""
@@ -16,6 +20,129 @@ def _now_iso() -> str:
 def _new_id() -> str:
     """返回 UUID 字符串。"""
     return str(uuid.uuid4())
+
+
+def _positive_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        return 0
+    return int((numerator + denominator - 1) / denominator)
+
+
+def normalize_creation_length_plan(
+    scope: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """校正合同中的全书字数、单章字数和章节数量。"""
+    if not isinstance(scope, dict):
+        return False
+
+    volume_count = max(1, _positive_int(scope.get("volume_count"), 1))
+    chapters_per_volume = max(1, _positive_int(scope.get("chapters_per_volume"), 5))
+    target_word_count = _positive_int(scope.get("target_word_count"), 0)
+    target_words_per_chapter = _positive_int(scope.get("target_words_per_chapter"), 0)
+
+    requested_total_chapters = _positive_int(scope.get("total_chapters"), 0)
+    original_total_chapters = volume_count * chapters_per_volume
+    total_chapters = requested_total_chapters or original_total_chapters
+    graph_changed = False
+    coverage_adjusted = False
+    adjustment: Dict[str, Any] = {}
+
+    if requested_total_chapters and requested_total_chapters != original_total_chapters:
+        chapters_per_volume = max(1, _ceil_div(requested_total_chapters, volume_count))
+        total_chapters = volume_count * chapters_per_volume
+        graph_changed = True
+
+    if target_word_count:
+        if target_words_per_chapter:
+            required_total_chapters = _ceil_div(target_word_count, target_words_per_chapter)
+        else:
+            required_total_chapters = _ceil_div(target_word_count, DEFAULT_TARGET_WORDS_PER_CHAPTER)
+
+        required_total_chapters = max(5, min(MAX_AUTO_DERIVED_CHAPTERS, required_total_chapters))
+
+        if not target_words_per_chapter and required_total_chapters:
+            target_words_per_chapter = max(500, _ceil_div(target_word_count, required_total_chapters))
+            scope["target_words_per_chapter"] = target_words_per_chapter
+            scope["target_words_per_chapter_source"] = "estimated"
+
+        if (
+            target_words_per_chapter
+            and required_total_chapters
+            and volume_count > 1
+            and chapters_per_volume >= required_total_chapters
+            and (volume_count * chapters_per_volume) > int(required_total_chapters * 1.5)
+        ):
+            previous_total_chapters = volume_count * chapters_per_volume
+            chapters_per_volume = max(1, _ceil_div(required_total_chapters, volume_count))
+            total_chapters = volume_count * chapters_per_volume
+            graph_changed = True
+            coverage_adjusted = True
+            adjustment = {
+                "reason": "derived_total_chapters_used_as_chapters_per_volume",
+                "target_word_count": target_word_count,
+                "target_words_per_chapter": target_words_per_chapter,
+                "previous_total_chapters": previous_total_chapters,
+                "previous_chapters_per_volume": scope.get("chapters_per_volume"),
+                "required_total_chapters": required_total_chapters,
+                "adjusted_volume_count": volume_count,
+                "adjusted_chapters_per_volume": chapters_per_volume,
+                "adjusted_total_chapters": total_chapters,
+                "adjusted_estimated_total_words": total_chapters * target_words_per_chapter,
+            }
+
+        planned_total_words = total_chapters * target_words_per_chapter if target_words_per_chapter else 0
+        minimum_covered_words = int(target_word_count * MIN_LENGTH_PLAN_COVERAGE_RATIO)
+        if (
+            target_words_per_chapter
+            and planned_total_words
+            and planned_total_words < minimum_covered_words
+            and required_total_chapters > total_chapters
+        ):
+            chapters_per_volume = max(1, _ceil_div(required_total_chapters, volume_count))
+            total_chapters = volume_count * chapters_per_volume
+            graph_changed = True
+            coverage_adjusted = True
+            adjustment = {
+                "reason": "target_word_count_not_covered_by_chapter_plan",
+                "target_word_count": target_word_count,
+                "target_words_per_chapter": target_words_per_chapter,
+                "previous_total_chapters": original_total_chapters,
+                "previous_estimated_total_words": planned_total_words,
+                "required_total_chapters": required_total_chapters,
+                "adjusted_volume_count": volume_count,
+                "adjusted_chapters_per_volume": chapters_per_volume,
+                "adjusted_total_chapters": total_chapters,
+                "adjusted_estimated_total_words": total_chapters * target_words_per_chapter,
+            }
+
+    normalized_values = {
+        "volume_count": volume_count,
+        "chapters_per_volume": chapters_per_volume,
+        "total_chapters": total_chapters,
+        "target_word_count": target_word_count,
+        "target_words_per_chapter": target_words_per_chapter,
+    }
+    for key, value in normalized_values.items():
+        if scope.get(key) != value:
+            scope[key] = value
+            if key in {"volume_count", "chapters_per_volume", "total_chapters", "target_words_per_chapter"}:
+                graph_changed = True
+
+    if coverage_adjusted and isinstance(metadata, dict):
+        metadata["length_plan_adjusted"] = True
+        if adjustment:
+            metadata["length_plan_adjustment"] = adjustment
+
+    return graph_changed
 
 
 @dataclass
@@ -244,6 +371,7 @@ def build_default_creation_contract(
     plot_idea: str = "",
     volume_count: int = 1,
     chapters_per_volume: int = 5,
+    total_chapters: int = 0,
     target_word_count: int = 0,
     target_words_per_chapter: int = 0,
     ai_autonomy_requested: bool = False,
@@ -252,28 +380,33 @@ def build_default_creation_contract(
     user_confirmed: bool = False,
 ) -> CreationContract:
     """根据现有创作参数构建默认合同。"""
-    total_chapters = max(1, int(volume_count or 1)) * max(1, int(chapters_per_volume or 1))
     normalized_target_words = max(0, int(target_word_count or 0))
     normalized_words_per_chapter = max(0, int(target_words_per_chapter or 0))
-    if normalized_target_words and total_chapters and not normalized_words_per_chapter:
-        normalized_words_per_chapter = max(500, int((normalized_target_words + total_chapters - 1) / total_chapters))
+    scope = {
+        "novel_type": str(novel_type or "").strip(),
+        "theme": str(theme or "").strip(),
+        "requirements": str(requirements or "").strip(),
+        "protagonist": str(protagonist or "").strip(),
+        "plot_idea": str(plot_idea or "").strip(),
+        "volume_count": max(1, int(volume_count or 1)),
+        "chapters_per_volume": max(1, int(chapters_per_volume or 1)),
+        "target_word_count": normalized_target_words,
+        "target_words_per_chapter": normalized_words_per_chapter,
+        "ai_autonomy_requested": bool(ai_autonomy_requested),
+    }
+    if int(total_chapters or 0) > 0:
+        scope["total_chapters"] = int(total_chapters)
+    metadata = {
+        "draft": not user_confirmed,
+        "created_from": "legacy_orchestrated_flow",
+        "pause_after_chapter_settings": True,
+    }
+    normalize_creation_length_plan(scope, metadata)
 
     contract = CreationContract(
         goal="创作一部长篇小说",
         user_confirmed=user_confirmed,
-        scope={
-            "novel_type": str(novel_type or "").strip(),
-            "theme": str(theme or "").strip(),
-            "requirements": str(requirements or "").strip(),
-            "protagonist": str(protagonist or "").strip(),
-            "plot_idea": str(plot_idea or "").strip(),
-            "volume_count": max(1, int(volume_count or 1)),
-            "chapters_per_volume": max(1, int(chapters_per_volume or 1)),
-            "total_chapters": total_chapters,
-            "target_word_count": normalized_target_words,
-            "target_words_per_chapter": normalized_words_per_chapter,
-            "ai_autonomy_requested": bool(ai_autonomy_requested),
-        },
+        scope=scope,
         constraints={
             "style": [],
             "forbidden": [],
@@ -302,11 +435,7 @@ def build_default_creation_contract(
         ],
         source_session_id=str(source_session_id or "").strip(),
         source_message=str(source_message or "").strip(),
-        metadata={
-            "draft": not user_confirmed,
-            "created_from": "legacy_orchestrated_flow",
-            "pause_after_chapter_settings": True,
-        },
+        metadata=metadata,
     )
     return contract
 
@@ -449,6 +578,9 @@ def build_default_task_graph(contract: CreationContract) -> List[TaskDefinition]
             metadata={"stop_on_review_required": True},
         ),
     ]
+
+    if bool(contract.metadata.get("planning_only", False)) or bool(contract.metadata.get("pause_after_outline", False)):
+        return tasks[:3]
 
     for chapter_number in range(1, total_chapters + 1):
         tasks.append(

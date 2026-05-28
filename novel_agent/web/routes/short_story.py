@@ -38,6 +38,8 @@ from ..models.requests import (
     ShortStoryChapterGenerateRequest,
     ShortStoryChapterSaveRequest,
     ShortStoryOutlineConfirmRequest,
+    ShortStoryQualityRewriteRequest,
+    ShortStoryRollbackRequest,
     ShortStoryReviewCommitRequest,
     ShortStorySimpleFixRequest,
     ShortStoryTimeoutSettingsRequest,
@@ -58,6 +60,7 @@ SHORT_STORY_TOKEN_LIMITS = {
     "outline": 4500,
     "chapter": 2800,
     "quality": 7000,  # 质量检查需要容纳较长报告与修订建议
+    "quality_rewrite": 3200,
     "coherence": 2000,  # 复审同样只需要报告
     "title": 1800,
     "tags": 1400,
@@ -261,6 +264,18 @@ async def start_short_story_workflow(request: ShortStoryStartRequest):
 @router.post("/short-story/workflow/status")
 async def get_short_story_workflow_status(request: ShortStoryWorkflowRequest):
     return JSONResponse(_service_call(_service.get_workflow_status, request.workflow))
+
+
+@router.post("/short-story/workflow/rollback")
+async def rollback_short_story_workflow(request: ShortStoryRollbackRequest):
+    return JSONResponse(
+        _service_call(
+            _service.rollback_workflow,
+            workflow=request.workflow,
+            target_step=request.target_step,
+            feedback=request.feedback,
+        )
+    )
 
 
 @router.get("/short-story/settings")
@@ -621,6 +636,7 @@ async def generate_short_story_quality_check(request: ShortStoryWorkflowRequest)
     passed = "质量检查通过" in raw_output or "通过" in raw_output
     revised_chapters = parse_chapters_from_full_text(raw_output)
     simple_fixes = _service.extract_simple_quality_fixes(request.workflow, raw_output)
+    rewrite_targets = _service.extract_quality_rewrite_targets(request.workflow, raw_output)
     return _ok(
         {
             "data": {
@@ -630,6 +646,7 @@ async def generate_short_story_quality_check(request: ShortStoryWorkflowRequest)
                 "passed": passed,
                 "revised_chapters": revised_chapters,
                 "simple_fixes": simple_fixes,
+                "rewrite_targets": rewrite_targets,
             }
         }
     )
@@ -659,6 +676,64 @@ async def apply_short_story_quality_simple_fixes(request: ShortStorySimpleFixReq
             report=request.report,
             chapters=revised_chapters,
         )
+    )
+
+
+@router.post("/short-story/quality-check/rewrite-issue-chapters")
+async def rewrite_short_story_quality_issue_chapters(request: ShortStoryQualityRewriteRequest):
+    revised_chapters = _service.normalize_chapters_payload(request.chapters) if request.chapters else None
+    targets = _service.extract_quality_rewrite_targets(request.workflow, request.report)
+    if not targets:
+        raise HTTPException(status_code=400, detail="当前质检报告中没有需要大模型重写的章节问题。")
+
+    rewritten_chapters = []
+    prompts = []
+    for target in targets:
+        chapter_number = int(target["chapter_number"])
+        prompt_result = _service_call(
+            _service.build_quality_issue_rewrite_prompt,
+            request.workflow,
+            chapter_number=chapter_number,
+            issues=target.get("issues") or [],
+            chapters=revised_chapters,
+        )
+        prompt = prompt_result["data"]["prompt"]
+        raw_output = await _run_prompt(
+            prompt,
+            request.api_config_id,
+            request.model,
+            **_get_short_story_prompt_limits("quality_rewrite"),
+        )
+        title = prompt_result["data"]["chapter_title"]
+        rewritten_chapters.append(
+            {
+                "chapter_number": chapter_number,
+                "title": title,
+                "content": raw_output.strip(),
+            }
+        )
+        prompts.append(
+            {
+                "chapter_number": chapter_number,
+                "prompt": prompt,
+                "issues": target.get("issues") or [],
+            }
+        )
+
+    result = _service_call(
+        _service.rewrite_quality_issue_chapters,
+        workflow=request.workflow,
+        rewritten_chapters=rewritten_chapters,
+        chapters=revised_chapters,
+    )
+    return _ok(
+        {
+            "data": {
+                **result["data"],
+                "rewrite_targets": targets,
+                "prompts": prompts,
+            }
+        }
     )
 
 

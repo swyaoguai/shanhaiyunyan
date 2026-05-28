@@ -346,9 +346,25 @@ class VectorStore:
         if self._client is None:
             return
         try:
+            identifier = getattr(self._client, "_identifier", None)
+            try:
+                system = getattr(self._client, "_system", None)
+                stop = getattr(system, "stop", None)
+                if callable(stop):
+                    stop()
+            except Exception as exc:
+                logger.debug(f"停止 ChromaDB 系统失败: {exc}")
+
             close = getattr(self._client, "close", None)
             if callable(close):
                 close()
+            if identifier:
+                try:
+                    from chromadb.api.shared_system_client import SharedSystemClient
+
+                    SharedSystemClient._identifier_to_system.pop(identifier, None)
+                except Exception as exc:
+                    logger.debug(f"清理 ChromaDB 系统缓存失败: {exc}")
         finally:
             self._client = None
 

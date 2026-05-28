@@ -41,6 +41,7 @@ BUILTIN_PROJECT_DATA_TYPES = {
     "detail_settings",
     "chapter_settings",
     "chapter_summary",
+    "chapter_volumes",
 }
 
 
@@ -418,7 +419,7 @@ def _normalize_builtin_project_data(data_type: str, payload: Any) -> Dict[str, A
         return {"data": _normalize_item_rows(payload), "raw_data": payload}
     if data_type in {"eventlines", "outline_settings", "detail_settings", "chapter_settings"}:
         return {"data": _normalize_named_rows(payload, title_key="name"), "raw_data": payload}
-    if data_type == "chapter_summary":
+    if data_type in {"chapter_summary", "chapter_volumes"}:
         data = payload if isinstance(payload, list) else []
         return {"data": data, "raw_data": payload}
     return {"data": payload}
@@ -862,13 +863,19 @@ async def update_project(project_id: str, request: ProjectUpdateRequest):
 
 @router.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
-    from ...project_manager import get_project_manager
+    from ...project_manager import ProjectDeleteError, get_project_manager
     from ..runtime_refresh import release_runtime_for_project_delete
 
     pm = get_project_manager()
     release_runtime_for_project_delete(project_id)
-    if pm.delete_project(project_id):
-        return JSONResponse({"success": True})
+    try:
+        if pm.delete_project(project_id):
+            return JSONResponse({"success": True})
+    except ProjectDeleteError as exc:
+        detail = str(exc)
+        if exc.locked_path:
+            detail = f"{detail}（占用文件：{exc.locked_path}）"
+        raise HTTPException(status_code=409, detail=detail) from exc
     raise HTTPException(status_code=400, detail="Cannot delete project")
 
 

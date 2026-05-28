@@ -16,10 +16,11 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
-from ..models.requests import ChatRequest, UserInputRequest
+from ..models.requests import ChatMessageEditRequest, ChatRequest, UserInputRequest
 from ..dependencies import get_coordinator, get_router_agent
 from ...agents.visible_text import strip_visible_technical_markers
 from ...route_targets import get_default_intent_route_target
+from ...workflow.contracts import MAX_AUTO_DERIVED_CHAPTERS
 from ...workflow.user_interruptions import apply_interruption
 from ...workflow.runtime_messages import make_runtime_message
 
@@ -321,27 +322,27 @@ async def _get_chat_session_lock(session_key: str) -> asyncio.Lock:
 _USER_VISIBLE_AGENT_NAME_REPLACEMENTS = {
     "Worldbuilder那边": "后续世界观设定流程这边",
     "WorldBuilder那边": "后续世界观设定流程这边",
-    "WorldbuilderAgent": "世界观构建师",
-    "WorldBuilderAgent": "世界观构建师",
-    "Worldbuilder": "世界观构建师",
-    "WorldBuilder": "世界观构建师",
-    "OutlinerAgent": "大纲规划师",
-    "Outliner": "大纲规划师",
-    "ChapterWriter": "章节写作助手",
-    "Communicator": "沟通助手",
+    "WorldbuilderAgent": "世界观设定师",
+    "WorldBuilderAgent": "世界观设定师",
+    "Worldbuilder": "世界观设定师",
+    "WorldBuilder": "世界观设定师",
+    "OutlinerAgent": "全书大纲规划师",
+    "Outliner": "全书大纲规划师",
+    "ChapterWriter": "章节正文写手",
+    "Communicator": "创作沟通助手",
     "Coordinator": "创作协调器",
     "Router": "智能路由",
     "CharacterBuilder": "角色构建师",
     "EventlineBuilder": "事件线构建师",
     "DetailOutlineBuilder": "细纲构建师",
-    "ChapterSettingBuilder": "章纲构建师",
-    "ContinuousWriter": "续写助手",
-    "Polisher": "润色助手",
-    "Evaluator": "质量评估师",
-    "SummaryOrchestrator": "摘要编排助手",
+    "ChapterSettingBuilder": "章纲设定师",
+    "ContinuousWriter": "无限续写正文写手",
+    "Polisher": "正文润色师",
+    "Evaluator": "质检评估师",
+    "SummaryOrchestrator": "摘要编排师",
     "ContextStrategy": "上下文策略助手",
     "ContentReader": "内容读取助手",
-    "ContentExpansion": "内容扩展助手",
+    "ContentExpansion": "正文扩写师",
     "FileNaming": "文件命名助手",
     "WebSearch": "网络搜索助手",
     "TrendsSearch": "热点搜索助手",
@@ -386,7 +387,7 @@ def _is_internal_stream_progress(update: Any) -> bool:
 def _sanitize_conversation_history(history):
     """Normalize history payload for frontend rendering."""
     normalized = []
-    for item in history or []:
+    for index, item in enumerate(history or []):
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "")).strip().lower()
@@ -401,6 +402,7 @@ def _sanitize_conversation_history(history):
         normalized.append({
             "role": role,
             "content": text,
+            "message_index": index,
         })
     return normalized
 
@@ -1331,9 +1333,9 @@ def _normalize_creation_requirements(
     chapters_per_volume = _normalize_positive_int(info.get("chapters_per_volume") or hints.get("chapters_per_volume"), 5)
     if target_word_count and chapters_per_volume <= 5:
         if target_words_per_chapter:
-            chapters_per_volume = max(1, min(80, (target_word_count + target_words_per_chapter - 1) // target_words_per_chapter))
+            chapters_per_volume = max(1, min(MAX_AUTO_DERIVED_CHAPTERS, (target_word_count + target_words_per_chapter - 1) // target_words_per_chapter))
         else:
-            chapters_per_volume = max(5, min(80, (target_word_count + 2999) // 3000))
+            chapters_per_volume = max(5, min(MAX_AUTO_DERIVED_CHAPTERS, (target_word_count + 2999) // 3000))
             target_words_per_chapter = max(500, (target_word_count + chapters_per_volume - 1) // chapters_per_volume)
             target_words_per_chapter_source = "estimated"
 
@@ -1714,6 +1716,29 @@ def _append_agent_history(agent: Any, role: str, content: str) -> None:
         "role": role,
         "content": text,
     })
+
+
+def _replace_agent_history(agent: Any, history: List[Dict[str, Any]]) -> None:
+    if not hasattr(agent, "conversation_history"):
+        return
+    agent.conversation_history = history
+
+
+def _ensure_chat_agent_from_state(session_key: str, saved: Any, router_agent: Any) -> Any:
+    from ...agents import CommunicatorAgent
+
+    agent = chat_sessions.get(session_key)
+    if agent is None:
+        agent = CommunicatorAgent()
+        if router_agent:
+            agent.set_router_agent(router_agent)
+            router_kb = getattr(router_agent, "knowledge_base", None)
+            if router_kb:
+                agent.set_knowledge_base(router_kb)
+        chat_sessions[session_key] = agent
+    agent.conversation_history = list(getattr(saved, "conversation_history", []) or [])
+    agent.collected_info = dict(getattr(saved, "collected_info", {}) or {})
+    return agent
 
 
 def _register_active_workflow(session_key: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2348,10 +2373,28 @@ def _router_result_allows_assistant_auto_save(
 
 _CREATIVE_DECISION_PLANNING_KINDS = {"creation_contract", "task_pool", "chat_creative_decisions"}
 _ROUTED_EXECUTION_SKIP_CREATIVE_DECISION = {
+    "create_novel",
+    "create_character",
+    "create_eventlines",
+    "create_detail_outline",
+    "create_chapter_settings",
+    "create_project_data",
     "continue_write",
     "polish_content",
 }
 _ROUTED_AGENT_SKIP_CREATIVE_DECISION = {
+    "Worldbuilder",
+    "WorldbuilderAgent",
+    "Outliner",
+    "OutlinerAgent",
+    "CharacterBuilder",
+    "CharacterBuilderAgent",
+    "EventlineBuilder",
+    "EventlineBuilderAgent",
+    "DetailOutlineBuilder",
+    "DetailOutlineBuilderAgent",
+    "ChapterSettingBuilder",
+    "ChapterSettingBuilderAgent",
     "ContinuousWriter",
     "Polisher",
     "PolisherAgent",
@@ -2809,6 +2852,85 @@ async def get_chat_history(session_id: str = "default"):
             "history": normalized,
             "count": len(normalized),
             "restored": bool(normalized),
+        })
+
+
+@router.patch("/chat/messages/{message_index}")
+async def update_chat_message(message_index: int, request: ChatMessageEditRequest, session_id: str = "default"):
+    """Persistently edit one message in the current chat session."""
+    from ...agents import get_chat_session_store
+    from ...project_manager import get_project_manager
+
+    session_id = _normalize_session_id(session_id)
+    content = _strip_visible_technical_markers(str(request.content or "")).strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="消息内容不能为空")
+
+    pm = get_project_manager()
+    project_id = pm.current_project_id or ""
+    session_key = f"{project_id}::{session_id}"
+    store = get_chat_session_store()
+    router_agent = get_router_agent()
+
+    lock = await _get_chat_session_lock(session_key)
+    async with lock:
+        saved = store.load(session_id, project_id)
+        if not saved:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        history = list(saved.conversation_history or [])
+        if message_index < 0 or message_index >= len(history):
+            raise HTTPException(status_code=404, detail="消息不存在")
+        if not isinstance(history[message_index], dict):
+            raise HTTPException(status_code=400, detail="消息格式异常")
+
+        history[message_index] = {
+            **history[message_index],
+            "content": content,
+            "edited_at": _now_iso(),
+        }
+        saved.conversation_history = history
+        store.save(saved)
+        agent = _ensure_chat_agent_from_state(session_key, saved, router_agent)
+        _replace_agent_history(agent, history)
+        return JSONResponse({
+            "success": True,
+            "session_id": session_id,
+            "message": _sanitize_conversation_history([history[message_index]])[0],
+        })
+
+
+@router.delete("/chat/messages/{message_index}")
+async def delete_chat_message(message_index: int, session_id: str = "default"):
+    """Persistently delete one message from the current chat session."""
+    from ...agents import get_chat_session_store
+    from ...project_manager import get_project_manager
+
+    session_id = _normalize_session_id(session_id)
+    pm = get_project_manager()
+    project_id = pm.current_project_id or ""
+    session_key = f"{project_id}::{session_id}"
+    store = get_chat_session_store()
+    router_agent = get_router_agent()
+
+    lock = await _get_chat_session_lock(session_key)
+    async with lock:
+        saved = store.load(session_id, project_id)
+        if not saved:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        history = list(saved.conversation_history or [])
+        if message_index < 0 or message_index >= len(history):
+            raise HTTPException(status_code=404, detail="消息不存在")
+
+        deleted = history.pop(message_index)
+        saved.conversation_history = history
+        store.save(saved)
+        agent = _ensure_chat_agent_from_state(session_key, saved, router_agent)
+        _replace_agent_history(agent, history)
+        return JSONResponse({
+            "success": True,
+            "session_id": session_id,
+            "deleted": _sanitize_conversation_history([deleted])[0] if isinstance(deleted, dict) else None,
+            "count": len(history),
         })
 
 

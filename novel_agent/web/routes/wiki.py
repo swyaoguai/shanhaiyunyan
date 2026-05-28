@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -173,7 +174,27 @@ GRAPH_STOP_NAMES = {
     "他们", "她们", "我们", "你们", "自己", "众人", "少年", "少女", "男人", "女人", "老人",
     "时候", "地方", "东西", "事情", "声音", "目光", "脸色", "心中", "身后", "前方", "旁边",
     "第一", "第二", "第三", "小说", "章节", "主角", "角色", "人物", "没有", "不是", "只是",
+    "只见", "看见", "听见", "知道", "觉得", "已经", "突然", "开始", "继续", "成功", "失败",
+    "提升", "进入", "出来", "过去", "回来", "说道", "问道", "想到", "立即", "终于", "两人",
 }
+
+GRAPH_BAD_NAME_PARTS = (
+    "只见", "已经", "突然", "开始", "继续", "成功", "失败", "提升", "进入", "出来", "过去",
+    "回来", "说道", "问道", "想到", "看见", "听见", "似乎", "仿佛", "然后", "于是", "因为",
+    "所以", "但是", "只是", "不是", "没有", "能够", "可以", "无法", "不能", "不会", "这是",
+    "那是", "显然", "瞬间", "终于", "立刻", "正在", "依旧", "已经", "成为",
+    "地将", "地把", "功地", "将镇", "提升至",
+)
+
+GRAPH_BAD_NAME_PREFIXES = (
+    "的", "了", "在", "把", "被", "将", "向", "从", "对", "与", "和", "或", "却", "但", "可", "地",
+    "又", "也", "都", "只", "便", "让", "给", "为", "以", "及", "并", "再", "更", "很", "最",
+    "那", "这", "其", "他", "她", "它", "我", "你", "前", "后",
+)
+
+GRAPH_BAD_NAME_SUFFIXES = (
+    "了", "着", "的", "地", "得", "过", "吗", "吧", "呢", "啊", "上", "下", "中", "里",
+)
 
 GRAPH_ENTITY_TYPES = {
     "character": "角色",
@@ -188,9 +209,15 @@ GRAPH_ENTITY_TYPES = {
 GRAPH_CATEGORY_KEYWORDS = {
     "location": ("城", "村", "镇", "山", "谷", "湖", "海", "河", "宫", "殿", "楼", "阁", "院", "站", "车站", "旅馆", "矿上", "家里", "旧城"),
     "item": ("剑", "刀", "令", "灯", "符", "药", "书", "信", "照片", "报纸", "夹子", "纸板", "钥匙", "玉佩", "面包"),
-    "faction": ("宗", "门", "派", "族", "会", "盟", "公司", "王朝", "军", "队", "集团"),
-    "power": ("诀", "法", "术", "功", "心法", "神通", "灵力", "命运"),
+    "faction": ("宗", "门", "派", "族", "会", "盟", "公司", "王朝", "军", "队", "集团", "司"),
+    "power": ("诀", "法", "术", "心法", "神通", "灵力"),
 }
+
+GRAPH_ENTITY_SUFFIXES = tuple(sorted(
+    {keyword for keywords in GRAPH_CATEGORY_KEYWORDS.values() for keyword in keywords},
+    key=len,
+    reverse=True,
+))
 
 GRAPH_RELATION_KEYWORDS = [
     ("救", "救助"),
@@ -222,6 +249,44 @@ def _normalize_entity_name(value: Any) -> str:
     return text[:18]
 
 
+def _clean_entity_candidate(value: Any) -> str:
+    name = _normalize_entity_name(value)
+    if not name:
+        return ""
+    for separator in ("把", "将", "在", "向", "从", "对", "给", "与", "和", "跟", "进入", "至"):
+        if separator in name and not name.startswith(separator):
+            tail = name.rsplit(separator, 1)[-1]
+            if len(tail) >= 2:
+                name = tail
+    for prefix in GRAPH_BAD_NAME_PREFIXES:
+        while name.startswith(prefix) and len(name) > 2:
+            name = name[len(prefix):]
+    for suffix in GRAPH_BAD_NAME_SUFFIXES:
+        while name.endswith(suffix) and len(name) > 2:
+            name = name[:-len(suffix)]
+    return name[:12]
+
+
+def _is_noisy_entity_name(name: str, *, allow_seed: bool = False) -> bool:
+    if not name:
+        return True
+    if allow_seed:
+        return False
+    if name in GRAPH_STOP_NAMES:
+        return True
+    if len(name) < 2 or len(name) > 8:
+        return True
+    if any(part in name for part in GRAPH_BAD_NAME_PARTS):
+        return True
+    if any(name.startswith(prefix) for prefix in GRAPH_BAD_NAME_PREFIXES):
+        return True
+    if any(name.endswith(suffix) for suffix in GRAPH_BAD_NAME_SUFFIXES):
+        return True
+    if re.search(r"(第[一二三四五六七八九十百千万零〇两\d]+|入门|外界|门口|房门|心中|眼前|耳边)", name):
+        return True
+    return False
+
+
 def _iter_character_seed_names(raw: Any) -> list[str]:
     names: list[str] = []
     if isinstance(raw, dict):
@@ -233,12 +298,12 @@ def _iter_character_seed_names(raw: Any) -> list[str]:
     for item in iterable:
         if isinstance(item, dict):
             for key in ("name", "姓名", "title"):
-                name = _normalize_entity_name(item.get(key))
+                name = _clean_entity_candidate(item.get(key))
                 if name:
                     names.append(name)
                     break
         else:
-            name = _normalize_entity_name(item)
+            name = _clean_entity_candidate(item)
             if name:
                 names.append(name)
     return names
@@ -248,9 +313,12 @@ def _guess_entity_type(name: str, character_names: set[str]) -> str:
     if name in character_names:
         return "character"
     for entity_type, keywords in GRAPH_CATEGORY_KEYWORDS.items():
+        if any(name.endswith(keyword) for keyword in keywords):
+            return entity_type
+    for entity_type, keywords in GRAPH_CATEGORY_KEYWORDS.items():
         if any(keyword in name for keyword in keywords):
             return entity_type
-    if len(name) in (2, 3) and name not in GRAPH_STOP_NAMES:
+    if len(name) in (2, 3) and not _is_noisy_entity_name(name):
         return "character"
     return "clue"
 
@@ -264,17 +332,44 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _extract_candidate_names(text: str, character_names: set[str]) -> list[str]:
-    candidates = set(character_names)
-    for match in re.finditer(r"[\u4e00-\u9fa5·]{2,8}", text):
-        name = _normalize_entity_name(match.group(0))
-        if not name or name in GRAPH_STOP_NAMES:
-            continue
-        if len(name) > 4 and not any(keyword in name for keywords in GRAPH_CATEGORY_KEYWORDS.values() for keyword in keywords):
-            continue
-        if any(stop in name for stop in GRAPH_STOP_NAMES):
-            continue
-        candidates.add(name)
-    return sorted(candidates, key=lambda value: (-len(value), value))
+    seed_names = {
+        _clean_entity_candidate(name)
+        for name in character_names
+        if _clean_entity_candidate(name)
+    }
+    candidates = set(seed_names)
+    counts: Counter[str] = Counter()
+
+    def add_candidate(raw: str, *, explicit: bool = False) -> None:
+        name = _clean_entity_candidate(raw)
+        if _is_noisy_entity_name(name, allow_seed=explicit or name in seed_names):
+            return
+        if explicit or name in seed_names or any(name.endswith(suffix) for suffix in GRAPH_ENTITY_SUFFIXES):
+            counts[name] += 2 if explicit else 1
+
+    for match in re.finditer(r"《([^》]{2,12})》|「([^」]{2,12})」|“([^”]{2,12})”|\[\[([^\]]{2,20})\]\]", text):
+        add_candidate(next((group for group in match.groups() if group), ""), explicit=True)
+
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in GRAPH_ENTITY_SUFFIXES)
+    for match in re.finditer(rf"[\u4e00-\u9fa5·]{{1,6}}(?:{suffix_pattern})", text):
+        add_candidate(match.group(0))
+
+    for sentence in _split_sentences(text):
+        for match in re.finditer(r"([\u4e00-\u9fa5·]{2,3})(?=(?:说|问|答|看|走|拿|把|将|与|和|在|从|向|给|对|进入|发现|遇见|救|追|逃|杀|打))", sentence):
+            add_candidate(match.group(1))
+        for match in re.finditer(r"(?<=(?:和|与|跟|对|向|把|将|给))([\u4e00-\u9fa5·]{2,3})", sentence):
+            add_candidate(match.group(1))
+
+    for name, count in counts.items():
+        if name in seed_names or count >= 2 or any(name.endswith(suffix) for suffix in GRAPH_ENTITY_SUFFIXES):
+            candidates.add(name)
+
+    filtered = {
+        name for name in candidates
+        if not any(name != other and len(name) <= 3 and name in other for other in candidates)
+    }
+
+    return sorted(filtered, key=lambda value: (-len(value), value))
 
 
 def _relation_label(sentence: str) -> str:
@@ -300,7 +395,6 @@ def _build_relationship_graph_payload(chapters: list[dict[str, Any]], req: Relat
     character_names = {name for name in character_seed_names if name}
     full_text = "\n".join(str(row.get("content") or "") for row in chapters)
     candidates = _extract_candidate_names(full_text, character_names)
-    character_names.update(name for name in candidates if len(name) in (2, 3))
 
     node_map: dict[str, dict[str, Any]] = {}
     edge_map: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -412,7 +506,8 @@ def _build_relationship_graph_payload(chapters: list[dict[str, Any]], req: Relat
     edges = [edge for edge in edges if edge["source"] in filtered_ids and edge["target"] in filtered_ids]
 
     nodes.sort(key=lambda node: (-int(node.get("degree") or 0), min(node.get("chapters") or [999999]), node["label"]))
-    nodes = nodes[:80]
+    node_limit = 45 if mode == "character" else 55
+    nodes = nodes[:node_limit]
     kept_ids = {node["id"] for node in nodes}
     edges = [edge for edge in edges if edge["source"] in kept_ids and edge["target"] in kept_ids]
     edges.sort(key=lambda edge: (-int(edge.get("weight") or 0), edge["label"]))

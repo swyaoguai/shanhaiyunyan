@@ -289,7 +289,8 @@ async function loadCurrentProjectData() {
                 outline_settings: [],
                 detail_settings: [],
                 chapter_settings: [],
-                chapter_summary: []
+                chapter_summary: [],
+                chapter_volumes: []
             };
             if (typeof updateMentionData === 'function') {
                 updateMentionData();
@@ -329,6 +330,9 @@ async function loadCurrentProjectData() {
 
         const chapterSummaryData = await apiCall('/api/project-data/chapter_summary');
         store.projectData.chapter_summary = Array.isArray(chapterSummaryData.data) ? chapterSummaryData.data : [];
+
+        const chapterVolumesData = await apiCall('/api/project-data/chapter_volumes');
+        store.projectData.chapter_volumes = Array.isArray(chapterVolumesData.data) ? chapterVolumesData.data : [];
 
         // outline_settings 迁移：降级为自定义分类
         try {
@@ -580,6 +584,9 @@ function showDeleteProjectDialog(projectId, projectName) {
         confirmBtn.disabled = !isMatch;
         confirmBtn.style.opacity = isMatch ? '1' : '0.5';
         confirmBtn.style.cursor = isMatch ? 'pointer' : 'not-allowed';
+        confirmInput.style.borderColor = confirmInput.value && !isMatch
+            ? 'rgba(239,68,68,0.65)'
+            : 'var(--border-color)';
     });
     
     // 取消
@@ -602,7 +609,10 @@ function showDeleteProjectDialog(projectId, projectName) {
         } catch (e) {
             confirmBtn.disabled = false;
             confirmBtn.innerHTML = '确认删除';
-            showToast('删除失败: ' + e.message, 'error');
+            const message = e?.status === 409
+                ? '删除失败：项目文件仍被知识库占用，请稍等几秒后重试；如果仍失败，请重启应用后再删除。'
+                : ('删除失败: ' + e.message);
+            showToast(message, 'error');
         }
     });
     

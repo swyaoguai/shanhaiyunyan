@@ -241,7 +241,7 @@ DEFAULT_INTENT_ROUTE_TARGETS: Dict[str, RouteTargetDescriptor] = {
     "create_chapter_settings": RouteTargetDescriptor(
         id="ChapterSettingBuilder",
         kind=ROUTE_TARGET_AGENT,
-        display_name="章纲构建师",
+        display_name="章纲设定师",
         purpose="生成章节目标、关键事件和结尾钩子",
         accept_task_types=["create_chapter_settings"],
         risk_level="writes_project_content",
@@ -263,7 +263,7 @@ DEFAULT_INTENT_ROUTE_TARGETS: Dict[str, RouteTargetDescriptor] = {
     "continue_write": RouteTargetDescriptor(
         id="ContinuousWriter",
         kind=ROUTE_TARGET_AGENT,
-        display_name="连续创作师",
+        display_name="无限续写正文写手",
         purpose="基于现有正文和上下文续写章节",
         accept_task_types=["continue_write"],
         risk_level="writes_project_content",

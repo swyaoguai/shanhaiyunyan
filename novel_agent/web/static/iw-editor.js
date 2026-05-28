@@ -8,7 +8,9 @@
 let currentEditingIWChapter = {
     index: -1,
     chapter: null,
-    modified: false
+    modified: false,
+    draftTitle: '',
+    draftContent: ''
 };
 
 // 查找匹配状态
@@ -30,7 +32,9 @@ async function showInfiniteWriteChapterEditor(chapter) {
     currentEditingIWChapter = {
         index: chapterIndex,
         chapter: chapter,
-        modified: false
+        modified: false,
+        draftTitle: chapter.title || '',
+        draftContent: chapter.content || ''
     };
 
     if (typeof setInfiniteWriteActiveView === 'function') {
@@ -158,14 +162,14 @@ function bindIWEditorEvents(chapter) {
     
     // 标题修改
     titleInput?.addEventListener('input', () => {
-        currentEditingIWChapter.modified = true;
+        markCurrentIWChapterModified();
         saveStatusEl.style.display = 'none';
     });
     
     // 内容修改
     let autoSaveTimer = null;
     contentTextarea?.addEventListener('input', () => {
-        currentEditingIWChapter.modified = true;
+        markCurrentIWChapterModified();
         saveStatusEl.style.display = 'none';
         
         // 更新字数
@@ -198,7 +202,7 @@ function bindIWEditorEvents(chapter) {
             contentTextarea.value = newContent;
             const newCount = newContent.replace(/\s/g, '').length;
             wordCountEl.textContent = newCount.toLocaleString() + ' 字';
-            currentEditingIWChapter.modified = true;
+            markCurrentIWChapterModified();
             saveStatusEl.style.display = 'none';
             showToast('替换已应用 ✓');
         });
@@ -229,7 +233,8 @@ function bindIWEditorEvents(chapter) {
                 contentTextarea.value = response.content;
                 const newCount = response.content.replace(/\s/g, '').length;
                 wordCountEl.textContent = newCount.toLocaleString() + ' 字';
-                currentEditingIWChapter.modified = true;
+                markCurrentIWChapterModified();
+                await saveIWChapterChanges(false);
                 saveStatusEl.style.display = 'none';
                 showToast('润色完成 ✓');
             } else if (response.error) {
@@ -334,9 +339,13 @@ function bindIWEditorEvents(chapter) {
 // ===== 关闭编辑器 =====
 async function confirmLeaveInfiniteWriteEditor(actionLabel = '离开当前章节') {
     if (currentEditingIWChapter.modified) {
-        if (!(await window.showConfirmDialog(`有未保存的修改，确定要${actionLabel}吗？`))) {
-            return false;
+        const saved = await saveIWChapterChanges(false, { syncBackend: false });
+        if (saved !== false) return true;
+        if (!isCurrentIWEditorMounted()) {
+            currentEditingIWChapter = createEmptyIWEditingState();
+            return true;
         }
+        return window.showConfirmDialog(`有未保存的修改，确定要${actionLabel}吗？`);
     }
     return true;
 }
@@ -352,7 +361,7 @@ async function closeIWEditor() {
     if (typeof saveInfiniteWriteData === 'function') {
         saveInfiniteWriteData();
     }
-    currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+    currentEditingIWChapter = createEmptyIWEditingState();
     if (typeof renderInfiniteWriteNavPanel === 'function') {
         renderInfiniteWriteNavPanel();
     }
@@ -363,17 +372,69 @@ async function closeIWEditor() {
 }
 
 // ===== 保存章节修改 =====
-async function saveIWChapterChanges(showNotification) {
+function createEmptyIWEditingState() {
+    return {
+        index: -1,
+        chapter: null,
+        modified: false,
+        draftTitle: '',
+        draftContent: ''
+    };
+}
+
+function isCurrentIWEditorMounted() {
+    return Boolean(document.getElementById('iw-edit-content') || document.getElementById('iw-edit-chapter-title'));
+}
+
+function updateCurrentIWChapterDraftFromDom() {
+    const titleInput = document.getElementById('iw-edit-chapter-title');
+    const contentTextarea = document.getElementById('iw-edit-content');
+    if (titleInput) currentEditingIWChapter.draftTitle = titleInput.value || '';
+    if (contentTextarea) currentEditingIWChapter.draftContent = contentTextarea.value || '';
+}
+
+function markCurrentIWChapterModified() {
+    currentEditingIWChapter.modified = true;
+    updateCurrentIWChapterDraftFromDom();
+}
+
+function getCurrentIWChapterDraft() {
+    updateCurrentIWChapterDraftFromDom();
+    const hasDom = isCurrentIWEditorMounted();
+    const fallbackChapter = currentEditingIWChapter.chapter || {};
+    const title = hasDom || currentEditingIWChapter.draftTitle
+        ? currentEditingIWChapter.draftTitle
+        : (fallbackChapter.title || '');
+    const content = hasDom || currentEditingIWChapter.draftContent
+        ? currentEditingIWChapter.draftContent
+        : (fallbackChapter.content || '');
+    return {
+        title,
+        content,
+        wordCount: String(content || '').replace(/\s/g, '').length
+    };
+}
+
+function prepareInfiniteWriteEditorForModuleSwitch(nextModuleId, previousModuleId) {
+    if (previousModuleId !== 'infinite-write' || nextModuleId === 'infinite-write') return false;
+    if (!currentEditingIWChapter.modified) return false;
+    saveIWChapterChanges(false, { syncBackend: false });
+    return true;
+}
+
+async function saveIWChapterChanges(showNotification, options = {}) {
+    const { syncBackend = true } = options || {};
     const titleInput = document.getElementById('iw-edit-chapter-title');
     const contentTextarea = document.getElementById('iw-edit-content');
     const saveStatusEl = document.getElementById('iw-edit-save-status');
     const wordCountEl = document.getElementById('iw-edit-word-count');
     
-    if (currentEditingIWChapter.index < 0) return;
+    if (currentEditingIWChapter.index < 0) return false;
     
-    const newTitle = titleInput?.value || '';
-    const newContent = contentTextarea?.value || '';
-    const newWordCount = newContent.replace(/\s/g, '').length;
+    const draft = getCurrentIWChapterDraft();
+    const newTitle = draft.title;
+    const newContent = draft.content;
+    const newWordCount = draft.wordCount;
     
     // 更新本地状态
     const chapter = infiniteWriteState.chapters[currentEditingIWChapter.index];
@@ -397,6 +458,8 @@ async function saveIWChapterChanges(showNotification) {
         // 更新当前编辑状态
         currentEditingIWChapter.chapter = chapter;
         currentEditingIWChapter.modified = false;
+        currentEditingIWChapter.draftTitle = newTitle;
+        currentEditingIWChapter.draftContent = newContent;
         
         // 显示保存状态
         if (saveStatusEl) {
@@ -414,10 +477,12 @@ async function saveIWChapterChanges(showNotification) {
         }
 
         // 刷新列表
-        renderInfiniteWriteChaptersList();
+        if (typeof renderInfiniteWriteChaptersList === 'function') {
+            renderInfiniteWriteChaptersList();
+        }
         if (typeof renderInfiniteWriteNavPanel === 'function') {
             renderInfiniteWriteNavPanel();
-        } else {
+        } else if (typeof loadInfiniteWriteNavChapterList === 'function') {
             loadInfiniteWriteNavChapterList();
         }
         
@@ -426,17 +491,21 @@ async function saveIWChapterChanges(showNotification) {
         }
         
         // 同步到后端（可选）
-        try {
-            await apiCall('/api/continuous-write/chapter', 'PUT', {
-                chapter_index: currentEditingIWChapter.index,
-                title: newTitle,
-                content: newContent
-            });
-        } catch (e) {
-            // 后端同步失败不影响本地保存
-            console.log('[IWEditor] 后端同步失败，数据已保存在本地:', e);
+        if (syncBackend) {
+            try {
+                await apiCall('/api/continuous-write/chapter', 'PUT', {
+                    chapter_index: currentEditingIWChapter.index,
+                    title: newTitle,
+                    content: newContent
+                });
+            } catch (e) {
+                // 后端同步失败不影响本地保存
+                console.log('[IWEditor] 后端同步失败，数据已保存在本地:', e);
+            }
         }
+        return true;
     }
+    return false;
 }
 
 // ===== 删除章节 =====
@@ -488,11 +557,11 @@ async function deleteIWChapterByNumber(chapterNumber, options = {}) {
         if (replacementChapter) {
             showInfiniteWriteChapterEditor(replacementChapter);
         } else if (typeof renderInfiniteWriteInterface === 'function') {
-            currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+            currentEditingIWChapter = createEmptyIWEditingState();
             renderInfiniteWriteInterface();
         }
     } else if (currentEditingIWChapter.chapter?.chapter_number === chapter.chapter_number) {
-        currentEditingIWChapter = { index: -1, chapter: null, modified: false };
+        currentEditingIWChapter = createEmptyIWEditingState();
     }
 
     if (typeof syncInfiniteWriteSession === 'function') {
@@ -639,7 +708,7 @@ function replaceIWCurrent() {
     contentTextarea.value = newContent;
     
     // 标记已修改
-    currentEditingIWChapter.modified = true;
+    markCurrentIWChapterModified();
     document.getElementById('iw-edit-save-status').style.display = 'none';
     
     // 更新字数
@@ -696,7 +765,7 @@ async function replaceIWAll() {
         }
         
         // 标记已修改
-        currentEditingIWChapter.modified = true;
+        markCurrentIWChapterModified();
         document.getElementById('iw-edit-save-status').style.display = 'none';
         
         // 更新字数
@@ -720,6 +789,7 @@ window.showInfiniteWriteChapterPreview = showInfiniteWriteChapterEditor;
 window.showInfiniteWriteChapterEditor = showInfiniteWriteChapterEditor;
 window.closeIWEditor = closeIWEditor;
 window.confirmLeaveInfiniteWriteEditor = confirmLeaveInfiniteWriteEditor;
+window.prepareInfiniteWriteEditorForModuleSwitch = prepareInfiniteWriteEditorForModuleSwitch;
 window.saveIWChapterChanges = saveIWChapterChanges;
 window.deleteIWChapter = deleteIWChapter;
 window.deleteIWChapterByNumber = deleteIWChapterByNumber;

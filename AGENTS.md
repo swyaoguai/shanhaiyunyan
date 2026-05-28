@@ -55,8 +55,9 @@ Notes:
 - There is no dedicated root lint script in `package.json` or repo-level documented lint command. Do not invent one in changes or docs.
 
 ### Update log
-- Record future version updates, bug fixes, UX changes, and test/build changes in `CHANGELOG.md`.
-- Keep entries outcome-oriented: describe only what feature was added, what problem was fixed, what UX changed, or what test/build result changed.
+- Record future version updates, bug fixes, and UX changes in `CHANGELOG.md`.
+- Keep entries outcome-oriented: describe only what feature was added, what problem was fixed, or what UX changed.
+- Do not record test results, build process notes, installer size, or checksum values in `CHANGELOG.md`; report those only in task summaries or release handoff notes.
 - Do not explain implementation mechanisms, investigation process, internal call chains, or low-level vendor details in `CHANGELOG.md`; include technical names only when needed to identify the affected feature or problem.
 - Keep entries concise. The current product version line starts at `v1.0.0`; during future development, add pending items under `[未发布]` only when a release section has not been chosen yet.
 

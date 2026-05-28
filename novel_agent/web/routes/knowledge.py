@@ -73,6 +73,20 @@ def _project_knowledge_base_dir(project_id: str) -> Path:
     return get_data_dir() / "knowledge_base" / project_id
 
 
+def _create_chroma_client(chroma_dir: Path):
+    """Create Chroma clients with the same settings as the main VectorStore."""
+    import chromadb
+    from chromadb.config import Settings
+
+    return chromadb.PersistentClient(
+        path=str(chroma_dir),
+        settings=Settings(
+            anonymized_telemetry=False,
+            allow_reset=True,
+        ),
+    )
+
+
 def _sanitize_summary_text(value: str) -> str:
     text = (value or "").strip()
     if not text:
@@ -961,8 +975,7 @@ async def get_knowledge_base_stats():
         chroma_dir = data_dir / "chroma"
         if chroma_dir.exists():
             try:
-                import chromadb
-                client = chromadb.PersistentClient(path=str(chroma_dir))
+                client = _create_chroma_client(chroma_dir)
                 collection = client.get_or_create_collection("novel_knowledge")
                 stats["vector_count"] = collection.count()
             except Exception as e:
@@ -1029,8 +1042,7 @@ async def clear_knowledge_base(request: ClearKnowledgeBaseRequest):
 
             if chroma_dir.exists():
                 try:
-                    import chromadb
-                    client = chromadb.PersistentClient(path=str(chroma_dir))
+                    client = _create_chroma_client(chroma_dir)
                     collection = client.get_or_create_collection("novel_knowledge")
 
                     for chapter_id in request.chapter_ids:
@@ -1086,8 +1098,7 @@ async def delete_knowledge_chapter(chapter_id: str):
 
         if chroma_dir.exists():
             try:
-                import chromadb
-                client = chromadb.PersistentClient(path=str(chroma_dir))
+                client = _create_chroma_client(chroma_dir)
                 collection = client.get_or_create_collection("novel_knowledge")
                 collection.delete(where={"chapter_id": chapter_id})
             except Exception as e:

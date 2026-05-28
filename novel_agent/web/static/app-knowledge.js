@@ -861,6 +861,43 @@ function buildSchemaFieldHtml(field, value, prefix) {
     `;
 }
 
+function buildKnowledgeReadValueHtml(field, value) {
+    const rendered = formatSchemaFieldValue(field, value).trim();
+    if (!rendered) return '<div class="knowledge-read-empty">暂无内容</div>';
+    const escaped = escapeHtml(rendered);
+    if (field.type === 'textarea' || field.type === 'list' || field.type === 'event_list' || field.type === 'relation_map') {
+        const lines = escaped.split(/\n+/).map(line => line.trim()).filter(Boolean);
+        if (lines.length > 1) {
+            return `<ul class="knowledge-read-list">${lines.map(line => `<li>${line}</li>`).join('')}</ul>`;
+        }
+        const sentenceParts = escaped
+            .split(/(?<=[。！？!?；;])\s*/)
+            .map(part => part.trim())
+            .filter(Boolean);
+        if (sentenceParts.length > 1) {
+            return sentenceParts.map(part => `<p>${part}</p>`).join('');
+        }
+    }
+    return `<p>${escaped}</p>`;
+}
+
+function buildKnowledgeReadSection(fields, item, prefix) {
+    return fields.map(field => {
+        const value = item ? item[field.key] : '';
+        const rendered = buildKnowledgeReadValueHtml(field, value);
+        const longClass = String(formatSchemaFieldValue(field, value) || '').length > 260 ? ' is-long' : '';
+        return `
+            <details class="knowledge-read-field${longClass}" open>
+                <summary>
+                    <span>${field.label}</span>
+                    <i class="ri-arrow-down-s-line"></i>
+                </summary>
+                <div class="knowledge-read-content">${rendered}</div>
+            </details>
+        `;
+    }).join('');
+}
+
 function collectSchemaFormValues(fields, prefix) {
     const item = {};
     fields.forEach(field => {
@@ -1475,18 +1512,27 @@ function openSettingEditor(typeId, index) {
     updateBreadcrumbs(['资料库', category.name, getKnowledgeItemName(item)]);
 
     ui.workspace.innerHTML = `
-        <div style="max-width: 800px; margin: 0 auto; padding: 24px;">
+        <div class="knowledge-detail-shell">
             <div class="app-back-row" style="justify-content: space-between; margin-bottom: 24px;">
                 <button id="back-to-list" type="button" class="app-back-button">
                     <i class="ri-arrow-left-line"></i>
                     <span>返回列表</span>
                 </button>
-                <button id="save-setting-btn" style="padding: 8px 20px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer;">
-                    <i class="${isReadOnlyOutline ? 'ri-arrow-left-line' : 'ri-save-line'}"></i> ${isReadOnlyOutline ? '返回' : '保存'}
-                </button>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button id="toggle-setting-edit-btn" style="display:${isReadOnlyOutline ? 'none' : 'inline-flex'}; padding: 8px 14px; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; cursor: pointer;">
+                        <i class="ri-edit-line"></i> 编辑
+                    </button>
+                    <button id="save-setting-btn" style="display:${isReadOnlyOutline ? 'inline-flex' : 'none'}; padding: 8px 20px; background: var(--accent-color); border: none; color: white; border-radius: 6px; cursor: pointer;">
+                        <i class="${isReadOnlyOutline ? 'ri-arrow-left-line' : 'ri-save-line'}"></i> ${isReadOnlyOutline ? '返回' : '保存'}
+                    </button>
+                </div>
             </div>
 
-            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px;">
+            <div class="knowledge-detail-card">
+                <div id="setting-read-section" class="knowledge-read-grid">
+                    ${buildKnowledgeReadSection(initialMode === 'template' ? templateFields : freeformFields, initialMode === 'template' ? item : freeformItem, 'setting-read')}
+                </div>
+                <div id="setting-edit-section" style="display:none;">
                 <div style="display:${isReadOnlyOutline ? 'none' : 'flex'}; gap:8px; margin-bottom:20px;">
                     <label style="flex:1; cursor:pointer;">
                         <input type="radio" name="setting-mode" value="freeform" ${initialMode === 'freeform' ? 'checked' : ''} style="accent-color: var(--accent-color);">
@@ -1503,11 +1549,23 @@ function openSettingEditor(typeId, index) {
                 <div id="setting-template-section">
                     ${templateFields.map(field => buildSchemaFieldHtml(field, item[field.key], 'setting-template')).join('')}
                 </div>
+                </div>
             </div>
         </div>
     `;
 
     document.getElementById('back-to-list').addEventListener('click', () => loadDatabase(typeId));
+    document.getElementById('toggle-setting-edit-btn')?.addEventListener('click', () => {
+        const readSection = document.getElementById('setting-read-section');
+        const editSection = document.getElementById('setting-edit-section');
+        const saveBtn = document.getElementById('save-setting-btn');
+        const toggleBtn = document.getElementById('toggle-setting-edit-btn');
+        const willEdit = editSection?.style.display === 'none';
+        if (readSection) readSection.style.display = willEdit ? 'none' : '';
+        if (editSection) editSection.style.display = willEdit ? '' : 'none';
+        if (saveBtn) saveBtn.style.display = willEdit ? 'inline-flex' : 'none';
+        if (toggleBtn) toggleBtn.innerHTML = willEdit ? '<i class="ri-eye-line"></i> 浏览' : '<i class="ri-edit-line"></i> 编辑';
+    });
 
     function syncModeSections() {
         const mode = document.querySelector('input[name="setting-mode"]:checked')?.value || initialMode;
@@ -1999,4 +2057,3 @@ window.getKnowledgeItemSourceMode = getKnowledgeItemSourceMode;
 window.getKnowledgeFilteredItems = getKnowledgeFilteredItems;
 
 console.log('[app-knowledge.js] 资料库模块已加载');
-

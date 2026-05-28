@@ -8,6 +8,7 @@ import uuid
 import shutil
 import logging
 import re
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,47 @@ from .utils.atomic_write import atomic_write_json
 
 logger = logging.getLogger(__name__)
 _PROJECT_STATE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class ProjectDeleteError(RuntimeError):
+    """Raised when project files cannot be deleted safely."""
+
+    def __init__(self, message: str, *, locked_path: Optional[Path] = None):
+        super().__init__(message)
+        self.locked_path = locked_path
+
+
+def _is_windows_file_lock_error(exc: BaseException) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    return winerror in {5, 32, 33}
+
+
+def _rmtree_with_retry(path: Path, *, label: str, attempts: int = 6, delay: float = 0.2) -> None:
+    """Remove a tree with short retries for Windows file-handle release latency."""
+    if not path.exists():
+        return
+
+    last_error: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if not _is_windows_file_lock_error(exc) or attempt == attempts - 1:
+                break
+            time.sleep(delay * (attempt + 1))
+        except OSError as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay * (attempt + 1))
+
+    locked_path = Path(getattr(last_error, "filename", "") or path)
+    raise ProjectDeleteError(
+        f"{label}仍被系统或运行中的知识库占用，请稍等几秒后重试；如果仍失败，请重启应用后再删除。",
+        locked_path=locked_path,
+    ) from last_error
 
 
 @dataclass
@@ -198,16 +240,15 @@ class ProjectManager:
         
         # 闁告帞濞€濞呭孩銇勯崷顓熺獥闁烩晩鍠栫紞?
         
-        proj_dir = self.projects_dir / project_id
-        if proj_dir.exists():
-            shutil.rmtree(proj_dir)
-        
-        # 闁告帞濞€濞呭酣鎯岄妷銊ф閹煎瓨鎸惧ú鎷屻亹?
-        
         kb_dir = self.data_dir.parent / "data" / "knowledge_base" / project_id
         if kb_dir.exists():
-            shutil.rmtree(kb_dir)
+            _rmtree_with_retry(kb_dir, label="知识库目录")
             logger.info(f"Deleted knowledge base data for project {project_id}")
+
+        proj_dir = self.projects_dir / project_id
+        _rmtree_with_retry(proj_dir, label="项目目录")
+        
+        # 闁告帞濞€濞呭酣鎯岄妷銊ф閹煎瓨鎸惧ú鎷屻亹?
 
         try:
             from .utils.token_stats import get_token_stats_store
@@ -262,6 +303,8 @@ class ProjectManager:
             return proj_dir / "chapters.json"
         elif normalized_data_type == "chapter_summary":
             return proj_dir / "chapter_summary.json"
+        elif normalized_data_type == "chapter_volumes":
+            return proj_dir / "chapter_volumes.json"
         elif re.fullmatch(r"custom_[A-Za-z0-9_-]{1,80}", normalized_data_type):
             return proj_dir / f"{normalized_data_type}.json"
         else:

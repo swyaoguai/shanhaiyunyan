@@ -37,9 +37,14 @@ class CharacterBuilderAgent(BaseAgent):
         )
 
     def _get_default_prompt(self) -> str:
+        from .enhanced_prompts import AGENT_COORDINATION_PROTOCOL, STRUCTURED_DATA_AGENT_PROTOCOL
+
         return (
             "你是专业小说策划中的 CharacterBuilder，专门把零散讨论整理成可用的角色卡草稿。\n"
             "你的职责不是写散文说明，而是输出严格可机读的 JSON。\n"
+            "\n"
+            f"{AGENT_COORDINATION_PROTOCOL}\n"
+            f"{STRUCTURED_DATA_AGENT_PROTOCOL}\n"
             "\n"
             "核心规则：\n"
             "1. 只能输出 JSON，不能输出 Markdown、解释、前后缀。\n"
@@ -374,8 +379,7 @@ class CharacterBuilderAgent(BaseAgent):
 
         return names[:limit]
 
-    @staticmethod
-    def _build_user_prompt(input_data: Dict[str, Any]) -> str:
+    def _build_user_prompt(self, input_data: Dict[str, Any]) -> str:
         request_mode = str(input_data.get("request_mode") or "draft").strip() or "draft"
         ai_autonomy_requested = bool(input_data.get("ai_autonomy_requested")) or request_mode == "autonomous_draft"
         autonomy_note = (
@@ -384,6 +388,33 @@ class CharacterBuilderAgent(BaseAgent):
             if ai_autonomy_requested
             else "未授权，缺少关键角色信息时应返回 missing_info。"
         )
+        locked_names = input_data.get("locked_character_names")
+        if isinstance(locked_names, list):
+            locked_character_names_text = "、".join(str(name or "").strip() for name in locked_names if str(name or "").strip()) or "无"
+        else:
+            locked_character_names_text = CharacterBuilderAgent._stringify_for_prompt(locked_names, max_chars=500) or "无"
+        custom_prompt = self._render_custom_task_prompt(
+            "build_characters",
+            request_mode=request_mode,
+            ai_autonomy_note=autonomy_note,
+            autonomous_brief=str(input_data.get("autonomous_brief") or "").strip() or "无",
+            user_request=str(input_data.get("user_request") or "").strip() or "无",
+            character_request=str(input_data.get("character_request") or "").strip() or "无",
+            character_role=str(input_data.get("character_role") or "").strip() or "未指定",
+            character_name=str(input_data.get("character_name") or "").strip() or "未识别",
+            locked_character_names=locked_character_names_text,
+            discussion_context=str(input_data.get("discussion_context") or "").strip() or "无",
+            recent_discussion=str(input_data.get("recent_discussion") or "").strip() or "无",
+            novel_type=str(input_data.get("novel_type") or "").strip() or "未指定",
+            theme=str(input_data.get("theme") or "").strip() or "未指定",
+            protagonist=str(input_data.get("protagonist") or "").strip() or "未指定",
+            plot_idea=str(input_data.get("plot_idea") or "").strip() or "未指定",
+            world_summary=str(input_data.get("world_summary") or "").strip() or "无",
+            existing_characters_summary=str(input_data.get("existing_characters_summary") or "").strip() or "无",
+        )
+        if custom_prompt:
+            return custom_prompt
+
         return (
             "请基于以下信息生成角色卡草稿：\n\n"
             f"## 当前请求模式\n{request_mode}\n\n"

@@ -40,6 +40,7 @@ DEFAULT_SHORT_STORY_TIMEOUTS: Dict[str, int] = {
     "outline": 180,
     "chapter": 300,
     "quality": 1800,  # 增加质量检查超时到30分钟
+    "quality_rewrite": 600,
     "coherence": 1800,  # 增加复审超时到30分钟
     "title": 120,
     "tags": 120,

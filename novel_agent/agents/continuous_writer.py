@@ -1738,6 +1738,21 @@ class ContinuousWriter(BaseAgent):
             if normalized:
                 last_num = max([c.get("chapter_number", 0) for c in normalized] or [0])
             self._current_chapter = last_num
+
+        if not normalized and self._current_chapter == 0:
+            self._story_beginning = ""
+            self._dead_characters = []
+            self._user_inspirations = []
+            self._corrections = []
+            self._characters = {}
+            self._plot_points = []
+            if self._session_state:
+                self._session_state.story_beginning = ""
+                self._session_state.dead_characters = []
+                self._session_state.inspirations = []
+                self._session_state.corrections = []
+                self._session_state.character_states = {}
+                self._session_state.plot_points = []
         
         deleted_chapters = deleted_chapters or []
         if deleted_chapters and self.knowledge_base:

@@ -338,44 +338,50 @@ class AgentConfigManager:
     
     # 预定义的Agent列表及其描述
     AGENT_DEFINITIONS = {
+        "Router": {
+            "display_name": "智能路由助手",
+            "description": "主 Agent，负责识别用户真实意图、清洗上下文、选择目标助手并生成可执行交接，避免把讨论请求误判为写入任务。",
+            "recommended_models": ["gpt-5.4", "gpt-4", "deepseek-chat"],
+            "default_temperature": 0.2
+        },
         "Communicator": {
-            "display_name": "沟通助手",
+            "display_name": "创作沟通助手",
             "description": "专业的需求分析专家，擅长通过结构化对话深入理解用户的创作意图、风格偏好和具体需求。能够识别隐含需求，提出针对性问题，确保收集到完整准确的创作信息。",
             "recommended_models": ["gpt-4", "gpt-3.5-turbo", "deepseek-chat"],
             "default_temperature": 0.8
         },
         "Worldbuilder": {
-            "display_name": "世界观构建师",
+            "display_name": "世界观设定师",
             "description": "资深的世界观设计专家，精通构建完整、自洽、富有深度的虚构世界。能够设计复杂的社会体系、权力结构、文化背景、历史脉络和独特的世界规则，确保世界观的逻辑性和可扩展性。",
             "recommended_models": ["gpt-4", "claude-3-opus", "claude-3-sonnet"],
             "default_temperature": 0.8
         },
         "Outliner": {
-            "display_name": "大纲规划师",
+            "display_name": "全书大纲规划师",
             "description": "经验丰富的故事架构师，擅长设计引人入胜的故事结构。能够规划完整的情节线、设置合理的冲突节奏、安排精妙的伏笔铺垫，确保故事的逻辑连贯性和戏剧张力。",
             "recommended_models": ["gpt-4-turbo", "gpt-4", "claude-3-opus"],
             "default_temperature": 0.7
         },
         "ChapterWriter": {
-            "display_name": "章节撰写师",
+            "display_name": "章节正文写手",
             "description": "专业的内容创作者，精通将大纲转化为生动的章节内容。擅长场景描写、人物刻画、对话设计和情节推进，能够保持风格一致性，创作出引人入胜的章节内容。",
             "recommended_models": ["gpt-4", "claude-3-sonnet", "claude-3-opus"],
             "default_temperature": 0.8
         },
         "Polisher": {
-            "display_name": "文字润色师",
+            "display_name": "正文润色师",
             "description": "资深的文字编辑专家，擅长优化文字表达、提升语言质量。能够识别并修正语法错误、改善句式结构、增强文字感染力，同时保持原有风格和意境。",
             "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-sonnet"],
             "default_temperature": 0.6
         },
         "Evaluator": {
-            "display_name": "质量评估师",
+            "display_name": "质检评估师",
             "description": "严谨的内容审核专家，具备敏锐的逻辑分析能力。能够系统性地检测内容中的逻辑漏洞、情节矛盾、人物行为不一致等问题，并提供详细的改进建议。",
             "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-opus"],
             "default_temperature": 0.3
         },
         "ContinuousWriter": {
-            "display_name": "连续创作师",
+            "display_name": "无限续写正文写手",
             "description": "富有创造力的长篇创作专家，擅长基于已有内容进行连续性创作。能够保持故事连贯性、维持人物性格一致性、推进情节发展，创作出自然流畅的续写内容。",
             "recommended_models": ["gpt-4", "claude-3-opus", "gemini-pro"],
             "default_temperature": 0.8
@@ -399,13 +405,13 @@ class AgentConfigManager:
             "default_temperature": 0.5
         },
         "ChapterSettingBuilder": {
-            "display_name": "章纲构建师",
+            "display_name": "章纲设定师",
             "description": "负责生成章节写作设定卡，包括本章目标、关键事件与结尾钩子。",
             "recommended_models": ["gpt-5.4", "gpt-4", "claude-3-opus"],
             "default_temperature": 0.5
         },
         "ContentExpansion": {
-            "display_name": "内容扩展师",
+            "display_name": "正文扩写师",
             "description": "高级辅助 Agent，用于在不破坏原意的前提下扩写内容与补足细节。",
             "recommended_models": ["gpt-4", "gpt-4-turbo", "claude-3-sonnet"],
             "default_temperature": 0.7
@@ -419,12 +425,12 @@ class AgentConfigManager:
     }
 
     USER_VISIBLE_AGENT_NAMES = {
+        "Router",
         "Communicator",
         "Worldbuilder",
         "Outliner",
         "ChapterWriter",
         "Polisher",
-        "Evaluator",
         "ContinuousWriter",
         "CharacterBuilder",
         "EventlineBuilder",
@@ -433,6 +439,7 @@ class AgentConfigManager:
     }
 
     ADVANCED_AGENT_NAMES = {
+        "Evaluator",
         "ContentExpansion",
         "SummaryOrchestrator",
     }

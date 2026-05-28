@@ -38,8 +38,19 @@ async function callShortStoryApi(url, data, successMessage) {
         if (
             url.includes('/api/short-story/chapter/generate')
             || url.includes('/api/short-story/chapter/save')
+            || url.includes('/api/short-story/quality-check/rewrite-issue-chapters')
         ) {
             resetShortStoryReviewArtifacts();
+        }
+        if (url.includes('/api/short-story/workflow/rollback')) {
+            const resetRollbackArtifacts = typeof window.resetShortStoryArtifactsForRollback === 'function'
+                ? window.resetShortStoryArtifactsForRollback
+                : function () {};
+            resetRollbackArtifacts(result?.data?.target_step || data?.target_step || 'previous');
+            shortStoryState.highlightSection = result?.data?.target_step || '';
+            if (shortStoryState.highlightSection) {
+                shortStoryState.collapsedSections[shortStoryState.highlightSection] = false;
+            }
         }
         if (url.includes('/api/short-story/chapter/generate-all')) {
             if (result?.data?.partial) {
@@ -55,6 +66,7 @@ async function callShortStoryApi(url, data, successMessage) {
             url.includes('/api/short-story/chapter/generate')
             || url.includes('/api/short-story/chapter/save')
             || url.includes('/api/short-story/quality-check/apply-simple-fixes')
+            || url.includes('/api/short-story/quality-check/rewrite-issue-chapters')
             || url.includes('/api/short-story/quality-check/commit')
             || url.includes('/api/short-story/coherence-review/commit')
         ) {
@@ -94,6 +106,73 @@ async function generateShortStoryReviewDraft(url, workflow, successMessage) {
         if (successMessage) {
             showToast(successMessage);
         }
+        return result;
+    } catch (e) {
+        showToast(e.message || '短篇接口调用失败', 'error');
+        return null;
+    }
+}
+
+function clearShortStoryRollbackArtifactsFallback(targetStep) {
+    const stepOrder = ['fusion', 'synopsis', 'outline', 'chapter', 'quality', 'coherence', 'title', 'assemble'];
+    const index = stepOrder.indexOf(targetStep);
+    if (index < 0) return;
+
+    if (index <= stepOrder.indexOf('fusion')) {
+        shortStoryState.synopsisRawOutput = '';
+        shortStoryState.synopsisFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('synopsis')) {
+        shortStoryState.outlineRawOutput = '';
+        shortStoryState.outlineRevisionFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('outline')) {
+        shortStoryState.partialChapterGeneration = null;
+    }
+    if (index <= stepOrder.indexOf('chapter')) {
+        shortStoryState.qualityReportDraft = '';
+        shortStoryState.qualityPassedDraft = false;
+        shortStoryState.qualitySimpleFixes = [];
+        shortStoryState.qualityRewriteTargets = [];
+        shortStoryState.qualitySuggestedChapters = [];
+    }
+    if (index <= stepOrder.indexOf('quality')) {
+        shortStoryState.coherenceReportDraft = '';
+        shortStoryState.coherencePassedDraft = false;
+        shortStoryState.coherenceSuggestedChapters = [];
+    }
+    if (index <= stepOrder.indexOf('coherence')) {
+        shortStoryState.titleRawOutput = '';
+        shortStoryState.titleFeedback = '';
+    }
+    if (index <= stepOrder.indexOf('title')) {
+        shortStoryState.activeView = 'panel';
+    }
+}
+
+async function rollbackShortStoryWorkflow(targetStep, feedback = '') {
+    try {
+        const requestApi = typeof window.apiCall === 'function' ? window.apiCall : apiCall;
+        const persistNow = typeof window.persistShortStoryProjectStateNow === 'function'
+            ? window.persistShortStoryProjectStateNow
+            : persistShortStoryProjectStateNow;
+        const result = await requestApi('/api/short-story/workflow/rollback', 'POST', {
+            workflow: getCurrentShortStoryWorkflow(),
+            target_step: targetStep,
+            feedback
+        });
+        if (result?.data?.workflow) {
+            const repairWorkflow = typeof window.repairShortStoryWorkflowBlueprints === 'function'
+                ? window.repairShortStoryWorkflowBlueprints
+                : (workflow) => workflow;
+            shortStoryState.workflow = repairWorkflow(result.data.workflow);
+        }
+        const resetRollbackArtifacts = typeof window.resetShortStoryArtifactsForRollback === 'function'
+            ? window.resetShortStoryArtifactsForRollback
+            : clearShortStoryRollbackArtifactsFallback;
+        resetRollbackArtifacts(result?.data?.target_step || targetStep);
+        saveShortStoryData();
+        await persistNow();
         return result;
     } catch (e) {
         showToast(e.message || '短篇接口调用失败', 'error');
@@ -160,4 +239,6 @@ async function exportShortStoryFile(format) {
 window.loadGlobalApiConfigForShortStory = loadGlobalApiConfigForShortStory;
 window.callShortStoryApi = callShortStoryApi;
 window.generateShortStoryReviewDraft = generateShortStoryReviewDraft;
+window.clearShortStoryRollbackArtifactsFallback = clearShortStoryRollbackArtifactsFallback;
+window.rollbackShortStoryWorkflow = rollbackShortStoryWorkflow;
 window.exportShortStoryFile = exportShortStoryFile;

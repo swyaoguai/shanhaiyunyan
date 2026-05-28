@@ -48,9 +48,13 @@ class _ProjectDataBuilderAgent(BaseAgent):
         )
 
     def _get_default_prompt(self) -> str:
+        from .enhanced_prompts import AGENT_COORDINATION_PROTOCOL, STRUCTURED_DATA_AGENT_PROTOCOL
+
         return (
             f"你是专业的{self.output_label}构建器。\n"
             "你只负责把输入的创作信息整理成结构化 JSON。\n"
+            f"{AGENT_COORDINATION_PROTOCOL}\n"
+            f"{STRUCTURED_DATA_AGENT_PROTOCOL}\n"
             "严禁输出 Markdown、解释、前后缀说明。\n"
             f"输出顶层必须是对象，且包含 `{self.output_key}` 数组字段。\n"
             "如果信息不足，也要基于现有大纲给出最小可用结构，而不是返回空数组。\n"
@@ -72,6 +76,19 @@ class _ProjectDataBuilderAgent(BaseAgent):
         outline_rows = input_data.get("outline_rows")
         outline_overview_rows = input_data.get("outline_overview_rows")
         eventlines = input_data.get("eventlines")
+        custom_prompt = self._render_custom_task_prompt(
+            f"build_{self.output_key}",
+            user_request=str(input_data.get("user_request") or "").strip() or "无",
+            recent_discussion=str(input_data.get("recent_discussion") or "").strip() or "无",
+            world_summary=str(input_data.get("world_summary") or "").strip() or "无",
+            characters_json=json.dumps(input_data.get("characters"), ensure_ascii=False, indent=2) if isinstance(input_data.get("characters"), list) else str(input_data.get("characters") or "无"),
+            outline_overview_json=json.dumps(outline_overview_rows, ensure_ascii=False, indent=2) if isinstance(outline_overview_rows, list) else "[]",
+            outline_rows_json=json.dumps(outline_rows, ensure_ascii=False, indent=2) if isinstance(outline_rows, list) else "[]",
+            eventlines_json=json.dumps(eventlines, ensure_ascii=False, indent=2) if isinstance(eventlines, list) else "[]",
+        )
+        if custom_prompt:
+            return custom_prompt
+
         return (
             f"## 当前任务\n生成{self.output_label}\n\n"
             f"## 用户请求\n{str(input_data.get('user_request') or '').strip() or '无'}\n\n"

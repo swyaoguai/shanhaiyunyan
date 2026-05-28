@@ -63,6 +63,32 @@ PERSISTENCE_MARKERS = (
     "写入资料库",
     "同步到资料库",
 )
+GENERATION_COMMAND_MARKERS = (
+    "生成",
+    "创建",
+    "新建",
+    "写",
+    "补全",
+    "完善",
+    "规划",
+    "重新生成",
+    "重新规划",
+)
+GENERATION_TARGET_MARKERS = (
+    "世界观",
+    "角色档案",
+    "人物档案",
+    "角色卡",
+    "人设",
+    "事件线",
+    "大纲",
+    "细纲",
+    "章纲",
+    "章节设定",
+    "章节规划",
+    "正文",
+    "章节正文",
+)
 
 CREATIVE_OBJECTS: Dict[str, Dict[str, Any]] = {
     "worldbuilding": {
@@ -161,6 +187,22 @@ def _is_explicit_persistence_request(text: str, mode: str) -> bool:
     return _normalize_mode(mode) == "execute" or _contains_any(text, PERSISTENCE_MARKERS)
 
 
+def _is_generation_command(text: str) -> bool:
+    """A command to generate artifacts is not itself project-data content."""
+    if not text:
+        return False
+    if not any(marker in text for marker in GENERATION_TARGET_MARKERS):
+        return False
+    compact = re.sub(r"\s+", "", text)
+    for action in GENERATION_COMMAND_MARKERS:
+        for target in GENERATION_TARGET_MARKERS:
+            if re.search(rf"{re.escape(action)}.{{0,16}}{re.escape(target)}", compact):
+                return True
+            if re.search(rf"{re.escape(target)}.{{0,16}}{re.escape(action)}", compact):
+                return True
+    return False
+
+
 def _detect_targets(message: str) -> List[str]:
     targets: List[str] = []
     for key, config in CREATIVE_OBJECTS.items():
@@ -192,6 +234,7 @@ def detect_creative_decision(message: str, mode: str = "auto") -> Optional[Creat
     has_modification = _contains_any(text, MODIFICATION_MARKERS)
     targets = _detect_targets(text)
     has_direction = any(token in text for token in ("方向", "基调", "风格", "主题", "路线", "流程"))
+    is_generation_command = _is_generation_command(text)
     if not has_modification and not targets and not has_direction:
         return None
 
@@ -200,6 +243,7 @@ def detect_creative_decision(message: str, mode: str = "auto") -> Optional[Creat
         and targets
         and effective_mode != "plan"
         and _is_explicit_persistence_request(text, effective_mode)
+        and not is_generation_command
     )
     decision_type = "content_revision" if should_update_content else "direction_update"
     if not targets and has_direction:
